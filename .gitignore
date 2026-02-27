@@ -1,0 +1,20 @@
+# macOS / editors
+.DS_Store
+.vscode/
+
+# Local agent context overrides
+AGENTS.local.md
+**/AGENTS.local.md
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+DerivedData/
+**/xcuserdata/
+*.xcuserstate
+
+# DocC build artifacts
+.docc-build/
