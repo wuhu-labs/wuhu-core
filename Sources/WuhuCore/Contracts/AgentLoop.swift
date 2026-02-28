@@ -183,9 +183,7 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       // Compaction
-      if let usage = message.usage,
-         behavior.shouldCompact(state: state, usage: usage)
-      {
+      if behavior.shouldCompact(state: state) {
         try await serialized { [behavior] state in
           try await behavior.performCompaction(state: state)
         }

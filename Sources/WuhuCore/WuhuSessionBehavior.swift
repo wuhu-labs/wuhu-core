@@ -363,7 +363,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     ]
   }
 
-  func shouldCompact(state: State, usage _: Usage) -> Bool {
+  func shouldCompact(state: State) -> Bool {
     let model = modelFromSettings(state.settings)
     let settings = WuhuCompactionSettings.load(model: model)
     let messages = WuhuPromptPreparation.extractContextMessages(from: state.entries)

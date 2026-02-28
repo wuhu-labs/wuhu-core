@@ -148,7 +148,7 @@ public protocol AgentBehavior: Sendable {
   // MARK: Compaction
 
   /// Whether compaction should run after this inference.
-  func shouldCompact(state: State, usage: Usage) -> Bool
+  func shouldCompact(state: State) -> Bool
 
   /// Perform compaction and return actions.
   func performCompaction(state: State) async throws -> [CommittedAction]
