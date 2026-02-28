@@ -126,10 +126,6 @@ public actor AgentLoop<B: AgentBehavior> {
     return try await withCheckedThrowingContinuation { cont in
       _tail = Task {
         _ = await previous?.result
-        guard !Task.isCancelled else {
-          cont.resume(throwing: CancellationError())
-          return
-        }
         do {
           let actions = try await work(self.state)
           for action in actions {
@@ -150,7 +146,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private func runUntilIdle() async throws {
     var hasToolResults = try await recoverStaleToolCalls()
 
-    while true {
+    while !Task.isCancelled {
       // Interrupt checkpoint
       let interruptActions = try await serialized { [behavior] state in
         try await behavior.drainInterruptItems(state: state)

@@ -1181,10 +1181,19 @@ private func runBash(command: String, cwd: String, timeoutSeconds: Double?) asyn
     // blocking call that can hang when Foundation's dispatch source misses
     // the process exit notification.
     if terminated || timedOut {
-      // Process was terminated/timed-out; give it up to 10s to actually exit.
-      let waitDeadline = Date().addingTimeInterval(10)
-      while process.isRunning, Date() < waitDeadline {
+      // Give the process up to 3s to exit after SIGTERM.
+      let sigtermDeadline = Date().addingTimeInterval(3)
+      while process.isRunning, Date() < sigtermDeadline {
         try? await Task.sleep(nanoseconds: 100_000_000)
+      }
+
+      // Escalate to SIGKILL if the process is still alive.
+      if process.isRunning {
+        kill(pid, SIGKILL)
+        let sigkillDeadline = Date().addingTimeInterval(2)
+        while process.isRunning, Date() < sigkillDeadline {
+          try? await Task.sleep(nanoseconds: 100_000_000)
+        }
       }
     }
 
