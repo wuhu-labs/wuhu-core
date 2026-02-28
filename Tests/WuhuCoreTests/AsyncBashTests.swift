@@ -36,6 +36,7 @@ struct AsyncBashTests {
 
     let service = WuhuService(
       store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       asyncBashRegistry: registry,
       baseStreamFn: { model, _, _ in
         let turn = await turns.next()

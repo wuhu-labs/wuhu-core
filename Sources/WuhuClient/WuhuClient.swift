@@ -169,6 +169,39 @@ public struct WuhuClient: Sendable {
 
   public func enqueue(
     sessionID: String,
+    content: MessageContent,
+    user: String? = nil,
+    lane: EnqueueLane = .followUp,
+  ) async throws -> String {
+    let url = baseURL
+      .appending(path: "v1")
+      .appending(path: "sessions")
+      .appending(path: sessionID)
+      .appending(path: "enqueue")
+
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "lane", value: lane.rawValue)]
+
+    let author: Author = {
+      let trimmed = (user ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      if trimmed.isEmpty { return .unknown }
+      return .participant(.init(rawValue: trimmed), kind: .human)
+    }()
+
+    let message = QueuedUserMessage(author: author, content: content)
+
+    var req = HTTPRequest(url: components?.url ?? url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    req.body = try WuhuJSON.encoder.encode(message)
+
+    let (data, _) = try await http.data(for: req)
+    let qid = try WuhuJSON.decoder.decode(QueueItemID.self, from: data)
+    return qid.rawValue
+  }
+
+  public func enqueue(
+    sessionID: String,
     input: String,
     user: String? = nil,
     lane: EnqueueLane = .followUp,
@@ -297,5 +330,21 @@ public struct WuhuClient: Sendable {
 
     let (data, _) = try await http.data(for: req)
     return try WuhuJSON.decoder.decode(WuhuStopSessionResponse.self, from: data)
+  }
+
+  /// Upload binary data as a blob and return the blob URI.
+  public func uploadBlob(sessionID: String, data: Data, mimeType: String) async throws -> String {
+    let url = baseURL
+      .appending(path: "v1")
+      .appending(path: "sessions")
+      .appending(path: sessionID)
+      .appending(path: "blobs")
+    var req = HTTPRequest(url: url, method: "POST")
+    req.setHeader(mimeType, for: "Content-Type")
+    req.body = data
+
+    let (responseData, _) = try await http.data(for: req)
+    struct BlobResponse: Decodable { let blobURI: String }
+    return try WuhuJSON.decoder.decode(BlobResponse.self, from: responseData).blobURI
   }
 }

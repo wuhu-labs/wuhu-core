@@ -38,7 +38,8 @@ struct ContractSessionCoreTests {
     let config = WuhuSessionRuntimeConfig()
     await config.setStreamFn(streamFn)
     await config.setTools(tools)
-    return (WuhuSessionBehavior(sessionID: .init(rawValue: sessionID), store: store, runtimeConfig: config), config)
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    return (WuhuSessionBehavior(sessionID: .init(rawValue: sessionID), store: store, runtimeConfig: config, blobStore: blobStore), config)
   }
 
   private func applyAndAssertInvariant(

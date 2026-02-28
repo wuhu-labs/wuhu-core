@@ -30,6 +30,7 @@ actor WuhuSessionRuntime {
     store: SQLiteSessionStore,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
+    blobStore: WuhuBlobStore,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
   ) {
     self.sessionID = sessionID
@@ -38,7 +39,7 @@ actor WuhuSessionRuntime {
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
     runtimeConfig = WuhuSessionRuntimeConfig()
-    behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig)
+    behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore)
     loop = AgentLoop(behavior: behavior)
   }
 

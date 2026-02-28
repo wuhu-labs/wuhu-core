@@ -5,7 +5,8 @@ import WuhuCore
 struct EnvironmentPersistenceTests {
   @Test func createSessionPersistsFolderTemplateMetadata() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let service = WuhuService(store: store)
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
 
     let env = WuhuEnvironment(
       name: "template-env",

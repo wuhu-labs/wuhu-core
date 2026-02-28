@@ -30,13 +30,14 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", from: "0.1.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", from: "0.2.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", from: "0.1.0"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     .package(url: "https://github.com/swiftlang/swift-testing.git", revision: "48a471ab313e858258ab0b9b0bf2cea55a50cefb"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     grdbDependency,
   ],
   targets: [
@@ -71,6 +72,7 @@ let package = Package(
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "GRDB", package: "GRDB.swift"),
+        .product(name: "Crypto", package: "swift-crypto"),
       ],
       swiftSettings: strictConcurrency,
     ),
