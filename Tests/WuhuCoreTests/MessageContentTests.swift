@@ -44,13 +44,35 @@ struct MessageContentTests {
   }
 
   @Test func backwardCompatDecodeFromOldFormat() throws {
-    // Old format: synthesized Codable produced {"text":{"_0":"Hello"}} for .text("Hello")
-    // Actually, synthesized enum Codable is {"text":{"_0":"Hello"}} — but our implementation
-    // tries to decode via TextWrapper which expects {"text":"..."}.
+    // Old format without type tag: {"text":"Hello from legacy"}
     let oldJSON = #"{"text":"Hello from legacy"}"#
     let data = Data(oldJSON.utf8)
     let decoded = try JSONDecoder().decode(MessageContent.self, from: data)
     #expect(decoded == .text("Hello from legacy"))
+  }
+
+  @Test func backwardCompatDecodeFromSynthesizedCodable() throws {
+    // Pre-0.4.0 synthesized Codable produced {"text":{"_0":"can you hear me"}} for .text("can you hear me")
+    let oldJSON = #"{"text":{"_0":"can you hear me"}}"#
+    let data = Data(oldJSON.utf8)
+    let decoded = try JSONDecoder().decode(MessageContent.self, from: data)
+    #expect(decoded == .text("can you hear me"))
+  }
+
+  @Test func backwardCompatDecodeFromNestedJournalEntry() throws {
+    // Real-world journal payload from pre-0.4.0 DB
+    let oldJSON = """
+    {"enqueued":{"item":{"enqueuedAt":1772290896.6157079,"id":"eb7200d9-d465-4ba7-b78c-6c65777516a3","message":{"author":{"participant":{"_0":"minsheng","kind":"human"}},"content":{"text":{"_0":"can you hear me"}}}},"lane":"followUp"}}
+    """
+    let data = Data(oldJSON.utf8)
+    // This should not throw — the MessageContent inside should decode via backward-compat path
+    let entry = try JSONDecoder().decode(UserQueueJournalEntry.self, from: data)
+    if case let .enqueued(lane, item) = entry {
+      #expect(lane == .followUp)
+      #expect(item.message.content == .text("can you hear me"))
+    } else {
+      Issue.record("Expected .enqueued, got \(entry)")
+    }
   }
 
   @Test func messageContentPartTextRoundTrip() throws {
