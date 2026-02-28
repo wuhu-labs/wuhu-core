@@ -240,4 +240,110 @@ struct ContractSessionCoreTests {
       return false
     })
   }
+
+  // MARK: - Rich content materialization
+
+  @Test func drainTurnBoundary_materializesRichContentWithImages() async throws {
+    let store = try makeStore()
+    let session = try await makeSession(store: store)
+    let (behavior, _) = await makeBehavior(sessionID: session.id, store: store)
+
+    var state = try await behavior.loadState()
+
+    // Enqueue a follow-up message with rich content (text + image)
+    let richContent = MessageContent.richContent([
+      .text("Who is this?"),
+      .image(blobURI: "blob://\(session.id)/photo.jpg", mimeType: "image/jpeg"),
+    ])
+    let message = QueuedUserMessage(author: Author.unknown, content: richContent)
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.handle(
+        WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-rich-1"), message: message, lane: .followUp),
+        state: state,
+      )
+    }
+
+    // Materialize at turn boundary
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.drainTurnItems(state: state)
+    }
+
+    // Verify the materialized entry preserves both text and image
+    let userEntry = state.entries.first { entry in
+      guard case let .message(m) = entry.payload else { return false }
+      guard case .user = m else { return false }
+      return true
+    }
+    let userMsg = try #require(userEntry.flatMap { entry -> WuhuUserMessage? in
+      guard case let .message(.user(u)) = entry.payload else { return nil }
+      return u
+    })
+    #expect(userMsg.content.count == 2)
+    #expect(userMsg.content[0] == .text(text: "Who is this?", signature: nil))
+    #expect(userMsg.content[1] == .image(blobURI: "blob://\(session.id)/photo.jpg", mimeType: "image/jpeg"))
+  }
+
+  @Test func drainTurnBoundary_materializesImageOnlyMessage() async throws {
+    let store = try makeStore()
+    let session = try await makeSession(store: store)
+    let (behavior, _) = await makeBehavior(sessionID: session.id, store: store)
+
+    var state = try await behavior.loadState()
+
+    // Enqueue a follow-up with image only (no text), like the original bug report
+    let richContent = MessageContent.richContent([
+      .image(blobURI: "blob://\(session.id)/photo.png", mimeType: "image/png"),
+    ])
+    let message = QueuedUserMessage(author: Author.unknown, content: richContent)
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.handle(
+        WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-img-only"), message: message, lane: .followUp),
+        state: state,
+      )
+    }
+
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.drainTurnItems(state: state)
+    }
+
+    let userMsg = try #require(state.entries.compactMap { entry -> WuhuUserMessage? in
+      guard case let .message(.user(u)) = entry.payload else { return nil }
+      return u
+    }.last)
+    #expect(userMsg.content.count == 1)
+    #expect(userMsg.content[0] == .image(blobURI: "blob://\(session.id)/photo.png", mimeType: "image/png"))
+  }
+
+  @Test func drainInterruptCheckpoint_materializesRichContentSteerMessage() async throws {
+    let store = try makeStore()
+    let session = try await makeSession(store: store)
+    let (behavior, _) = await makeBehavior(sessionID: session.id, store: store)
+
+    var state = try await behavior.loadState()
+
+    // Enqueue a steer message with rich content
+    let richContent = MessageContent.richContent([
+      .text("Look at this"),
+      .image(blobURI: "blob://\(session.id)/steer.jpg", mimeType: "image/jpeg"),
+    ])
+    let message = QueuedUserMessage(author: Author.unknown, content: richContent)
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.handle(
+        WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-steer-rich"), message: message, lane: .steer),
+        state: state,
+      )
+    }
+
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      try await behavior.drainInterruptItems(state: state)
+    }
+
+    let userMsg = try #require(state.entries.compactMap { entry -> WuhuUserMessage? in
+      guard case let .message(.user(u)) = entry.payload else { return nil }
+      return u
+    }.last)
+    #expect(userMsg.content.count == 2)
+    #expect(userMsg.content[0] == .text(text: "Look at this", signature: nil))
+    #expect(userMsg.content[1] == .image(blobURI: "blob://\(session.id)/steer.jpg", mimeType: "image/jpeg"))
+  }
 }
