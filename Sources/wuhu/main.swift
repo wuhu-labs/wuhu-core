@@ -4,6 +4,8 @@ import PiAI
 import WuhuAPI
 import WuhuClient
 import WuhuCLIKit
+import WuhuCore
+import WuhuCoreClient
 import WuhuRunner
 import WuhuServer
 import Yams
@@ -130,6 +132,9 @@ struct WuhuCLI: AsyncParsableCommand {
       @Argument(parsing: .remaining, help: "Prompt text.")
       var prompt: [String] = []
 
+      @Option(name: .long, help: "Path to an image file to attach. Can be specified multiple times.")
+      var image: [String] = []
+
       @Flag(help: "Send the prompt and return immediately (do not wait for the agent to finish).")
       var detach: Bool = false
 
@@ -142,7 +147,53 @@ struct WuhuCLI: AsyncParsableCommand {
         let username = resolveWuhuUsername(shared.username)
 
         let text = prompt.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw ValidationError("Expected a prompt.") }
+        let hasImages = !image.isEmpty
+
+        guard !text.isEmpty || hasImages else { throw ValidationError("Expected a prompt.") }
+
+        // Validate and read image files
+        var imageAttachments: [(data: Data, mimeType: String)] = []
+        for path in image {
+          let fileURL = URL(fileURLWithPath: path)
+          let ext = fileURL.pathExtension.lowercased()
+
+          guard WuhuBlobStore.isImageExtension(ext) else {
+            throw ValidationError("Unsupported image format: \(ext). Supported: png, jpg, jpeg, gif, webp")
+          }
+
+          guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw ValidationError("Image file not found: \(path)")
+          }
+
+          let data = try Data(contentsOf: fileURL)
+          guard data.count <= WuhuBlobStore.maxImageFileSize else {
+            throw ValidationError("Image file too large: \(path). Max: 10MB")
+          }
+
+          guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
+            throw ValidationError("Unsupported image format: \(ext). Supported: png, jpg, jpeg, gif, webp")
+          }
+
+          imageAttachments.append((data: data, mimeType: mimeType))
+        }
+
+        // Build message content
+        let content: MessageContent
+        if hasImages {
+          var imageParts: [MessageContentPart] = []
+          for attachment in imageAttachments {
+            let blobURI = try await client.uploadBlob(
+              sessionID: sessionId,
+              data: attachment.data,
+              mimeType: attachment.mimeType,
+            )
+            imageParts.append(.image(blobURI: blobURI, mimeType: attachment.mimeType))
+          }
+          let promptText = text.isEmpty ? "(see attached image)" : text
+          content = .richContent([.text(promptText)] + imageParts)
+        } else {
+          content = .text(text)
+        }
 
         let terminal = TerminalCapabilities()
         var printer = SessionStreamPrinter(
@@ -150,12 +201,23 @@ struct WuhuCLI: AsyncParsableCommand {
         )
 
         if detach {
-          let qid = try await client.enqueue(sessionID: sessionId, input: text, user: username, lane: .followUp)
+          let qid = try await client.enqueue(sessionID: sessionId, content: content, user: username, lane: .followUp)
           FileHandle.standardOutput.write(Data("enqueued  id=\(qid)\n".utf8))
           return
         }
 
-        let stream = try await client.promptStream(sessionID: sessionId, input: text, user: username)
+        // Replicate what promptStream does: get baseline, enqueue with content, then follow
+        let baseline = try await client.getSession(id: sessionId)
+        let sinceCursor = baseline.transcript.last?.id
+        _ = try await client.enqueue(sessionID: sessionId, content: content, user: username, lane: .followUp)
+        let stream = try await client.followSessionStream(
+          sessionID: sessionId,
+          sinceCursor: sinceCursor,
+          sinceTime: nil,
+          stopAfterIdle: true,
+          timeoutSeconds: nil,
+        )
+
         for try await event in stream {
           printer.handle(event)
         }
