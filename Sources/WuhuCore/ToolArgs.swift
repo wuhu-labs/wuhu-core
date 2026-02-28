@@ -117,6 +117,38 @@ struct ToolArgs {
     ))
   }
 
+  func requireStringArray(_ key: String) throws -> [String] {
+    guard let value = object[key] else {
+      throw ToolArgumentParseError(message: "\(toolName) tool missing required key \"\(key)\".")
+    }
+    if value is NSNull {
+      throw ToolArgumentParseError(message: "\(toolName) tool missing required key \"\(key)\".")
+    }
+    guard let arr = value as? [Any] else {
+      throw ToolArgumentParseError(message: ToolArgs.typeMismatchMessage(
+        toolName: toolName,
+        expected: "array",
+        keyPath: key,
+        received: value,
+      ))
+    }
+
+    var out: [String] = []
+    out.reserveCapacity(arr.count)
+    for (idx, element) in arr.enumerated() {
+      guard let s = element as? String else {
+        throw ToolArgumentParseError(message: ToolArgs.typeMismatchMessage(
+          toolName: toolName,
+          expected: "string",
+          keyPath: "\(key)[\(idx)]",
+          received: element,
+        ))
+      }
+      out.append(s)
+    }
+    return out
+  }
+
   func optionalStringArray(_ key: String) throws -> [String]? {
     guard let value = object[key] else { return nil }
     if value is NSNull { return nil }
