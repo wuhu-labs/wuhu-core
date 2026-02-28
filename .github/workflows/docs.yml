@@ -37,7 +37,7 @@ jobs:
             
             xcrun docc convert \
               --additional-symbol-graph-dir .build/target-symbols \
-              --output-path .build/docs/$target \
+              --output-dir .build/docs/$target \
               --hosting-base-path docs/wuhu-core/$target \
               --fallback-display-name $target \
               --fallback-bundle-identifier ai.wuhu.$target \
