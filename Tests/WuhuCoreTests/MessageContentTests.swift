@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WuhuAPI
 import WuhuCoreClient
 
 struct MessageContentTests {
@@ -75,5 +76,58 @@ struct MessageContentTests {
     let data = try JSONEncoder().encode(content)
     let decoded = try JSONDecoder().decode(MessageContent.self, from: data)
     #expect(decoded == content)
+  }
+
+  // MARK: - toContentBlocks
+
+  @Test func toContentBlocks_textProducesSingleTextBlock() {
+    let content = MessageContent.text("hello world")
+    let blocks = content.toContentBlocks()
+    #expect(blocks == [.text(text: "hello world", signature: nil)])
+  }
+
+  @Test func toContentBlocks_emptyTextProducesSingleEmptyBlock() {
+    let content = MessageContent.text("")
+    let blocks = content.toContentBlocks()
+    #expect(blocks == [.text(text: "", signature: nil)])
+  }
+
+  @Test func toContentBlocks_richContentWithTextOnly() {
+    let content = MessageContent.richContent([
+      .text("first"),
+      .text("second"),
+    ])
+    let blocks = content.toContentBlocks()
+    #expect(blocks == [
+      .text(text: "first", signature: nil),
+      .text(text: "second", signature: nil),
+    ])
+  }
+
+  @Test func toContentBlocks_richContentWithImageOnly() {
+    let content = MessageContent.richContent([
+      .image(blobURI: "blob://sess/img.png", mimeType: "image/png"),
+    ])
+    let blocks = content.toContentBlocks()
+    #expect(blocks == [
+      .image(blobURI: "blob://sess/img.png", mimeType: "image/png"),
+    ])
+  }
+
+  @Test func toContentBlocks_richContentWithMixedParts() {
+    let content = MessageContent.richContent([
+      .text("Who is this?"),
+      .image(blobURI: "blob://sess/photo.jpg", mimeType: "image/jpeg"),
+    ])
+    let blocks = content.toContentBlocks()
+    #expect(blocks.count == 2)
+    #expect(blocks[0] == .text(text: "Who is this?", signature: nil))
+    #expect(blocks[1] == .image(blobURI: "blob://sess/photo.jpg", mimeType: "image/jpeg"))
+  }
+
+  @Test func toContentBlocks_richContentEmptyParts() {
+    let content = MessageContent.richContent([])
+    let blocks = content.toContentBlocks()
+    #expect(blocks.isEmpty)
   }
 }
