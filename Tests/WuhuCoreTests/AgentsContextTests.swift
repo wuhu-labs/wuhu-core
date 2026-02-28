@@ -47,6 +47,7 @@ struct AgentsContextTests {
 
     let service = WuhuService(
       store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       baseStreamFn: { model, ctx, _ in
         await capture.set(ctx.systemPrompt)
         return AsyncThrowingStream { continuation in
@@ -137,6 +138,7 @@ struct AgentsContextTests {
 
     let service = WuhuService(
       store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       baseStreamFn: { model, ctx, _ in
         await capture.add(ctx.systemPrompt)
         return AsyncThrowingStream { continuation in

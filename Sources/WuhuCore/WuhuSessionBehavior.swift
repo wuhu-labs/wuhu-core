@@ -65,6 +65,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   let sessionID: SessionID
   let store: SQLiteSessionStore
   let runtimeConfig: WuhuSessionRuntimeConfig
+  let blobStore: WuhuBlobStore
 
   func loadState() async throws -> State {
     let parts = try await store.loadLoopStateParts(sessionID: sessionID)
@@ -199,7 +200,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     let header = (try? WuhuPromptPreparation.extractHeader(from: state.entries, sessionID: sessionID.rawValue))
     let systemPrompt = header?.systemPrompt ?? ""
     let messages = WuhuPromptPreparation.extractContextMessages(from: state.entries)
-    return Context(systemPrompt: systemPrompt, messages: messages, tools: [])
+    let hydrated = hydrateImageBlobs(in: messages)
+    return Context(systemPrompt: systemPrompt, messages: hydrated, tools: [])
   }
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
@@ -294,18 +296,31 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func toolDidExecute(_ call: ToolCall, result: ToolResult, state _: State) async throws -> [CommittedAction] {
     let now = Date()
-    let toolResult: Message = .toolResult(.init(
+
+    // Convert image content blocks: store base64 data as blobs, replace with blob URIs.
+    let persistedContent = try result.content.map { block -> WuhuContentBlock in
+      if case let .image(img) = block, !img.data.hasPrefix("blob://") {
+        guard let rawData = Data(base64Encoded: img.data) else {
+          return WuhuContentBlock.fromPi(block)
+        }
+        let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
+        return .image(blobURI: uri, mimeType: img.mimeType)
+      }
+      return WuhuContentBlock.fromPi(block)
+    }
+
+    let toolResultMessage = WuhuToolResultMessage(
       toolCallId: call.id,
       toolName: call.name,
-      content: result.content,
+      content: persistedContent,
       details: result.details,
       isError: false,
       timestamp: now,
-    ))
+    )
 
     let (session, entry) = try await store.appendEntryWithSession(
       sessionID: sessionID,
-      payload: .message(.fromPi(toolResult)),
+      payload: .message(.toolResult(toolResultMessage)),
       createdAt: now,
     )
 
@@ -472,6 +487,36 @@ struct WuhuSessionBehavior: AgentBehavior {
       true
     case .idle:
       false
+    }
+  }
+
+  // MARK: - Image blob hydration
+
+  /// Replace blob URIs in image content blocks with base64-encoded data for LLM consumption.
+  private func hydrateImageBlobs(in messages: [Message]) -> [Message] {
+    messages.map { message in
+      switch message {
+      case var .user(u):
+        u.content = u.content.map(hydrateBlock)
+        return .user(u)
+      case let .assistant(a):
+        // Assistant messages don't contain user-provided images.
+        return .assistant(a)
+      case var .toolResult(t):
+        t.content = t.content.map(hydrateBlock)
+        return .toolResult(t)
+      }
+    }
+  }
+
+  /// Hydrate a single content block: if it's an image with a blob URI, resolve to base64.
+  private func hydrateBlock(_ block: ContentBlock) -> ContentBlock {
+    guard case let .image(img) = block, img.data.hasPrefix("blob://") else { return block }
+    do {
+      let base64 = try blobStore.resolveToBase64(uri: img.data)
+      return .image(.init(data: base64, mimeType: img.mimeType))
+    } catch {
+      return .text(.init(text: "[Failed to load image: \(error)]"))
     }
   }
 }

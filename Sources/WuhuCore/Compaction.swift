@@ -496,6 +496,9 @@ enum WuhuCompactionEngine {
       case let .reasoning(r):
         chars += r.encryptedContent?.count ?? 0
         chars += r.summary.reduce(0) { $0 + estimateChars(json: $1) }
+      case let .image(img):
+        // Images are stored as base64; estimate compressed character weight.
+        chars += img.data.count
       }
     }
     return chars
@@ -567,7 +570,7 @@ enum WuhuCompactionEngine {
             textParts.append(t.text)
           case let .toolCall(c):
             toolCalls.append("\(c.name)(args=\(formatJSON(c.arguments)))")
-          case .reasoning:
+          case .reasoning, .image:
             continue
           }
         }

@@ -79,6 +79,8 @@ private func readTool(cwd: String) -> AnyAgentTool {
     "- offset/limit MUST be integers (JSON numbers), not booleans or strings.",
     "- To continue after truncation, copy the exact number from the tool output notice.",
     "  Example: if the output says \"Use offset=2001 to continue\", call read with {\"path\":\"<same file>\",\"offset\":2001}.",
+    "",
+    "Image files (png, jpg, jpeg, gif, webp) are returned as image content blocks.",
   ].joined(separator: "\n")
 
   let tool = Tool(name: "read", description: description, parameters: schema)
@@ -87,6 +89,26 @@ private func readTool(cwd: String) -> AnyAgentTool {
     let params = try Params.parse(toolName: tool.name, args: args)
 
     let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd)
+
+    // Check if the file is an image — return as image content block.
+    let ext = (resolved as NSString).pathExtension.lowercased()
+    if WuhuBlobStore.isImageExtension(ext) {
+      guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
+        throw ToolError.message("Unsupported image format: \(ext)")
+      }
+      let fileData = try Data(contentsOf: URL(fileURLWithPath: resolved))
+      guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
+        throw ToolError.message(
+          "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
+        )
+      }
+      let base64 = fileData.base64EncodedString()
+      return AgentToolResult(
+        content: [.image(.init(data: base64, mimeType: mimeType))],
+        details: .object(["type": .string("image"), "mimeType": .string(mimeType), "size": .number(Double(fileData.count))]),
+      )
+    }
+
     let raw = try String(contentsOfFile: resolved, encoding: .utf8)
     let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)

@@ -207,7 +207,7 @@ func renderTextBlocks(_ blocks: [WuhuContentBlock]) -> String {
     switch block {
     case let .text(text, _):
       text
-    case .toolCall, .reasoning:
+    case .toolCall, .reasoning, .image:
       nil
     }
   }.joined()

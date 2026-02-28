@@ -5,6 +5,7 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
   case text(text: String, signature: String?)
   case toolCall(id: String, name: String, arguments: JSONValue)
   case reasoning(id: String, encryptedContent: String?, summary: [JSONValue])
+  case image(blobURI: String, mimeType: String)
 
   enum CodingKeys: String, CodingKey {
     case type
@@ -15,6 +16,8 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
     case arguments
     case encryptedContent = "encrypted_content"
     case summary
+    case blobURI
+    case mimeType
   }
 
   public init(from decoder: any Decoder) throws {
@@ -34,6 +37,11 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
         id: c.decode(String.self, forKey: .id),
         encryptedContent: c.decodeIfPresent(String.self, forKey: .encryptedContent),
         summary: c.decodeIfPresent([JSONValue].self, forKey: .summary) ?? [],
+      )
+    case "image":
+      self = try .image(
+        blobURI: c.decode(String.self, forKey: .blobURI),
+        mimeType: c.decode(String.self, forKey: .mimeType),
       )
     default:
       throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "Unknown content block type: \(type)")
@@ -57,9 +65,18 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
       try c.encode(id, forKey: .id)
       try c.encodeIfPresent(encryptedContent, forKey: .encryptedContent)
       try c.encode(summary, forKey: .summary)
+    case let .image(blobURI, mimeType):
+      try c.encode("image", forKey: .type)
+      try c.encode(blobURI, forKey: .blobURI)
+      try c.encode(mimeType, forKey: .mimeType)
     }
   }
 
+  /// Convert from PiAI ContentBlock.
+  ///
+  /// For `.image`, the `data` field of PiAI's `ImageContent` is stored directly as `blobURI`.
+  /// Callers must ensure this field is a blob URI (not base64) before persisting.
+  /// When building LLM context, callers must hydrate blob URIs back to base64 after calling `toPi()`.
   public static func fromPi(_ b: ContentBlock) -> WuhuContentBlock {
     switch b {
     case let .text(t):
@@ -68,9 +85,15 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
       .toolCall(id: c.id, name: c.name, arguments: c.arguments)
     case let .reasoning(r):
       .reasoning(id: r.id, encryptedContent: r.encryptedContent, summary: r.summary)
+    case let .image(img):
+      .image(blobURI: img.data, mimeType: img.mimeType)
     }
   }
 
+  /// Convert to PiAI ContentBlock.
+  ///
+  /// For `.image`, the `blobURI` is placed in the `data` field of `ImageContent`.
+  /// Callers must hydrate blob URIs to base64 after calling this method before sending to the LLM.
   public func toPi() -> ContentBlock {
     switch self {
     case let .text(text, signature):
@@ -79,6 +102,8 @@ public enum WuhuContentBlock: Sendable, Hashable, Codable {
       .toolCall(.init(id: id, name: name, arguments: arguments))
     case let .reasoning(id, encryptedContent, summary):
       .reasoning(.init(id: id, encryptedContent: encryptedContent, summary: summary))
+    case let .image(blobURI, mimeType):
+      .image(.init(data: blobURI, mimeType: mimeType))
     }
   }
 }

@@ -24,7 +24,8 @@ struct SkillsIntegrationTests {
     defer { try? fm.removeItem(at: root) }
 
     let store = try SQLiteSessionStore(path: ":memory:")
-    let service = WuhuService(store: store)
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
 
     let env = WuhuEnvironment(name: "local", type: .local, path: root.path)
 

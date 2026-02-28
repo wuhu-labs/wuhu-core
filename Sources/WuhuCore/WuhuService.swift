@@ -4,6 +4,7 @@ import WuhuAPI
 
 public actor WuhuService {
   let store: SQLiteSessionStore
+  let blobStore: WuhuBlobStore
   private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
@@ -18,6 +19,7 @@ public actor WuhuService {
 
   public init(
     store: SQLiteSessionStore,
+    blobStore: WuhuBlobStore,
     llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
@@ -25,6 +27,7 @@ public actor WuhuService {
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
   ) {
     self.store = store
+    self.blobStore = blobStore
     self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
@@ -75,6 +78,7 @@ public actor WuhuService {
       store: store,
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
+      blobStore: blobStore,
       onIdle: { [weak self] idleSessionID in
         guard let self else { return }
         await handleSessionIdle(sessionID: idleSessionID)

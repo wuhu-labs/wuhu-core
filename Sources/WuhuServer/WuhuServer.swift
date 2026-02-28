@@ -31,6 +31,13 @@ public struct WuhuServer: Sendable {
     try ensureDirectoryExists(forDatabasePath: dbPath)
 
     let store = try SQLiteSessionStore(path: dbPath)
+
+    let blobRoot: String = {
+      let dbDir = URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent()
+      return dbDir.appendingPathComponent("blobs", isDirectory: true).path
+    }()
+    let blobStore = WuhuBlobStore(rootDirectory: blobRoot)
+
     let workspaceDocsStore = try WuhuWorkspaceDocsStore(
       dataRoot: URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent(),
     )
@@ -52,6 +59,7 @@ public struct WuhuServer: Sendable {
 
     let service = WuhuService(
       store: store,
+      blobStore: blobStore,
       llmRequestLogger: requestLogger,
       remoteToolsProvider: { sessionID, runnerName in
         WuhuRemoteTools.makeTools(
@@ -143,6 +151,63 @@ public struct WuhuServer: Sendable {
           throw HTTPError(.badRequest, message: err.description)
         }
       }
+    }
+
+    // MARK: - Blob endpoints
+
+    router.post("v1/sessions/:id/blobs") { request, context async throws -> Response in
+      let sessionID = try context.parameters.require("id")
+      let contentType = request.headers[.contentType] ?? "application/octet-stream"
+      let mimeType = String(contentType)
+
+      var body = try await request.body.collect(upTo: WuhuBlobStore.maxImageFileSize + 1024)
+      let data = if let bytes = body.readBytes(length: body.readableBytes) {
+        Data(bytes)
+      } else {
+        Data()
+      }
+
+      guard data.count <= WuhuBlobStore.maxImageFileSize else {
+        throw HTTPError(.badRequest, message: "Image too large. Max: \(WuhuBlobStore.maxImageFileSize / 1024 / 1024)MB")
+      }
+
+      let uri = try blobStore.store(sessionID: sessionID, data: data, mimeType: mimeType)
+
+      struct BlobUploadResponse: Encodable {
+        let blobURI: String
+        let mimeType: String
+      }
+
+      return try context.responseEncoder.encode(
+        BlobUploadResponse(blobURI: uri, mimeType: mimeType),
+        from: request,
+        context: context,
+      )
+    }
+
+    router.get("v1/sessions/:id/blobs/:filename") { _, context async throws -> Response in
+      let sessionID = try context.parameters.require("id")
+      let filename = try context.parameters.require("filename")
+      let uri = "blob://\(sessionID)/\(filename)"
+
+      let data: Data
+      do {
+        data = try blobStore.resolve(uri: uri)
+      } catch {
+        throw HTTPError(.notFound, message: "Blob not found: \(filename)")
+      }
+
+      let ext = filename.split(separator: ".").last.map(String.init) ?? ""
+      let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) ?? "application/octet-stream"
+
+      var buffer = ByteBuffer()
+      buffer.writeBytes(data)
+
+      return Response(
+        status: .ok,
+        headers: [.contentType: mimeType],
+        body: .init(byteBuffer: buffer),
+      )
     }
 
     router.patch("v1/environments/:identifier") { request, context async throws -> Response in
