@@ -294,6 +294,12 @@ struct WuhuSessionBehavior: AgentBehavior {
     return try await tool.execute(toolCallId: call.id, args: call.arguments)
   }
 
+  func appendText(_ text: String, to result: AgentToolResult) -> AgentToolResult {
+    var copy = result
+    copy.content.append(.text(text))
+    return copy
+  }
+
   func toolDidExecute(_ call: ToolCall, result: ToolResult, state _: State) async throws -> [CommittedAction] {
     let now = Date()
 

@@ -50,7 +50,10 @@ public protocol AgentBehavior: Sendable {
   /// The result of executing a tool. Opaque to the loop — it just
   /// passes the value from ``executeToolCall(_:)`` to
   /// ``toolDidExecute(_:result:state:)``.
-  associatedtype ToolResult: Sendable
+  ///
+  /// `Hashable` is required so the loop can detect consecutive
+  /// identical tool results (see ``ToolCallRepetitionTracker``).
+  associatedtype ToolResult: Sendable & Hashable
 
   // MARK: State Management
 
@@ -130,6 +133,12 @@ public protocol AgentBehavior: Sendable {
 
   /// Execute a tool call. Runs outside the serialized path (parallel).
   func executeToolCall(_ call: ToolCall) async throws -> ToolResult
+
+  /// Append supplementary text to a tool result.
+  ///
+  /// Used by the loop to inject repetition warnings into results
+  /// without knowing the concrete result type.
+  func appendText(_ text: String, to result: ToolResult) -> ToolResult
 
   /// Persist a tool result and return actions.
   func toolDidExecute(
