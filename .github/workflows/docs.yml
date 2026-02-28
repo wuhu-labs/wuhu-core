@@ -53,6 +53,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm install -g wrangler
+
+          upload_with_retry() {
+            local bucket_path="$1" file="$2" ct="$3"
+            for attempt in 1 2 3; do
+              if wrangler r2 object put "$bucket_path" --file="$file" --content-type="$ct" --remote 2>&1; then
+                return 0
+              fi
+              echo "  Retry $attempt for $bucket_path..."
+              sleep $((attempt * 2))
+            done
+            echo "  WARNING: Failed to upload $bucket_path after 3 attempts"
+            return 0  # Don't fail the whole job
+          }
+
           for target in WuhuAPI WuhuCore WuhuClient WuhuServer WuhuRunner WuhuCLIKit WuhuCoreClient; do
             if [ ! -d ".build/docs/$target" ]; then
               echo "No docs for $target, skipping upload"
@@ -72,7 +86,7 @@ jobs:
                 *.png)  ct="image/png" ;;
                 *)      ct="application/octet-stream" ;;
               esac
-              wrangler r2 object put "wuhu-site/docs/wuhu-core/$target/$key" --file="$file" --content-type="$ct" --remote
+              upload_with_retry "wuhu-site/docs/wuhu-core/$target/$key" "$file" "$ct"
             done
             cd ../../..
           done
