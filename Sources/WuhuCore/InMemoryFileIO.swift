@@ -40,8 +40,16 @@ public final class InMemoryFileIO: FileIO, @unchecked Sendable {
   }
 
   /// Read back a file as a string (for test assertions).
+  ///
+  /// Uses `String(decoding:as:)` for UTF-8 to preserve the BOM character
+  /// (`U+FEFF`) if present in the data. `String(data:encoding:)` silently
+  /// strips it, which would cause round-trip mismatches in tests that verify
+  /// BOM preservation.
   public func storedString(path: String, encoding: String.Encoding = .utf8) -> String? {
     guard let data = storedData(path: path) else { return nil }
+    if encoding == .utf8 {
+      return String(decoding: data, as: UTF8.self)
+    }
     return String(data: data, encoding: encoding)
   }
 
