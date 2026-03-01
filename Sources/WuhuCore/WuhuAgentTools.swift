@@ -455,12 +455,12 @@ extension WuhuService {
 
   private func mountTool(currentSessionID: String) -> AnyAgentTool {
     struct Params: Sendable {
-      var path: String
+      var path: String?
       var name: String?
 
       static func parse(toolName: String, args: JSONValue) throws -> Params {
         let a = try ToolArgs(toolName: toolName, args: args)
-        let path = try a.requireString("path")
+        let path = try a.optionalString("path")
         let name = try a.optionalString("name")
         try a.ensureNoExtraKeys(allowed: ["path", "name"])
         return .init(path: path, name: name)
@@ -470,24 +470,29 @@ extension WuhuService {
     let schema: JSONValue = .object([
       "type": .string("object"),
       "properties": .object([
-        "path": .object(["type": .string("string"), "description": .string("Absolute path to the directory to mount")]),
+        "path": .object(["type": .string("string"), "description": .string("Absolute path to the directory to mount. If omitted or empty, creates a scratch directory for this session.")]),
         "name": .object(["type": .string("string"), "description": .string("Optional label for the mount")]),
       ]),
-      "required": .array([.string("path")]),
       "additionalProperties": .bool(false),
     ])
 
     let tool = Tool(
       name: WuhuAgentToolNames.mount,
-      description: "Mount a directory for this session. After mounting, filesystem tools become available if they weren't already. Injects AGENTS.md and skills from the mounted directory.",
+      description: "Mount a directory as the working directory for this session. Changes the cwd for all filesystem and bash tools. Injects AGENTS.md and skills from the mounted directory. Can be called multiple times to switch directories. Call with no path (or empty path) to create a scratch directory.",
       parameters: schema,
     )
 
     return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mount) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
-      let mountPath = params.path.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !mountPath.isEmpty else { throw WuhuToolExecutionError(message: "path is required") }
+      let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+      let mountPath: String = if rawPath.isEmpty {
+        // Create a scratch directory tied to this session ID
+        try WuhuScratchDirectory.create(sessionID: currentSessionID)
+      } else {
+        rawPath
+      }
 
       var isDir: ObjCBool = false
       guard FileManager.default.fileExists(atPath: mountPath, isDirectory: &isDir), isDir.boolValue else {
@@ -497,21 +502,15 @@ extension WuhuService {
       let mountName = (params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let effectiveName = mountName.isEmpty ? URL(fileURLWithPath: mountPath).lastPathComponent : mountName
 
-      // Check if this session already has a primary mount
-      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
-      let hasPrimary = existingMounts.contains { $0.isPrimary }
-
       let mount = try await store.createMount(
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
-        isPrimary: !hasPrimary,
+        isPrimary: true,
       )
 
-      // Update session cwd if this is the first/primary mount
-      if mount.isPrimary {
-        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
-      }
+      // Always update cwd to the mounted directory
+      try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
 
       // Emit context entries
       try await emitMountContext(sessionID: currentSessionID, mount: mount)
