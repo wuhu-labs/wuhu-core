@@ -43,6 +43,10 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private var observers: [UUID: AsyncStream<AgentLoopEvent<B.CommittedAction, B.StreamAction>>.Continuation] = [:]
 
+  // MARK: Tool Call Repetition
+
+  private var repetitionTracker = ToolCallRepetitionTracker()
+
   // MARK: Init
 
   public init(behavior: B) {
@@ -152,6 +156,11 @@ public actor AgentLoop<B: AgentBehavior> {
         try await behavior.drainInterruptItems(state: state)
       }
 
+      // Reset repetition tracker when user messages arrive (interrupt/steer).
+      if !interruptActions.isEmpty {
+        repetitionTracker.reset()
+      }
+
       if interruptActions.isEmpty, !hasToolResults {
         // No interrupt work. Check turn boundary.
         let turnActions = try await serialized { [behavior] state in
@@ -241,20 +250,45 @@ public actor AgentLoop<B: AgentBehavior> {
 
   /// Execute tool calls: mark started (serialized), run in parallel
   /// (NOT serialized), record results (serialized).
+  ///
+  /// Integrates ``ToolCallRepetitionTracker`` to detect and break
+  /// degenerate loops where the model calls the same tool with the
+  /// same arguments and gets the same result repeatedly.
   private func executeToolCalls(_ calls: [ToolCall]) async throws {
-    // Mark all as started
+    // Partition calls into blocked vs. allowed based on repetition history.
+    var blocked: [ToolCall] = []
+    var allowed: [ToolCall] = []
+    for call in calls {
+      let argsHash = call.arguments.hashValue
+      let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
+      if count >= ToolCallRepetitionTracker.blockThreshold {
+        blocked.append(call)
+      } else {
+        allowed.append(call)
+      }
+    }
+
+    // Mark all as started (both blocked and allowed — for status tracking).
     for call in calls {
       try await serialized { [behavior] state in
         try await behavior.toolWillExecute(call, state: state)
       }
     }
 
-    // Execute in parallel
+    // Record blocked calls as errors immediately.
+    for call in blocked {
+      let error = ToolCallRepetitionError.blocked
+      try await serialized { [behavior] state in
+        try await behavior.toolDidFail(call, error: error, state: state)
+      }
+    }
+
+    // Execute allowed calls in parallel.
     let results: [(ToolCall, Result<B.ToolResult, any Error>)] =
       await withTaskGroup(
         of: (ToolCall, Result<B.ToolResult, any Error>).self,
       ) { [behavior] group in
-        for call in calls {
+        for call in allowed {
           group.addTask {
             do {
               let result = try await behavior.executeToolCall(call)
@@ -271,12 +305,24 @@ public actor AgentLoop<B: AgentBehavior> {
         return outputs
       }
 
-    // Record results
+    // Record results, injecting warnings for repeated calls.
     for (call, result) in results {
       switch result {
       case let .success(toolResult):
+        let argsHash = call.arguments.hashValue
+        let resultHash = toolResult.hashValue
+        let count = repetitionTracker.record(
+          toolName: call.name,
+          argsHash: argsHash,
+          resultHash: resultHash,
+        )
+        let finalResult: B.ToolResult = if count >= ToolCallRepetitionTracker.warningThreshold {
+          behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
+        } else {
+          toolResult
+        }
         try await serialized { [behavior] state in
-          try await behavior.toolDidExecute(call, result: toolResult, state: state)
+          try await behavior.toolDidExecute(call, result: finalResult, state: state)
         }
       case let .failure(error):
         try await serialized { [behavior] state in
@@ -305,4 +351,13 @@ public actor AgentLoop<B: AgentBehavior> {
 
 public enum AgentLoopError: Error {
   case inferenceProducedNoResult
+}
+
+/// Error returned when a tool call is blocked by ``ToolCallRepetitionTracker``.
+enum ToolCallRepetitionError: Error, CustomStringConvertible {
+  case blocked
+
+  var description: String {
+    ToolCallRepetitionTracker.blockText
+  }
 }

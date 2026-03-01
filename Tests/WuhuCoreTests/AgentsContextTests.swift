@@ -193,4 +193,176 @@ struct AgentsContextTests {
     #expect(prompts[0].contains("v1"))
     #expect(prompts[1].contains("v2 (changed)"))
   }
+
+  @Test func loadsAgentsFromWorkspaceAndEnvironmentRoots() async throws {
+    let workspaceDir = try makeTempDir(prefix: "wuhu-ws-agents")
+    let envDir = try makeTempDir(prefix: "wuhu-env-agents")
+    let cwdDir = try makeTempDir(prefix: "wuhu-cwd-agents")
+
+    try "workspace context".write(
+      toFile: URL(fileURLWithPath: workspaceDir).appendingPathComponent("AGENTS.md").path,
+      atomically: true,
+      encoding: .utf8,
+    )
+    try "environment context".write(
+      toFile: URL(fileURLWithPath: envDir).appendingPathComponent("AGENTS.md").path,
+      atomically: true,
+      encoding: .utf8,
+    )
+    try "cwd context".write(
+      toFile: URL(fileURLWithPath: cwdDir).appendingPathComponent("AGENTS.md").path,
+      atomically: true,
+      encoding: .utf8,
+    )
+
+    let store = try SQLiteSessionStore(path: ":memory:")
+
+    actor Capture {
+      var systemPrompt: String?
+      func set(_ s: String?) {
+        systemPrompt = s
+      }
+
+      func get() -> String? {
+        systemPrompt
+      }
+    }
+    let capture = Capture()
+
+    let service = WuhuService(
+      store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
+      baseStreamFn: { model, ctx, _ in
+        await capture.set(ctx.systemPrompt)
+        return AsyncThrowingStream { continuation in
+          Task {
+            let assistant = AssistantMessage(
+              provider: model.provider,
+              model: model.id,
+              content: [.text("ok")],
+              stopReason: .stop,
+            )
+            continuation.yield(.done(message: assistant))
+            continuation.finish()
+          }
+        }
+      },
+      workspaceRoot: workspaceDir,
+    )
+
+    // Environment path is envDir; cwd is cwdDir (different from env).
+    let session = try await service.createSession(
+      sessionID: UUID().uuidString.lowercased(),
+      provider: .openai,
+      model: "mock",
+      systemPrompt: "Base prompt.",
+      environmentID: nil,
+      environment: .init(name: "test", type: .local, path: envDir),
+    )
+
+    let baselineCursor = session.tailEntryID
+    _ = try await service.enqueue(
+      sessionID: .init(rawValue: session.id),
+      message: .init(author: .unknown, content: .text("hello")),
+      lane: .followUp,
+    )
+
+    let stream = try await service.followSessionStream(
+      sessionID: session.id,
+      sinceCursor: baselineCursor,
+      sinceTime: nil,
+      stopAfterIdle: true,
+      timeoutSeconds: 10,
+    )
+    for try await _ in stream {}
+
+    let sp = try #require(await capture.get())
+
+    // All three AGENTS.md files should be present.
+    #expect(sp.contains("workspace context"))
+    #expect(sp.contains("environment context"))
+
+    // Workspace context should appear before environment context in the prompt
+    // (workspace is the broadest scope).
+    let wsRange = try #require(sp.range(of: "workspace context"))
+    let envRange = try #require(sp.range(of: "environment context"))
+    #expect(wsRange.lowerBound < envRange.lowerBound)
+  }
+
+  @Test func deduplicatesAgentsWhenCwdEqualsEnvironmentRoot() async throws {
+    let sharedDir = try makeTempDir(prefix: "wuhu-shared-agents")
+
+    try "shared context".write(
+      toFile: URL(fileURLWithPath: sharedDir).appendingPathComponent("AGENTS.md").path,
+      atomically: true,
+      encoding: .utf8,
+    )
+
+    let store = try SQLiteSessionStore(path: ":memory:")
+
+    actor Capture {
+      var systemPrompt: String?
+      func set(_ s: String?) {
+        systemPrompt = s
+      }
+
+      func get() -> String? {
+        systemPrompt
+      }
+    }
+    let capture = Capture()
+
+    let service = WuhuService(
+      store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
+      baseStreamFn: { model, ctx, _ in
+        await capture.set(ctx.systemPrompt)
+        return AsyncThrowingStream { continuation in
+          Task {
+            let assistant = AssistantMessage(
+              provider: model.provider,
+              model: model.id,
+              content: [.text("ok")],
+              stopReason: .stop,
+            )
+            continuation.yield(.done(message: assistant))
+            continuation.finish()
+          }
+        }
+      },
+    )
+
+    // When cwd == environment root, AGENTS.md should appear only once.
+    let session = try await service.createSession(
+      sessionID: UUID().uuidString.lowercased(),
+      provider: .openai,
+      model: "mock",
+      systemPrompt: "Base prompt.",
+      environmentID: nil,
+      environment: .init(name: "test", type: .local, path: sharedDir),
+    )
+
+    let baselineCursor = session.tailEntryID
+    _ = try await service.enqueue(
+      sessionID: .init(rawValue: session.id),
+      message: .init(author: .unknown, content: .text("hello")),
+      lane: .followUp,
+    )
+
+    let stream = try await service.followSessionStream(
+      sessionID: session.id,
+      sinceCursor: baselineCursor,
+      sinceTime: nil,
+      stopAfterIdle: true,
+      timeoutSeconds: 10,
+    )
+    for try await _ in stream {}
+
+    let sp = try #require(await capture.get())
+    #expect(sp.contains("shared context"))
+
+    // Should appear exactly once (deduplicated).
+    let count = sp.components(separatedBy: "shared context").count - 1
+    #expect(count == 1)
+  }
 }

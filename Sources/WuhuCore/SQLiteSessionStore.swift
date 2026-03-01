@@ -139,11 +139,12 @@ public actor SQLiteSessionStore: SessionStore {
     environment: WuhuEnvironment,
     runnerName: String?,
     parentSessionID: String?,
+    workspaceRoot: String? = nil,
   ) async throws -> WuhuSession {
     let now = Date()
     let sessionID = rawSessionID.lowercased()
 
-    let skills = WuhuSkillsLoader.load(environmentRoot: environment.path)
+    let skills = WuhuSkillsLoader.load(environmentRoot: environment.path, workspaceRoot: workspaceRoot)
     let effectiveSystemPrompt: String = {
       if skills.isEmpty { return systemPrompt }
       return systemPrompt + WuhuSkills.promptSection(skills: skills)
@@ -1017,13 +1018,9 @@ extension SQLiteSessionStore {
 
         if c.kind == "system" {
           let input = try WuhuJSON.decoder.decode(SystemUrgentInput.self, from: c.payload)
-          let text: String = {
-            if case let .text(t) = input.content { return t }
-            return ""
-          }()
           let custom = WuhuCustomMessage(
             customType: "wuhu_system_input_v1",
-            content: [.text(text: text, signature: nil)],
+            content: input.content.toContentBlocks(),
             details: .object([
               "source": .string(systemSourceString(input.source)),
             ]),
@@ -1038,13 +1035,9 @@ extension SQLiteSessionStore {
           )
         } else {
           let message = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: c.payload)
-          let text: String = {
-            if case let .text(t) = message.content { return t }
-            return ""
-          }()
           let user = WuhuUserMessage(
             user: userString(message.author),
-            content: [.text(text: text, signature: nil)],
+            content: message.content.toContentBlocks(),
             timestamp: createdAt,
           )
           entryPayload = .message(.user(user))
@@ -1127,14 +1120,10 @@ extension SQLiteSessionStore {
 
       for r in followRows {
         let message = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: r.payload)
-        let text: String = {
-          if case let .text(t) = message.content { return t }
-          return ""
-        }()
 
         let user = WuhuUserMessage(
           user: userString(message.author),
-          content: [.text(text: text, signature: nil)],
+          content: message.content.toContentBlocks(),
           timestamp: r.enqueuedAt,
         )
 

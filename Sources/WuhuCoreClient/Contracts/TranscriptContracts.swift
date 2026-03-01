@@ -110,11 +110,19 @@ public enum MessageContent: Sendable, Hashable, Codable {
       }
     }
 
-    // Backward-compat: try decoding as a bare string (old `.text` format from synthesized Codable).
-    let container = try decoder.singleValueContainer()
-    if let textObj = try? container.decode(TextWrapper.self) {
-      self = .text(textObj.text)
-      return
+    // Backward-compat: old synthesized Codable produced {"text":{"_0":"Hello"}} for .text("Hello").
+    // Try keyed container with a "text" key first (covers both old formats).
+    if let c = try? decoder.container(keyedBy: CodingKeys.self) {
+      // Format: {"text":"Hello"} (TextWrapper-style, no type tag)
+      if let plainText = try? c.decode(String.self, forKey: .text) {
+        self = .text(plainText)
+        return
+      }
+      // Format: {"text":{"_0":"Hello"}} (synthesized enum Codable)
+      if let wrapper = try? c.decode(SynthesizedAssocValue.self, forKey: .text) {
+        self = .text(wrapper._0)
+        return
+      }
     }
 
     throw DecodingError.dataCorrupted(
@@ -135,9 +143,11 @@ public enum MessageContent: Sendable, Hashable, Codable {
   }
 }
 
-/// Helper for backward-compatible decoding of old synthesized Codable `.text` payloads.
-private struct TextWrapper: Decodable {
-  var text: String
+/// Helper for backward-compatible decoding of old synthesized Codable `.text(String)` payloads.
+/// Swift's synthesized enum Codable encodes `.text("hello")` as `{"text":{"_0":"hello"}}`.
+private struct SynthesizedAssocValue: Decodable {
+  // swiftlint:disable:next identifier_name
+  var _0: String
 }
 
 /// Non-message markers that help describe execution boundaries or session lifecycle.

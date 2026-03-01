@@ -21,6 +21,7 @@ enum WuhuAgentToolNames {
   static let envUpdate = "env_update"
   static let envDelete = "env_delete"
   static let createSession = "create_session"
+  static let joinSessions = "join_sessions"
 }
 
 extension WuhuService {
@@ -78,6 +79,7 @@ extension WuhuService {
       createSessionTool(currentSessionID: currentSessionID),
       listChildSessionsTool(currentSessionID: currentSessionID),
       readSessionFinalMessageTool(currentSessionID: currentSessionID),
+      joinSessionsTool(currentSessionID: currentSessionID),
       sessionSteerTool(),
       sessionFollowUpTool(),
       envListTool(),
@@ -298,6 +300,166 @@ extension WuhuService {
         details: .object([
           "sessionID": .string(targetID),
           "entryID": .string(String(final.entryID)),
+        ]),
+      )
+    }
+  }
+
+  private func joinSessionsTool(currentSessionID: String) -> AnyAgentTool {
+    struct Params: Sendable {
+      var sessionIDs: [String]
+      var timeout: Double?
+
+      static func parse(toolName: String, args: JSONValue) throws -> Params {
+        let a = try ToolArgs(toolName: toolName, args: args)
+        let sessionIDs = try a.requireStringArray("sessionIDs")
+        let timeout = try a.optionalDouble("timeout")
+        try a.ensureNoExtraKeys(allowed: ["sessionIDs", "timeout"])
+        return .init(sessionIDs: sessionIDs, timeout: timeout)
+      }
+    }
+
+    let schema: JSONValue = .object([
+      "type": .string("object"),
+      "properties": .object([
+        "sessionIDs": .object([
+          "type": .string("array"),
+          "items": .object(["type": .string("string")]),
+          "description": .string("Session IDs to wait for. All must be child sessions of the current session."),
+        ]),
+        "timeout": .object([
+          "type": .string("number"),
+          "description": .string("Maximum seconds to wait before returning with partial results (optional, default: 3600)."),
+        ]),
+      ]),
+      "required": .array([.string("sessionIDs")]),
+      "additionalProperties": .bool(false),
+    ])
+
+    let tool = Tool(
+      name: WuhuAgentToolNames.joinSessions,
+      description: "Wait for one or more child sessions to finish (reach idle or stopped state). Blocks until all specified sessions are no longer running, then returns their final statuses and messages. Use this after dispatching parallel sessions with create_session or fork.",
+      parameters: schema,
+    )
+
+    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.joinSessions) { [weak self] _, args in
+      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+      let params = try Params.parse(toolName: tool.name, args: args)
+
+      let ids = params.sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+      guard !ids.isEmpty else { throw WuhuToolExecutionError(message: "sessionIDs must not be empty") }
+
+      // Validate all are children of current session.
+      let children = try await store.listChildSessions(parentSessionID: currentSessionID)
+      let childIDs = Set(children.map(\.session.id))
+      for id in ids {
+        guard childIDs.contains(id) else {
+          throw WuhuToolExecutionError(message: "Session '\(id)' is not a child of the current session")
+        }
+      }
+
+      let timeout = params.timeout ?? 3600
+      let deadline = Date().addingTimeInterval(timeout)
+      var pending = Set(ids)
+
+      struct SessionResult: Sendable {
+        var id: String
+        var status: String
+        var finalMessage: String?
+        var finalEntryID: Int64?
+      }
+      var results: [SessionResult] = []
+
+      // Check immediately before entering the wait loop — some sessions may already be done.
+      do {
+        let snapshot = try await store.listChildSessions(parentSessionID: currentSessionID)
+        let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.session.id, $0) })
+
+        for id in pending {
+          guard let record = byID[id] else { continue }
+          if record.executionStatus != .running {
+            let final = try? await loadFinalAssistantMessage(sessionID: id)
+            results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
+            if let entryID = final?.entryID {
+              try? await store.markChildFinalMessageRead(parentSessionID: currentSessionID, childSessionID: id, finalEntryID: entryID)
+            }
+          }
+        }
+        for r in results {
+          pending.remove(r.id)
+        }
+      }
+
+      // Poll with exponential backoff: 2s, 4s, 8s, ... capped at 30s.
+      var intervalNs: UInt64 = 2_000_000_000
+      let maxIntervalNs: UInt64 = 30_000_000_000
+
+      while !pending.isEmpty, Date() < deadline {
+        try Task.checkCancellation()
+        try await Task.sleep(nanoseconds: intervalNs)
+        intervalNs = min(intervalNs * 2, maxIntervalNs)
+
+        let snapshot = try await store.listChildSessions(parentSessionID: currentSessionID)
+        let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.session.id, $0) })
+
+        var newlyDone: [String] = []
+        for id in pending {
+          guard let record = byID[id] else { continue }
+          if record.executionStatus != .running {
+            let final = try? await loadFinalAssistantMessage(sessionID: id)
+            results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
+            if let entryID = final?.entryID {
+              try? await store.markChildFinalMessageRead(parentSessionID: currentSessionID, childSessionID: id, finalEntryID: entryID)
+            }
+            newlyDone.append(id)
+          }
+        }
+        for id in newlyDone {
+          pending.remove(id)
+        }
+      }
+
+      // Build response.
+      let allDone = pending.isEmpty
+
+      let completedJSON: [JSONValue] = results.map { r in
+        .object([
+          "sessionID": .string(r.id),
+          "status": .string(r.status),
+          "finalMessage": r.finalMessage.map { .string($0) } ?? .null,
+          "finalEntryID": r.finalEntryID.map { .number(Double($0)) } ?? .null,
+        ])
+      }
+      let timedOutJSON: [JSONValue] = pending.sorted().map { id in
+        .object([
+          "sessionID": .string(id),
+          "status": .string("running"),
+        ])
+      }
+
+      let summary = results.map { "✅ \($0.id) [\($0.status)]" }
+        + pending.sorted().map { "⏳ \($0) [still running]" }
+
+      var text = allDone
+        ? "All \(ids.count) session\(ids.count == 1 ? "" : "s") completed."
+        : "\(results.count)/\(ids.count) completed, \(pending.count) timed out."
+      text += "\n\n" + summary.joined(separator: "\n")
+
+      if !allDone {
+        text += "\n\nUse join_sessions again with the timed-out IDs to continue waiting."
+      }
+
+      for r in results {
+        guard let msg = r.finalMessage else { continue }
+        text += "\n\n--- \(r.id) ---\n\(msg)"
+      }
+
+      return AgentToolResult(
+        content: [.text(text)],
+        details: .object([
+          "completed": .bool(allDone),
+          "sessions": .array(completedJSON),
+          "timedOut": .array(timedOutJSON),
         ]),
       )
     }
@@ -581,6 +743,7 @@ extension WuhuService {
       environment: parent.environment,
       runnerName: parent.runnerName,
       parentSessionID: parentSessionID,
+      workspaceRoot: workspaceRoot,
     )
 
     let parentTranscript = try await store.getEntries(sessionID: parentSessionID)
@@ -692,6 +855,7 @@ extension WuhuService {
       environment: environment,
       runnerName: parent.runnerName,
       parentSessionID: parentSessionID,
+      workspaceRoot: workspaceRoot,
     )
 
     let author: Author = .participant(.init(rawValue: "channel-agent"), kind: .bot)

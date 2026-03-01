@@ -27,6 +27,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   public var runners: [Runner]?
   public var databasePath: String?
   public var llmRequestLogDir: String?
+  public var workspacePath: String?
   public var host: String?
   public var port: Int?
 
@@ -35,6 +36,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     runners: [Runner]? = nil,
     databasePath: String? = nil,
     llmRequestLogDir: String? = nil,
+    workspacePath: String? = nil,
     host: String? = nil,
     port: Int? = nil,
   ) {
@@ -42,6 +44,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     self.runners = runners
     self.databasePath = databasePath
     self.llmRequestLogDir = llmRequestLogDir
+    self.workspacePath = workspacePath
     self.host = host
     self.port = port
   }
@@ -51,6 +54,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     case runners
     case databasePath
     case llmRequestLogDir = "llm_request_log_dir"
+    case workspacePath
     case host
     case port
   }
@@ -64,6 +68,21 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   public static func defaultPath() -> String {
     FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".wuhu/server.yml")
+      .path
+  }
+
+  /// Resolves the workspace root directory from this config.
+  ///
+  /// If `workspacePath` is set, it is tilde-expanded and returned.
+  /// Otherwise falls back to `<dataRoot>/workspace` where `dataRoot` is
+  /// the parent directory of the database path.
+  public func resolveWorkspaceRoot(databasePath: String) -> String {
+    if let wp = workspacePath, !wp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return (wp as NSString).expandingTildeInPath
+    }
+    return URL(fileURLWithPath: databasePath, isDirectory: false)
+      .deletingLastPathComponent()
+      .appendingPathComponent("workspace", isDirectory: true)
       .path
   }
 }

@@ -2,26 +2,37 @@ import Foundation
 import WuhuAPI
 
 enum WuhuSkillsLoader {
-  static func load(environmentRoot: String) -> [WuhuSkill] {
+  static func load(environmentRoot: String, workspaceRoot: String? = nil) -> [WuhuSkill] {
     let fm = FileManager.default
     let homeSkillsDir = fm.homeDirectoryForCurrentUser
       .appendingPathComponent(".wuhu")
       .appendingPathComponent("skills")
       .path
 
+    let workspaceSkillsDir: String? = workspaceRoot.flatMap { root in
+      URL(fileURLWithPath: root, isDirectory: true)
+        .appendingPathComponent("skills")
+        .path
+    }
+
     let projectSkillsDir = URL(fileURLWithPath: environmentRoot, isDirectory: true)
       .appendingPathComponent(".wuhu")
       .appendingPathComponent("skills")
       .path
 
-    return load(userSkillsDir: homeSkillsDir, projectSkillsDir: projectSkillsDir)
+    return load(userSkillsDir: homeSkillsDir, workspaceSkillsDir: workspaceSkillsDir, projectSkillsDir: projectSkillsDir)
   }
 
-  static func load(userSkillsDir: String, projectSkillsDir: String) -> [WuhuSkill] {
+  static func load(userSkillsDir: String, workspaceSkillsDir: String? = nil, projectSkillsDir: String) -> [WuhuSkill] {
     var byName: [String: WuhuSkill] = [:]
 
     for skill in loadFromDir(userSkillsDir, source: "user") {
       byName[skill.name] = skill
+    }
+    if let workspaceSkillsDir {
+      for skill in loadFromDir(workspaceSkillsDir, source: "workspace") {
+        byName[skill.name] = skill
+      }
     }
     for skill in loadFromDir(projectSkillsDir, source: "project") {
       byName[skill.name] = skill

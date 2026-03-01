@@ -31,6 +31,7 @@ public protocol SessionStore: Sendable {
     environment: WuhuEnvironment,
     runnerName: String?,
     parentSessionID: String?,
+    workspaceRoot: String?,
   ) async throws -> WuhuSession
 
   func getSession(id: String) async throws -> WuhuSession

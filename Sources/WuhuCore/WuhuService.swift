@@ -10,6 +10,7 @@ public actor WuhuService {
   private let asyncBashRegistry: WuhuAsyncBashRegistry
   private let remoteToolsProvider: (@Sendable (_ sessionID: String, _ runnerName: String) async throws -> [AnyAgentTool])?
   private let baseStreamFn: StreamFn
+  let workspaceRoot: String?
   private let instanceID: String
   private let eventHub = WuhuLiveEventHub()
   private let subscriptionHub = WuhuSessionSubscriptionHub()
@@ -25,6 +26,7 @@ public actor WuhuService {
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
     remoteToolsProvider: (@Sendable (_ sessionID: String, _ runnerName: String) async throws -> [AnyAgentTool])? = nil,
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
+    workspaceRoot: String? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -33,6 +35,7 @@ public actor WuhuService {
     self.asyncBashRegistry = asyncBashRegistry
     self.remoteToolsProvider = remoteToolsProvider
     self.baseStreamFn = baseStreamFn
+    self.workspaceRoot = workspaceRoot
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -243,6 +246,7 @@ public actor WuhuService {
       environment: environment,
       runnerName: runnerName,
       parentSessionID: parentSessionID,
+      workspaceRoot: workspaceRoot,
     )
   }
 
@@ -437,7 +441,7 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
 
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.setContextCwd(session.cwd)
+    await runtime.setContextCwd(session.cwd, environmentRoot: session.environment.path, workspaceRoot: workspaceRoot)
     await runtime.setTools(resolvedTools)
     await runtime.setStreamFn(streamFn)
     await runtime.ensureStarted()
