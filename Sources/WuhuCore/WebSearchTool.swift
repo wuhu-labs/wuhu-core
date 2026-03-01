@@ -1,12 +1,12 @@
+import AsyncHTTPClient
 import Foundation
-import PiAI
+import NIOFoundationCompat
 
 /// Brave Search API web search tool.
 ///
-/// Makes real HTTP requests to the Brave Search API using the
-/// `PiAI.HTTPClient` (backed by `AsyncHTTPClient` / SwiftNIO).
+/// Makes real HTTP requests to the Brave Search API using `AsyncHTTPClient` directly.
 extension WuhuTools {
-  static func webSearchTool(apiKey: String, http: any HTTPClient = AsyncHTTPClientTransport()) -> AnyAgentTool {
+  static func webSearchTool(apiKey: String, httpClient: AsyncHTTPClient.HTTPClient? = nil) -> AnyAgentTool {
     struct Params: Sendable {
       var query: String
       var count: Int?
@@ -65,6 +65,11 @@ extension WuhuTools {
 
     let tool = Tool(name: "web_search", description: description, parameters: schema)
 
+    // Use a dedicated client with gzip decompression enabled. The singleton
+    // HTTPClient.shared doesn't auto-decompress, so we create our own with
+    // the shared event loop group to avoid spinning up extra threads.
+    let client = httpClient ?? webSearchHTTPClient
+
     return AnyAgentTool(tool: tool, label: "web_search") { _, args in
       let params = try Params.parse(toolName: tool.name, args: args)
       let query = params.query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -95,22 +100,21 @@ extension WuhuTools {
         throw WebSearchError.message("Failed to construct search URL")
       }
 
-      let request = HTTPRequest(
-        url: url,
-        method: "GET",
-        headers: [
-          "Accept": "application/json",
-          "Accept-Encoding": "gzip",
-          "X-Subscription-Token": apiKey,
-        ],
-      )
+      var request = HTTPClientRequest(url: url.absoluteString)
+      request.method = .GET
+      request.headers.add(name: "Accept", value: "application/json")
+      request.headers.add(name: "Accept-Encoding", value: "gzip")
+      request.headers.add(name: "X-Subscription-Token", value: apiKey)
 
-      let (data, response) = try await http.data(for: request)
+      let response = try await client.execute(request, timeout: .seconds(30))
 
-      guard response.statusCode >= 200, response.statusCode < 300 else {
-        let body = String(decoding: data, as: UTF8.self)
-        throw WebSearchError.message("Brave Search API returned HTTP \(response.statusCode): \(body.prefix(500))")
+      let statusCode = Int(response.status.code)
+      guard statusCode >= 200, statusCode < 300 else {
+        let body = try await String(buffer: response.body.collect(upTo: 1024 * 64))
+        throw WebSearchError.message("Brave Search API returned HTTP \(statusCode): \(body.prefix(500))")
       }
+
+      let data = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
 
       // Parse JSON response
       guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -163,6 +167,19 @@ extension WuhuTools {
     }
   }
 }
+
+/// Module-level HTTP client with automatic gzip/deflate decompression enabled.
+/// Uses the shared event loop group (singleton) so no extra threads are created.
+/// This is never explicitly shut down — it lives for the process lifetime, which
+/// is fine for a long-running server.
+private let webSearchHTTPClient: AsyncHTTPClient.HTTPClient = {
+  var config = AsyncHTTPClient.HTTPClient.Configuration()
+  config.decompression = .enabled(limit: .ratio(10))
+  return AsyncHTTPClient.HTTPClient(
+    eventLoopGroupProvider: .singleton,
+    configuration: config,
+  )
+}()
 
 private enum WebSearchError: Error, Sendable, CustomStringConvertible {
   case message(String)
