@@ -575,9 +575,9 @@ extension SQLiteSessionStore {
   private static let migrator: DatabaseMigrator = {
     var migrator = DatabaseMigrator()
 
-    migrator.registerMigration("wuhu_v6_mounts") { db in
+    // ── v1: initial schema ──────────────────────────────────────────────
+    migrator.registerMigration("wuhu_contracts_v1") { db in
       // Hard reset: this repo intentionally does not migrate older schemas.
-      // Drop all old tables and recreate from scratch.
       try db.execute(sql: "DROP TABLE IF EXISTS tool_call_status")
       try db.execute(sql: "DROP TABLE IF EXISTS system_queue_pending")
       try db.execute(sql: "DROP TABLE IF EXISTS system_queue_journal")
@@ -585,25 +585,9 @@ extension SQLiteSessionStore {
       try db.execute(sql: "DROP TABLE IF EXISTS user_queue_journal")
       try db.execute(sql: "DROP TABLE IF EXISTS session_entries")
       try db.execute(sql: "DROP TABLE IF EXISTS session_child_status")
-      try db.execute(sql: "DROP TABLE IF EXISTS mounts")
       try db.execute(sql: "DROP TABLE IF EXISTS sessions")
       try db.execute(sql: "DROP TABLE IF EXISTS environments")
-      try db.execute(sql: "DROP TABLE IF EXISTS mount_templates")
 
-      // Mount templates (replaces environments)
-      try db.create(table: "mount_templates") { t in
-        t.column("id", .text).primaryKey()
-        t.column("name", .text).notNull()
-        t.column("type", .text).notNull()
-        t.column("templatePath", .text).notNull()
-        t.column("workspacesPath", .text).notNull()
-        t.column("startupScript", .text)
-        t.column("createdAt", .datetime).notNull()
-        t.column("updatedAt", .datetime).notNull()
-      }
-      try db.create(index: "mount_templates_unique_name", on: "mount_templates", columns: ["name"], unique: true)
-
-      // Sessions (simplified — no environment/type/runner columns)
       try db.create(table: "sessions") { t in
         t.column("id", .text).primaryKey()
         t.column("provider", .text).notNull()
@@ -613,28 +597,20 @@ extension SQLiteSessionStore {
         t.column("pendingModel", .text)
         t.column("pendingReasoningEffort", .text)
         t.column("executionStatus", .text).notNull()
-        t.column("cwd", .text) // nullable — no mount = no cwd
+        t.column("environmentName", .text).notNull()
+        t.column("environmentType", .text).notNull()
+        t.column("environmentPath", .text).notNull()
+        t.column("environmentTemplatePath", .text)
+        t.column("environmentStartupScript", .text)
+        t.column("cwd", .text).notNull()
+        t.column("runnerName", .text)
         t.column("parentSessionID", .text)
-        t.column("customTitle", .text)
-        t.column("isArchived", .boolean).notNull().defaults(to: false)
         t.column("createdAt", .datetime).notNull()
         t.column("updatedAt", .datetime).notNull()
         t.column("headEntryID", .integer)
         t.column("tailEntryID", .integer)
       }
 
-      // Mounts
-      try db.create(table: "mounts") { t in
-        t.column("id", .text).primaryKey()
-        t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
-        t.column("name", .text).notNull()
-        t.column("path", .text).notNull()
-        t.column("mountTemplateID", .text)
-        t.column("isPrimary", .boolean).notNull().defaults(to: false)
-        t.column("createdAt", .datetime).notNull()
-      }
-
-      // Session entries
       try db.create(table: "session_entries") { t in
         t.autoIncrementedPrimaryKey("id")
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -646,7 +622,6 @@ extension SQLiteSessionStore {
       try db.create(index: "session_entries_unique_parent", on: "session_entries", columns: ["parentEntryID"], unique: true, condition: Column("parentEntryID") != nil)
       try db.create(index: "session_entries_unique_header_per_session", on: "session_entries", columns: ["sessionID"], unique: true, condition: Column("parentEntryID") == nil)
 
-      // Tool call status
       try db.create(table: "tool_call_status") { t in
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
         t.column("toolCallID", .text).notNull()
@@ -656,7 +631,6 @@ extension SQLiteSessionStore {
         t.primaryKey(["sessionID", "toolCallID"])
       }
 
-      // User queue
       try db.create(table: "user_queue_pending") { t in
         t.column("id", .text).primaryKey()
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -672,7 +646,6 @@ extension SQLiteSessionStore {
         t.column("createdAt", .datetime).notNull().indexed()
       }
 
-      // System queue
       try db.create(table: "system_queue_pending") { t in
         t.column("id", .text).primaryKey()
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -684,6 +657,169 @@ extension SQLiteSessionStore {
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
         t.column("payload", .blob).notNull()
         t.column("createdAt", .datetime).notNull().indexed()
+      }
+    }
+
+    // ── v2: environments table + environmentID on sessions ─────────────
+    migrator.registerMigration("wuhu_contracts_v2_environments") { db in
+      try db.create(table: "environments") { t in
+        t.column("id", .text).primaryKey()
+        t.column("name", .text).notNull()
+        t.column("type", .text).notNull()
+        t.column("path", .text).notNull()
+        t.column("templatePath", .text)
+        t.column("startupScript", .text)
+        t.column("createdAt", .datetime).notNull()
+        t.column("updatedAt", .datetime).notNull()
+      }
+      try db.create(index: "environments_unique_name", on: "environments", columns: ["name"], unique: true)
+
+      try db.alter(table: "sessions") { t in
+        t.add(column: "environmentID", .text)
+      }
+    }
+
+    // ── v3: channels + session_child_status ────────────────────────────
+    migrator.registerMigration("wuhu_contracts_v3_channels") { db in
+      try db.alter(table: "sessions") { t in
+        // WuhuSessionType was removed in v6; use the literal default.
+        t.add(column: "sessionType", .text).notNull().defaults(to: "coding")
+        t.add(column: "displayStartEntryID", .integer)
+      }
+
+      try db.create(table: "session_child_status") { t in
+        t.column("parentSessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
+        t.column("childSessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
+        t.column("lastNotifiedFinalEntryID", .integer)
+        t.column("lastReadFinalEntryID", .integer)
+        t.column("updatedAt", .datetime).notNull()
+        t.primaryKey(["parentSessionID", "childSessionID"])
+      }
+    }
+
+    // ── v4: custom title ───────────────────────────────────────────────
+    migrator.registerMigration("wuhu_v4_custom_title") { db in
+      try db.alter(table: "sessions") { t in
+        t.add(column: "customTitle", .text)
+      }
+    }
+
+    // ── v5: archive flag ───────────────────────────────────────────────
+    migrator.registerMigration("wuhu_v5_archive") { db in
+      try db.alter(table: "sessions") { t in
+        t.add(column: "isArchived", .boolean).notNull().defaults(to: false)
+      }
+    }
+
+    // ── v6: mounts (data-preserving) ───────────────────────────────────
+    //
+    // Replaces the `environments` table with `mount_templates` + `mounts`.
+    // Drops unused columns from `sessions` via the rename-copy-drop
+    // pattern (SQLite doesn't support DROP COLUMN before 3.35.0).
+    //
+    // Preserved tables (no schema change):
+    //   session_entries, tool_call_status, user_queue_pending,
+    //   user_queue_journal, system_queue_pending, system_queue_journal
+    migrator.registerMigration("wuhu_v6_mounts") { db in
+      // 1. Create mount_templates (replaces environments)
+      try db.create(table: "mount_templates") { t in
+        t.column("id", .text).primaryKey()
+        t.column("name", .text).notNull()
+        t.column("type", .text).notNull()
+        t.column("templatePath", .text).notNull()
+        t.column("workspacesPath", .text).notNull()
+        t.column("startupScript", .text)
+        t.column("createdAt", .datetime).notNull()
+        t.column("updatedAt", .datetime).notNull()
+      }
+      try db.create(index: "mount_templates_unique_name", on: "mount_templates", columns: ["name"], unique: true)
+
+      // 2. Migrate sessions: drop removed columns, make cwd nullable.
+      //
+      //    We use the create-new → copy → drop-old → rename pattern
+      //    instead of rename-old → create → copy → drop-old, because
+      //    SQLite 3.25+ rewrites FK references in *other* tables when
+      //    you rename the referenced table. By keeping the original
+      //    "sessions" name untouched until the DROP, the FKs in
+      //    session_entries / tool_call_status / queues continue to
+      //    resolve correctly after the final RENAME.
+
+      // Temporarily disable FK enforcement so the DROP doesn't cascade.
+      try db.execute(sql: "PRAGMA foreign_keys = OFF")
+
+      try db.execute(sql: """
+      CREATE TABLE _sessions_new (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        effectiveReasoningEffort TEXT,
+        pendingProvider TEXT,
+        pendingModel TEXT,
+        pendingReasoningEffort TEXT,
+        executionStatus TEXT NOT NULL,
+        cwd TEXT,
+        parentSessionID TEXT,
+        customTitle TEXT,
+        isArchived BOOLEAN NOT NULL DEFAULT 0,
+        createdAt DATETIME NOT NULL,
+        updatedAt DATETIME NOT NULL,
+        headEntryID INTEGER,
+        tailEntryID INTEGER
+      )
+      """)
+
+      // Copy data — map only the columns that survived.
+      try db.execute(sql: """
+      INSERT INTO _sessions_new (
+        id, provider, model,
+        effectiveReasoningEffort, pendingProvider, pendingModel, pendingReasoningEffort,
+        executionStatus, cwd, parentSessionID,
+        customTitle, isArchived,
+        createdAt, updatedAt,
+        headEntryID, tailEntryID
+      )
+      SELECT
+        id, provider, model,
+        effectiveReasoningEffort, pendingProvider, pendingModel, pendingReasoningEffort,
+        executionStatus, cwd, parentSessionID,
+        customTitle, isArchived,
+        createdAt, updatedAt,
+        headEntryID, tailEntryID
+      FROM sessions
+      """)
+
+      // Drop the old table (FKs off, so no cascade into session_entries)
+      try db.execute(sql: "DROP TABLE sessions")
+
+      // Rename the new table into place. Because no existing FK
+      // references "_sessions_new", SQLite won't rewrite any FK
+      // definitions in other tables. The existing "REFERENCES sessions"
+      // clauses now resolve to this renamed table.
+      try db.execute(sql: "ALTER TABLE _sessions_new RENAME TO sessions")
+
+      // 3. Create mounts table
+      try db.create(table: "mounts") { t in
+        t.column("id", .text).primaryKey()
+        t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
+        t.column("name", .text).notNull()
+        t.column("path", .text).notNull()
+        t.column("mountTemplateID", .text)
+        t.column("isPrimary", .boolean).notNull().defaults(to: false)
+        t.column("createdAt", .datetime).notNull()
+      }
+
+      // 5. Drop obsolete tables
+      try db.execute(sql: "DROP TABLE IF EXISTS session_child_status")
+      try db.execute(sql: "DROP TABLE IF EXISTS environments")
+
+      // 6. Re-enable FK enforcement and verify integrity
+      try db.execute(sql: "PRAGMA foreign_keys = ON")
+
+      // Verify no FK violations were introduced
+      if let violations = try Row.fetchOne(db, sql: "PRAGMA foreign_key_check") {
+        throw WuhuStoreError.sessionCorrupt(
+          "Foreign key violations after v6 migration: \(violations)",
+        )
       }
     }
 
