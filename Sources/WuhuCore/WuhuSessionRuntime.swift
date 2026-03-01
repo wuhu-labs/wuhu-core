@@ -84,8 +84,8 @@ actor WuhuSessionRuntime {
     await runtimeConfig.setStreamFn(streamFn)
   }
 
-  func setContextCwd(_ cwd: String) async {
-    await runtimeConfig.setContextActor(WuhuAgentsContextActor(cwd: cwd))
+  func setContextCwd(_ cwd: String, environmentRoot: String? = nil, workspaceRoot: String? = nil) async {
+    await runtimeConfig.setContextActor(WuhuAgentsContextActor(cwd: cwd, environmentRoot: environmentRoot, workspaceRoot: workspaceRoot))
   }
 
   func isIdle() -> Bool {

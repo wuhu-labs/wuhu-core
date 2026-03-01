@@ -26,14 +26,12 @@ enum WuhuWorkspaceDocsStoreError: Error, Sendable, CustomStringConvertible {
 }
 
 struct WuhuWorkspaceDocsStore: Sendable {
-  let dataRoot: URL
   let workspaceRoot: URL
   let engine: WorkspaceEngine
   let scanner: WorkspaceScanner
 
-  init(dataRoot: URL) throws {
-    self.dataRoot = dataRoot
-    workspaceRoot = dataRoot.appendingPathComponent("workspace", isDirectory: true)
+  init(workspaceRoot: URL) throws {
+    self.workspaceRoot = workspaceRoot
     scanner = WorkspaceScanner(root: workspaceRoot)
     let config = try scanner.loadConfiguration()
     engine = try WorkspaceEngine(configuration: config)

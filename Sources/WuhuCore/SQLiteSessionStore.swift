@@ -139,11 +139,12 @@ public actor SQLiteSessionStore: SessionStore {
     environment: WuhuEnvironment,
     runnerName: String?,
     parentSessionID: String?,
+    workspaceRoot: String? = nil,
   ) async throws -> WuhuSession {
     let now = Date()
     let sessionID = rawSessionID.lowercased()
 
-    let skills = WuhuSkillsLoader.load(environmentRoot: environment.path)
+    let skills = WuhuSkillsLoader.load(environmentRoot: environment.path, workspaceRoot: workspaceRoot)
     let effectiveSystemPrompt: String = {
       if skills.isEmpty { return systemPrompt }
       return systemPrompt + WuhuSkills.promptSection(skills: skills)

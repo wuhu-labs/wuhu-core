@@ -38,8 +38,10 @@ public struct WuhuServer: Sendable {
     }()
     let blobStore = WuhuBlobStore(rootDirectory: blobRoot)
 
+    let workspaceRoot = config.resolveWorkspaceRoot(databasePath: dbPath)
+
     let workspaceDocsStore = try WuhuWorkspaceDocsStore(
-      dataRoot: URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent(),
+      workspaceRoot: URL(fileURLWithPath: workspaceRoot, isDirectory: true),
     )
     try workspaceDocsStore.ensureDefaultDirectories()
     workspaceDocsStore.startWatching()
@@ -68,6 +70,7 @@ public struct WuhuServer: Sendable {
           runnerRegistry: runnerRegistry,
         )
       },
+      workspaceRoot: workspaceRoot,
     )
     await service.startAgentLoopManager()
 

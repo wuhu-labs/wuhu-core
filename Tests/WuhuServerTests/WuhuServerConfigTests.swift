@@ -33,4 +33,31 @@ struct WuhuServerConfigTests {
     #expect(config.runners?[0].name == "runner-1")
     #expect(config.runners?[0].address == "127.0.0.1:5531")
   }
+
+  @Test func loadsWorkspacePath() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    workspacePath: /custom/workspace
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    #expect(config.workspacePath == "/custom/workspace")
+  }
+
+  @Test func resolveWorkspaceRootUsesConfigWhenSet() {
+    let config = WuhuServerConfig(workspacePath: "/my/workspace")
+    let resolved = config.resolveWorkspaceRoot(databasePath: "/data/wuhu.sqlite")
+    #expect(resolved == "/my/workspace")
+  }
+
+  @Test func resolveWorkspaceRootFallsBackToDataRoot() {
+    let config = WuhuServerConfig()
+    let resolved = config.resolveWorkspaceRoot(databasePath: "/data/wuhu.sqlite")
+    #expect(resolved.hasSuffix("/data/workspace"))
+  }
 }
