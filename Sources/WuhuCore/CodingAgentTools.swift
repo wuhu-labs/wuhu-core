@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 
@@ -86,9 +87,10 @@ private func readTool(cwd: String) -> AnyAgentTool {
   let tool = Tool(name: "read", description: description, parameters: schema)
 
   return AnyAgentTool(tool: tool, label: "read") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
 
-    let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd)
+    let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd, fileIO: fileIO)
 
     // Check if the file is an image — return as image content block.
     let ext = (resolved as NSString).pathExtension.lowercased()
@@ -96,7 +98,7 @@ private func readTool(cwd: String) -> AnyAgentTool {
       guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
         throw ToolError.message("Unsupported image format: \(ext)")
       }
-      let fileData = try Data(contentsOf: URL(fileURLWithPath: resolved))
+      let fileData = try fileIO.readData(path: resolved)
       guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
         throw ToolError.message(
           "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
@@ -109,7 +111,7 @@ private func readTool(cwd: String) -> AnyAgentTool {
       )
     }
 
-    let raw = try String(contentsOfFile: resolved, encoding: .utf8)
+    let raw = try fileIO.readString(path: resolved, encoding: .utf8)
     let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     let totalLines = allLines.count
@@ -207,11 +209,12 @@ private func writeTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
     let dir = (abs as NSString).deletingLastPathComponent
-    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: nil)
-    try params.content.write(toFile: abs, atomically: true, encoding: .utf8)
+    try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
     let bytes = params.content.utf8.count
     return AgentToolResult(content: [.text("Successfully wrote \(bytes) bytes to \(params.path)")], details: .object([:]))
   }
@@ -252,14 +255,15 @@ private func editTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
-    guard FileManager.default.fileExists(atPath: abs) else {
+    guard fileIO.exists(path: abs) else {
       throw ToolError.message("File not found: \(params.path)")
     }
 
     // Read via Data to preserve UTF-8 BOM (String(contentsOf:) may strip it).
-    let rawData = try Data(contentsOf: URL(fileURLWithPath: abs))
+    let rawData = try fileIO.readData(path: abs)
     let raw = String(decoding: rawData, as: UTF8.self)
     let (bom, contentNoBom) = stripBom(raw)
     let originalEnding = detectLineEnding(contentNoBom)
@@ -296,7 +300,7 @@ private func editTool(cwd: String) -> AnyAgentTool {
 
     let firstChangedLine = 1 + baseContent[..<range.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).count - 1
     let final = bom + restoreLineEndings(newContent, ending: originalEnding)
-    try final.write(toFile: abs, atomically: true, encoding: .utf8)
+    try fileIO.writeString(path: abs, content: final, atomically: true, encoding: .utf8)
 
     let diff = formatSimpleDiff(oldText: normalizedOldText, newText: normalizedNewText, line: firstChangedLine)
     return AgentToolResult(
@@ -341,19 +345,20 @@ private func lsTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
     let dirPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
 
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: dirPath, isDirectory: &isDir) else {
+    let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
+    guard dirExists else {
       throw ToolError.message("Path not found: \(dirPath)")
     }
-    guard isDir.boolValue else {
+    guard isDir else {
       throw ToolError.message("Not a directory: \(dirPath)")
     }
 
-    let entries = try FileManager.default.contentsOfDirectory(atPath: dirPath)
+    let entries = try fileIO.contentsOfDirectory(atPath: dirPath)
     let sorted = entries.sorted { $0.lowercased() < $1.lowercased() }
 
     var results: [String] = []
@@ -366,9 +371,9 @@ private func lsTool(cwd: String) -> AnyAgentTool {
         break
       }
       let full = (dirPath as NSString).appendingPathComponent(entry)
-      var isEntryDir: ObjCBool = false
-      guard FileManager.default.fileExists(atPath: full, isDirectory: &isEntryDir) else { continue }
-      results.append(isEntryDir.boolValue ? "\(entry)/" : entry)
+      let (entryExists, isEntryDir) = fileIO.existsAndIsDirectory(path: full)
+      guard entryExists else { continue }
+      results.append(isEntryDir ? "\(entry)/" : entry)
     }
 
     if results.isEmpty {
@@ -437,21 +442,23 @@ private func findTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "find") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchRoot = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: searchRoot, isDirectory: &isDir) else {
+    let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
+    guard dirExists else {
       throw ToolError.message("Path not found: \(searchRoot)")
     }
-    guard isDir.boolValue else {
+    guard isDir else {
       throw ToolError.message("Not a directory: \(searchRoot)")
     }
 
-    let ignore = GitIgnore(searchRoot: searchRoot)
+    let ignore = GitIgnore(searchRoot: searchRoot, fileIO: fileIO)
     let effectiveLimit = max(1, params.limit ?? 1000)
 
     let matches = try walkFiles(
       root: searchRoot,
+      fileIO: fileIO,
       shouldSkipDescendants: { rel, abs, isDir in
         guard isDir else { return false }
         if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
@@ -551,11 +558,12 @@ private func grepTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "grep") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
 
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: searchPath, isDirectory: &isDir) else {
+    let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
+    guard pathExists else {
       throw ToolError.message("Path not found: \(searchPath)")
     }
 
@@ -564,12 +572,13 @@ private func grepTool(cwd: String) -> AnyAgentTool {
     let ignoreCase = params.ignoreCase ?? false
     let literal = params.literal ?? false
 
-    let rootForRelPaths = isDir.boolValue ? searchPath : (searchPath as NSString).deletingLastPathComponent
-    let ignore = GitIgnore(searchRoot: rootForRelPaths)
+    let rootForRelPaths = isDir ? searchPath : (searchPath as NSString).deletingLastPathComponent
+    let ignore = GitIgnore(searchRoot: rootForRelPaths, fileIO: fileIO)
 
-    let files: [String] = if isDir.boolValue {
+    let files: [String] = if isDir {
       try walkFiles(
         root: searchPath,
+        fileIO: fileIO,
         shouldSkipDescendants: { rel, abs, isDir in
           guard isDir else { return false }
           if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
@@ -608,7 +617,7 @@ private func grepTool(cwd: String) -> AnyAgentTool {
 
       let content: String
       do {
-        content = try String(contentsOfFile: file, encoding: .utf8)
+        content = try fileIO.readString(path: file, encoding: .utf8)
       } catch {
         continue
       }
@@ -635,7 +644,7 @@ private func grepTool(cwd: String) -> AnyAgentTool {
         if !matchesLine(line) { continue }
         matchCount += 1
 
-        let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir.boolValue))
+        let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir))
         let lineNumber = idx + 1
 
         let start = max(1, lineNumber - contextLines)
@@ -990,38 +999,26 @@ private enum ToolError: Error, Sendable, CustomStringConvertible {
 
 private func walkFiles(
   root: String,
+  fileIO: any FileIO,
   shouldSkipDescendants: ((_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool)? = nil,
   include: (_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool,
 ) throws -> [String] {
-  let fm = FileManager.default
-  let rootURL = URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL
-  guard let enumerator = fm.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: nil)
-  else { return [] }
+  let allEntries = try fileIO.enumerateDirectory(atPath: root)
 
+  // Build a set of skipped directory prefixes for shouldSkipDescendants.
+  var skippedPrefixes: [String] = []
   var results: [String] = []
-  for case let url as URL in enumerator {
-    let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
-    let abs = resolvedURL.path
-    let prefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
-    let rel = ToolGlob.normalize(abs.replacingOccurrences(of: prefix, with: ""))
-    if rel.isEmpty { continue }
 
-    let values = try? resolvedURL.resourceValues(forKeys: [.isDirectoryKey])
-    let isDir = values?.isDirectory ?? false
-
-    if isDir,
-       rel == ".git" || rel.hasPrefix(".git/") ||
-       rel == "node_modules" || rel.hasPrefix("node_modules/") ||
-       rel == ".build" || rel.hasPrefix(".build/") ||
-       rel == ".swiftpm" || rel.hasPrefix(".swiftpm/") ||
-       rel == "DerivedData" || rel.hasPrefix("DerivedData/")
-    {
-      enumerator.skipDescendants()
-      continue
+  for (rel, abs, isDir) in allEntries {
+    // Check if this entry is under a skipped prefix.
+    let isUnderSkipped = skippedPrefixes.contains { prefix in
+      rel.hasPrefix(prefix)
     }
+    if isUnderSkipped { continue }
 
     if isDir, shouldSkipDescendants?(rel, abs, isDir) == true {
-      enumerator.skipDescendants()
+      let prefix = rel.hasSuffix("/") ? rel : rel + "/"
+      skippedPrefixes.append(prefix)
       continue
     }
 

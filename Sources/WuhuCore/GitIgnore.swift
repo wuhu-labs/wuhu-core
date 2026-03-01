@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 struct GitIgnore: Sendable {
@@ -13,8 +14,13 @@ struct GitIgnore: Sendable {
   private var rules: [Rule]
 
   init(searchRoot: String) {
+    @Dependency(\.fileIO) var fileIO
+    self.init(searchRoot: searchRoot, fileIO: fileIO)
+  }
+
+  init(searchRoot: String, fileIO: any FileIO) {
     self.searchRoot = URL(fileURLWithPath: searchRoot).resolvingSymlinksInPath().standardizedFileURL.path
-    rules = GitIgnore.loadRules(searchRoot: searchRoot)
+    rules = GitIgnore.loadRules(searchRoot: searchRoot, fileIO: fileIO)
   }
 
   func isIgnored(absolutePath: String, isDirectory: Bool) -> Bool {
@@ -47,43 +53,26 @@ struct GitIgnore: Sendable {
     return false
   }
 
-  private static func loadRules(searchRoot: String) -> [Rule] {
-    let fm = FileManager.default
+  private static func loadRules(searchRoot: String, fileIO: any FileIO) -> [Rule] {
     var out: [Rule] = []
 
-    guard let enumerator = fm.enumerator(atPath: searchRoot) else { return [] }
+    guard let entries = try? fileIO.enumerateDirectory(atPath: searchRoot) else { return [] }
 
-    for case let rel as String in enumerator {
-      if rel.hasPrefix(".git/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == ".build" || rel.hasPrefix(".build/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == ".swiftpm" || rel.hasPrefix(".swiftpm/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == "DerivedData" || rel.hasPrefix("DerivedData/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == "node_modules" || rel.hasPrefix("node_modules/") {
-        enumerator.skipDescendants()
-        continue
-      }
+    for (rel, abs, _) in entries {
+      if rel == ".git" || rel.hasPrefix(".git/") { continue }
+      if rel == ".build" || rel.hasPrefix(".build/") { continue }
+      if rel == ".swiftpm" || rel.hasPrefix(".swiftpm/") { continue }
+      if rel == "DerivedData" || rel.hasPrefix("DerivedData/") { continue }
+      if rel == "node_modules" || rel.hasPrefix("node_modules/") { continue }
 
       if (rel as NSString).lastPathComponent == ".gitignore" {
-        let abs = URL(fileURLWithPath: searchRoot).appendingPathComponent(rel).resolvingSymlinksInPath().standardizedFileURL.path
-        let baseDir = URL(fileURLWithPath: (abs as NSString).deletingLastPathComponent).resolvingSymlinksInPath().standardizedFileURL.path
-        guard let text = try? String(contentsOfFile: abs, encoding: .utf8) else { continue }
+        let baseDir = (abs as NSString).deletingLastPathComponent
+        guard let text = try? fileIO.readString(path: abs, encoding: .utf8) else { continue }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
           let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
           if line.isEmpty || line.hasPrefix("#") { continue }
-          if line.hasPrefix("!") { continue } // not supported
+          if line.hasPrefix("!") { continue }
 
           var pattern = line
           var anchored = false

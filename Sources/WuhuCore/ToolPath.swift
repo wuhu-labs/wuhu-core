@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 public enum ToolPath {
@@ -28,20 +29,25 @@ public enum ToolPath {
   }
 
   public static func resolveReadPath(_ path: String, cwd: String) -> String {
+    @Dependency(\.fileIO) var fileIO
+    return resolveReadPath(path, cwd: cwd, fileIO: fileIO)
+  }
+
+  static func resolveReadPath(_ path: String, cwd: String, fileIO: any FileIO) -> String {
     let resolved = resolveToCwd(path, cwd: cwd)
-    if FileManager.default.fileExists(atPath: resolved) { return resolved }
+    if fileIO.exists(path: resolved) { return resolved }
 
     let amPmVariant = tryMacOSScreenshotPath(resolved)
-    if amPmVariant != resolved, FileManager.default.fileExists(atPath: amPmVariant) { return amPmVariant }
+    if amPmVariant != resolved, fileIO.exists(path: amPmVariant) { return amPmVariant }
 
     let nfdVariant = resolved.decomposedStringWithCanonicalMapping // macOS often stores filenames in NFD
-    if nfdVariant != resolved, FileManager.default.fileExists(atPath: nfdVariant) { return nfdVariant }
+    if nfdVariant != resolved, fileIO.exists(path: nfdVariant) { return nfdVariant }
 
     let curlyVariant = tryCurlyQuoteVariant(resolved)
-    if curlyVariant != resolved, FileManager.default.fileExists(atPath: curlyVariant) { return curlyVariant }
+    if curlyVariant != resolved, fileIO.exists(path: curlyVariant) { return curlyVariant }
 
     let nfdCurly = tryCurlyQuoteVariant(nfdVariant)
-    if nfdCurly != resolved, FileManager.default.fileExists(atPath: nfdCurly) { return nfdCurly }
+    if nfdCurly != resolved, fileIO.exists(path: nfdCurly) { return nfdCurly }
 
     return resolved
   }
