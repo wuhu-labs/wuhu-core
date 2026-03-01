@@ -743,6 +743,7 @@ extension WuhuService {
       environment: parent.environment,
       runnerName: parent.runnerName,
       parentSessionID: parentSessionID,
+      workspaceRoot: workspaceRoot,
     )
 
     let parentTranscript = try await store.getEntries(sessionID: parentSessionID)
@@ -854,6 +855,7 @@ extension WuhuService {
       environment: environment,
       runnerName: parent.runnerName,
       parentSessionID: parentSessionID,
+      workspaceRoot: workspaceRoot,
     )
 
     let author: Author = .participant(.init(rawValue: "channel-agent"), kind: .bot)

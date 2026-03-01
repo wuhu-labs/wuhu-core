@@ -10,7 +10,8 @@ struct WuhuWorkspaceDocsStoreTests {
       .appendingPathComponent("wuhu-workspace-docs-\(UUID().uuidString.lowercased())", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let store = try WuhuWorkspaceDocsStore(dataRoot: root)
+    let workspaceRoot = root.appendingPathComponent("workspace", isDirectory: true)
+    let store = try WuhuWorkspaceDocsStore(workspaceRoot: workspaceRoot)
     try store.ensureDefaultDirectories()
 
     let issuePath = store.workspaceRoot
@@ -49,7 +50,8 @@ struct WuhuWorkspaceDocsStoreTests {
       .appendingPathComponent("wuhu-workspace-docs-\(UUID().uuidString.lowercased())", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let store = try WuhuWorkspaceDocsStore(dataRoot: root)
+    let workspaceRoot = root.appendingPathComponent("workspace", isDirectory: true)
+    let store = try WuhuWorkspaceDocsStore(workspaceRoot: workspaceRoot)
     try store.ensureDefaultDirectories()
 
     let path = store.workspaceRoot
@@ -78,7 +80,8 @@ struct WuhuWorkspaceDocsStoreTests {
       .appendingPathComponent("wuhu-workspace-docs-\(UUID().uuidString.lowercased())", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let store = try WuhuWorkspaceDocsStore(dataRoot: root)
+    let workspaceRoot = root.appendingPathComponent("workspace", isDirectory: true)
+    let store = try WuhuWorkspaceDocsStore(workspaceRoot: workspaceRoot)
     try store.ensureDefaultDirectories()
 
     await #expect(throws: WuhuWorkspaceDocsStoreError.self) {
