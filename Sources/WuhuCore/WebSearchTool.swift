@@ -100,7 +100,6 @@ extension WuhuTools {
         method: "GET",
         headers: [
           "Accept": "application/json",
-          "Accept-Encoding": "gzip",
           "X-Subscription-Token": apiKey,
         ],
       )
@@ -113,8 +112,15 @@ extension WuhuTools {
       }
 
       // Parse JSON response
-      guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        throw WebSearchError.message("Failed to parse Brave Search response")
+      let json: [String: Any]
+      do {
+        guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+          throw WebSearchError.message("Brave Search response was not a JSON object")
+        }
+        json = parsed
+      } catch {
+        let preview = String(decoding: data.prefix(500), as: UTF8.self)
+        throw WebSearchError.message("Failed to parse Brave Search response: \(error.localizedDescription)\nBody preview: \(preview)")
       }
 
       // Extract web results
