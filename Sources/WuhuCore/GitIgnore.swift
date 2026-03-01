@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 struct GitIgnore: Sendable {
@@ -13,11 +14,11 @@ struct GitIgnore: Sendable {
   private var rules: [Rule]
 
   init(searchRoot: String) {
-    self.searchRoot = URL(fileURLWithPath: searchRoot).resolvingSymlinksInPath().standardizedFileURL.path
-    rules = GitIgnore.loadRules(searchRoot: searchRoot)
+    @Dependency(\.fileIO) var fileIO
+    self.init(searchRoot: searchRoot, fileIO: fileIO)
   }
 
-  init(searchRoot: String, fileIO: FileIO) {
+  init(searchRoot: String, fileIO: any FileIO) {
     self.searchRoot = URL(fileURLWithPath: searchRoot).resolvingSymlinksInPath().standardizedFileURL.path
     rules = GitIgnore.loadRules(searchRoot: searchRoot, fileIO: fileIO)
   }
@@ -52,69 +53,7 @@ struct GitIgnore: Sendable {
     return false
   }
 
-  private static func loadRules(searchRoot: String) -> [Rule] {
-    let fm = FileManager.default
-    var out: [Rule] = []
-
-    guard let enumerator = fm.enumerator(atPath: searchRoot) else { return [] }
-
-    for case let rel as String in enumerator {
-      if rel.hasPrefix(".git/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == ".build" || rel.hasPrefix(".build/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == ".swiftpm" || rel.hasPrefix(".swiftpm/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == "DerivedData" || rel.hasPrefix("DerivedData/") {
-        enumerator.skipDescendants()
-        continue
-      }
-      if rel == "node_modules" || rel.hasPrefix("node_modules/") {
-        enumerator.skipDescendants()
-        continue
-      }
-
-      if (rel as NSString).lastPathComponent == ".gitignore" {
-        let abs = URL(fileURLWithPath: searchRoot).appendingPathComponent(rel).resolvingSymlinksInPath().standardizedFileURL.path
-        let baseDir = URL(fileURLWithPath: (abs as NSString).deletingLastPathComponent).resolvingSymlinksInPath().standardizedFileURL.path
-        guard let text = try? String(contentsOfFile: abs, encoding: .utf8) else { continue }
-
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-          let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-          if line.isEmpty || line.hasPrefix("#") { continue }
-          if line.hasPrefix("!") { continue } // not supported
-
-          var pattern = line
-          var anchored = false
-          if pattern.hasPrefix("/") {
-            anchored = true
-            pattern = String(pattern.dropFirst())
-          }
-
-          var isDirOnly = false
-          if pattern.hasSuffix("/") {
-            isDirOnly = true
-            pattern = String(pattern.dropLast())
-          }
-
-          let hasSlash = pattern.contains("/")
-          if pattern.isEmpty { continue }
-
-          out.append(.init(baseDir: baseDir, pattern: pattern, isDirOnly: isDirOnly, anchored: anchored, hasSlash: hasSlash))
-        }
-      }
-    }
-
-    return out
-  }
-
-  private static func loadRules(searchRoot: String, fileIO: FileIO) -> [Rule] {
+  private static func loadRules(searchRoot: String, fileIO: any FileIO) -> [Rule] {
     var out: [Rule] = []
 
     guard let entries = try? fileIO.enumerateDirectory(atPath: searchRoot) else { return [] }

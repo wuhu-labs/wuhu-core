@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 // MARK: - FileIO protocol
@@ -46,5 +47,19 @@ public struct FileIOAttributes: Sendable, Hashable {
     self.size = size
     self.isDirectory = isDirectory
     self.modificationDate = modificationDate
+  }
+}
+
+// MARK: - Dependency registration
+
+private enum FileIOKey: DependencyKey {
+  static let liveValue: any FileIO = LocalFileIO()
+  static let testValue: any FileIO = LocalFileIO()
+}
+
+public extension DependencyValues {
+  var fileIO: any FileIO {
+    get { self[FileIOKey.self] }
+    set { self[FileIOKey.self] = newValue }
   }
 }

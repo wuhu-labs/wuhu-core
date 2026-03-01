@@ -1,19 +1,19 @@
+import Dependencies
 import Foundation
 import PiAI
 
 public extension WuhuTools {
   static func codingAgentTools(
     cwd: String,
-    fileIO: FileIO = LocalFileIO(),
     asyncBash: WuhuAsyncBashToolContext = .init(),
   ) -> [AnyAgentTool] {
     [
-      readTool(cwd: cwd, fileIO: fileIO),
-      writeTool(cwd: cwd, fileIO: fileIO),
-      editTool(cwd: cwd, fileIO: fileIO),
-      lsTool(cwd: cwd, fileIO: fileIO),
-      findTool(cwd: cwd, fileIO: fileIO),
-      grepTool(cwd: cwd, fileIO: fileIO),
+      readTool(cwd: cwd),
+      writeTool(cwd: cwd),
+      editTool(cwd: cwd),
+      lsTool(cwd: cwd),
+      findTool(cwd: cwd),
+      grepTool(cwd: cwd),
       bashTool(cwd: cwd),
       asyncBashTool(cwd: cwd, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
@@ -24,7 +24,7 @@ public extension WuhuTools {
 
 // MARK: - read
 
-private func readTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func readTool(cwd: String) -> AnyAgentTool {
   // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
   // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
   // See https://github.com/wuhu-labs/wuhu/issues/12
@@ -87,6 +87,7 @@ private func readTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   let tool = Tool(name: "read", description: description, parameters: schema)
 
   return AnyAgentTool(tool: tool, label: "read") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
 
     let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd, fileIO: fileIO)
@@ -178,7 +179,7 @@ private func readTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
 
 // MARK: - write
 
-private func writeTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func writeTool(cwd: String) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var content: String
@@ -208,6 +209,7 @@ private func writeTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
     let dir = (abs as NSString).deletingLastPathComponent
@@ -220,7 +222,7 @@ private func writeTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
 
 // MARK: - edit
 
-private func editTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func editTool(cwd: String) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var oldText: String
@@ -253,6 +255,7 @@ private func editTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
     guard fileIO.exists(path: abs) else {
@@ -312,7 +315,7 @@ private func editTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
 
 // MARK: - ls
 
-private func lsTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func lsTool(cwd: String) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String?
     var limit: Int?
@@ -342,6 +345,7 @@ private func lsTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
     let dirPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
@@ -405,7 +409,7 @@ private func lsTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
 
 // MARK: - find
 
-private func findTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func findTool(cwd: String) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -438,6 +442,7 @@ private func findTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "find") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchRoot = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
     let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
@@ -500,7 +505,7 @@ private func findTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
 
 // MARK: - grep
 
-private func grepTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
+private func grepTool(cwd: String) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -553,6 +558,7 @@ private func grepTool(cwd: String, fileIO: FileIO) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "grep") { _, args in
+    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
 
@@ -993,7 +999,7 @@ private enum ToolError: Error, Sendable, CustomStringConvertible {
 
 private func walkFiles(
   root: String,
-  fileIO: FileIO,
+  fileIO: any FileIO,
   shouldSkipDescendants: ((_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool)? = nil,
   include: (_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool,
 ) throws -> [String] {

@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 public enum ToolPath {
@@ -28,10 +29,11 @@ public enum ToolPath {
   }
 
   public static func resolveReadPath(_ path: String, cwd: String) -> String {
-    resolveReadPath(path, cwd: cwd, fileIO: LocalFileIO())
+    @Dependency(\.fileIO) var fileIO
+    return resolveReadPath(path, cwd: cwd, fileIO: fileIO)
   }
 
-  public static func resolveReadPath(_ path: String, cwd: String, fileIO: FileIO) -> String {
+  static func resolveReadPath(_ path: String, cwd: String, fileIO: any FileIO) -> String {
     let resolved = resolveToCwd(path, cwd: cwd)
     if fileIO.exists(path: resolved) { return resolved }
 
