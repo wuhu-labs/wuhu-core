@@ -45,14 +45,14 @@ extension WuhuService {
   private func createSessionTool(currentSessionID: String) -> AnyAgentTool {
     struct Params: Sendable {
       var task: String
-      var environmentID: String
+      var mountTemplateID: String
 
       static func parse(toolName: String, args: JSONValue) throws -> Params {
         let a = try ToolArgs(toolName: toolName, args: args)
         let task = try a.requireString("task")
-        let environmentID = try a.requireString("environmentID")
-        try a.ensureNoExtraKeys(allowed: ["task", "environmentID"])
-        return .init(task: task, environmentID: environmentID)
+        let mountTemplateID = try a.requireString("mountTemplateID")
+        try a.ensureNoExtraKeys(allowed: ["task", "mountTemplateID"])
+        return .init(task: task, mountTemplateID: mountTemplateID)
       }
     }
 
@@ -63,18 +63,18 @@ extension WuhuService {
           "type": .string("string"),
           "description": .string("Task description for the new coding session"),
         ]),
-        "environmentID": .object([
+        "mountTemplateID": .object([
           "type": .string("string"),
-          "description": .string("Environment UUID or name to deploy the session into"),
+          "description": .string("Mount template UUID or unique name to instantiate for the new session"),
         ]),
       ]),
-      "required": .array([.string("task"), .string("environmentID")]),
+      "required": .array([.string("task"), .string("mountTemplateID")]),
       "additionalProperties": .bool(false),
     ])
 
     let tool = Tool(
       name: WuhuAgentToolNames.createSession,
-      description: "Create a fresh coding session in a specified environment with no conversation history. Use this for subagent-style dispatch where history inheritance is unwanted.",
+      description: "Create a fresh coding session from a mount template with no conversation history. Instantiates a new workspace from the template. Use this for subagent-style dispatch where history inheritance is unwanted.",
       parameters: schema,
     )
 
@@ -82,13 +82,13 @@ extension WuhuService {
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let task = params.task.trimmingCharacters(in: .whitespacesAndNewlines)
-      let envID = params.environmentID.trimmingCharacters(in: .whitespacesAndNewlines)
+      let mountTemplateID = params.mountTemplateID.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !task.isEmpty else { throw WuhuToolExecutionError(message: "task must not be empty") }
-      guard !envID.isEmpty else { throw WuhuToolExecutionError(message: "environmentID must not be empty") }
+      guard !mountTemplateID.isEmpty else { throw WuhuToolExecutionError(message: "mountTemplateID must not be empty") }
 
       let child = try await createDirectSession(
         parentSessionID: currentSessionID,
-        mountTemplateIdentifier: envID,
+        mountTemplateIdentifier: mountTemplateID,
         task: task,
       )
 
@@ -408,7 +408,7 @@ extension WuhuService {
       "properties": .object([:]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.mountTemplateList, description: "List canonical environments.", parameters: schema)
+    let tool = Tool(name: WuhuAgentToolNames.mountTemplateList, description: "List available mount templates.", parameters: schema)
 
     return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateList) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
@@ -421,8 +421,8 @@ extension WuhuService {
         (try? WuhuJSON.encoder.encodeToJSONValue(t)) ?? .null
       }
       return AgentToolResult(
-        content: [.text(lines.isEmpty ? "(no environments)" : lines.joined(separator: "\n"))],
-        details: .object(["environments": .array(json)]),
+        content: [.text(lines.isEmpty ? "(no mount templates)" : lines.joined(separator: "\n"))],
+        details: .object(["mountTemplates": .array(json)]),
       )
     }
   }
@@ -431,12 +431,12 @@ extension WuhuService {
     let schema: JSONValue = .object([
       "type": .string("object"),
       "properties": .object([
-        "identifier": .object(["type": .string("string"), "description": .string("Environment UUID or unique name")]),
+        "identifier": .object(["type": .string("string"), "description": .string("Mount template UUID or unique name")]),
       ]),
       "required": .array([.string("identifier")]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.mountTemplateGet, description: "Get a canonical environment definition.", parameters: schema)
+    let tool = Tool(name: WuhuAgentToolNames.mountTemplateGet, description: "Get a mount template definition.", parameters: schema)
 
     return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateGet) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
@@ -457,13 +457,15 @@ extension WuhuService {
     struct Params: Sendable {
       var path: String?
       var name: String?
+      var mountTemplateID: String?
 
       static func parse(toolName: String, args: JSONValue) throws -> Params {
         let a = try ToolArgs(toolName: toolName, args: args)
         let path = try a.optionalString("path")
         let name = try a.optionalString("name")
-        try a.ensureNoExtraKeys(allowed: ["path", "name"])
-        return .init(path: path, name: name)
+        let mountTemplateID = try a.optionalString("mountTemplateID")
+        try a.ensureNoExtraKeys(allowed: ["path", "name", "mountTemplateID"])
+        return .init(path: path, name: name, mountTemplateID: mountTemplateID)
       }
     }
 
@@ -472,13 +474,14 @@ extension WuhuService {
       "properties": .object([
         "path": .object(["type": .string("string"), "description": .string("Absolute path to the directory to mount. If omitted or empty, creates a scratch directory for this session.")]),
         "name": .object(["type": .string("string"), "description": .string("Optional label for the mount")]),
+        "mountTemplateID": .object(["type": .string("string"), "description": .string("Mount template UUID or unique name. If provided, instantiates a fresh workspace from the template and mounts it. Mutually exclusive with path.")]),
       ]),
       "additionalProperties": .bool(false),
     ])
 
     let tool = Tool(
       name: WuhuAgentToolNames.mount,
-      description: "Mount a directory as the working directory for this session. Changes the cwd for all filesystem and bash tools. Injects AGENTS.md and skills from the mounted directory. Can be called multiple times to switch directories. Call with no path (or empty path) to create a scratch directory.",
+      description: "Mount a directory as the working directory for this session. Changes the cwd for all filesystem and bash tools. Injects AGENTS.md and skills from the mounted directory. Can be called multiple times to switch directories. Call with no path (or empty path) to create a scratch directory. Pass mountTemplateID to instantiate a fresh workspace from a mount template.",
       parameters: schema,
     )
 
@@ -486,12 +489,25 @@ extension WuhuService {
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-      let mountPath: String = if rawPath.isEmpty {
+      if !rawPath.isEmpty, !rawTemplateID.isEmpty {
+        throw WuhuToolExecutionError(message: "path and mountTemplateID are mutually exclusive — provide one or the other")
+      }
+
+      let mountPath: String
+      var mountTemplateID: String?
+
+      if !rawTemplateID.isEmpty {
+        // Instantiate a fresh workspace from the mount template
+        let resolved = try await materializeMountTemplate(identifier: rawTemplateID, sessionID: currentSessionID)
+        mountPath = resolved.workspacePath
+        mountTemplateID = resolved.templateID
+      } else if rawPath.isEmpty {
         // Create a scratch directory tied to this session ID
-        try WuhuScratchDirectory.create(sessionID: currentSessionID)
+        mountPath = try WuhuScratchDirectory.create(sessionID: currentSessionID)
       } else {
-        rawPath
+        mountPath = rawPath
       }
 
       var isDir: ObjCBool = false
@@ -500,12 +516,20 @@ extension WuhuService {
       }
 
       let mountName = (params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-      let effectiveName = mountName.isEmpty ? URL(fileURLWithPath: mountPath).lastPathComponent : mountName
+      let effectiveName: String = if !mountName.isEmpty {
+        mountName
+      } else if !rawTemplateID.isEmpty {
+        // Use the template name for a nicer label
+        rawTemplateID
+      } else {
+        URL(fileURLWithPath: mountPath).lastPathComponent
+      }
 
       let mount = try await store.createMount(
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
+        mountTemplateID: mountTemplateID,
         isPrimary: true,
       )
 
@@ -527,23 +551,34 @@ extension WuhuService {
     }
   }
 
+  // MARK: - Mount Template Materialization
+
+  private struct MaterializedTemplate: Sendable {
+    var templateID: String
+    var workspacePath: String
+  }
+
+  private func materializeMountTemplate(identifier: String, sessionID: String) async throws -> MaterializedTemplate {
+    let mt = try await store.getMountTemplate(identifier: identifier)
+    let serverCwd = FileManager.default.currentDirectoryPath
+    let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
+    let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+    let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
+      sessionID: sessionID,
+      templatePath: templatePath,
+      startupScript: mt.startupScript,
+      workspacesPath: workspacesRoot,
+    )
+    return MaterializedTemplate(templateID: mt.id, workspacePath: workspacePath)
+  }
+
   private func createDirectSession(parentSessionID: String, mountTemplateIdentifier: String, task: String) async throws -> WuhuSession {
     let parent = try await store.getSession(id: parentSessionID)
     let settings = try await store.loadSettingsSnapshot(sessionID: .init(rawValue: parentSessionID))
     let reasoningEffort = settings.effectiveReasoningEffort
 
-    let mt = try await store.getMountTemplate(identifier: mountTemplateIdentifier)
     let childSessionID = UUID().uuidString.lowercased()
-
-    let serverCwd = FileManager.default.currentDirectoryPath
-    let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
-    let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
-    let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
-      sessionID: childSessionID,
-      templatePath: templatePath,
-      startupScript: mt.startupScript,
-      workspacesPath: workspacesRoot,
-    )
+    let resolved = try await materializeMountTemplate(identifier: mountTemplateIdentifier, sessionID: childSessionID)
 
     _ = try await createSession(
       sessionID: childSessionID,
@@ -551,16 +586,16 @@ extension WuhuService {
       model: parent.model,
       reasoningEffort: reasoningEffort,
       systemPrompt: WuhuDefaultSystemPrompts.codingAgent,
-      cwd: workspacePath,
+      cwd: resolved.workspacePath,
       parentSessionID: parentSessionID,
     )
 
     // Create mount record
     let mount = try await store.createMount(
       sessionID: childSessionID,
-      name: mt.name,
-      path: workspacePath,
-      mountTemplateID: mt.id,
+      name: mountTemplateIdentifier,
+      path: resolved.workspacePath,
+      mountTemplateID: resolved.templateID,
       isPrimary: true,
     )
 
