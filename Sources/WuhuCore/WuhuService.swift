@@ -10,6 +10,7 @@ public actor WuhuService {
   private let asyncBashRegistry: WuhuAsyncBashRegistry
   private let baseStreamFn: StreamFn
   let workspaceRoot: String?
+  private let braveSearchAPIKey: String?
   private let instanceID: String
   private let eventHub = WuhuLiveEventHub()
   private let subscriptionHub = WuhuSessionSubscriptionHub()
@@ -25,6 +26,7 @@ public actor WuhuService {
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
+    braveSearchAPIKey: String? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -33,6 +35,7 @@ public actor WuhuService {
     self.asyncBashRegistry = asyncBashRegistry
     self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
+    self.braveSearchAPIKey = braveSearchAPIKey
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -483,6 +486,7 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     let baseTools = WuhuTools.codingAgentTools(
       cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
       asyncBash: asyncBash,
+      braveSearchAPIKey: braveSearchAPIKey,
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 

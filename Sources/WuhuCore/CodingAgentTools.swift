@@ -10,8 +10,9 @@ public extension WuhuTools {
   static func codingAgentTools(
     cwdProvider: @escaping CwdProvider,
     asyncBash: WuhuAsyncBashToolContext = .init(),
+    braveSearchAPIKey: String? = nil,
   ) -> [AnyAgentTool] {
-    [
+    var tools: [AnyAgentTool] = [
       readTool(cwdProvider: cwdProvider),
       writeTool(cwdProvider: cwdProvider),
       editTool(cwdProvider: cwdProvider),
@@ -22,6 +23,10 @@ public extension WuhuTools {
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
+    if let braveSearchAPIKey, !braveSearchAPIKey.isEmpty {
+      tools.append(webSearchTool(apiKey: braveSearchAPIKey))
+    }
+    return tools
   }
 }
 
