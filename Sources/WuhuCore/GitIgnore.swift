@@ -17,6 +17,11 @@ struct GitIgnore: Sendable {
     rules = GitIgnore.loadRules(searchRoot: searchRoot)
   }
 
+  init(searchRoot: String, fileIO: FileIO) {
+    self.searchRoot = URL(fileURLWithPath: searchRoot).resolvingSymlinksInPath().standardizedFileURL.path
+    rules = GitIgnore.loadRules(searchRoot: searchRoot, fileIO: fileIO)
+  }
+
   func isIgnored(absolutePath: String, isDirectory: Bool) -> Bool {
     // Gitignore semantics are complex; we implement the subset we need:
     // - No negation (!)
@@ -84,6 +89,51 @@ struct GitIgnore: Sendable {
           let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
           if line.isEmpty || line.hasPrefix("#") { continue }
           if line.hasPrefix("!") { continue } // not supported
+
+          var pattern = line
+          var anchored = false
+          if pattern.hasPrefix("/") {
+            anchored = true
+            pattern = String(pattern.dropFirst())
+          }
+
+          var isDirOnly = false
+          if pattern.hasSuffix("/") {
+            isDirOnly = true
+            pattern = String(pattern.dropLast())
+          }
+
+          let hasSlash = pattern.contains("/")
+          if pattern.isEmpty { continue }
+
+          out.append(.init(baseDir: baseDir, pattern: pattern, isDirOnly: isDirOnly, anchored: anchored, hasSlash: hasSlash))
+        }
+      }
+    }
+
+    return out
+  }
+
+  private static func loadRules(searchRoot: String, fileIO: FileIO) -> [Rule] {
+    var out: [Rule] = []
+
+    guard let entries = try? fileIO.enumerateDirectory(atPath: searchRoot) else { return [] }
+
+    for (rel, abs, _) in entries {
+      if rel == ".git" || rel.hasPrefix(".git/") { continue }
+      if rel == ".build" || rel.hasPrefix(".build/") { continue }
+      if rel == ".swiftpm" || rel.hasPrefix(".swiftpm/") { continue }
+      if rel == "DerivedData" || rel.hasPrefix("DerivedData/") { continue }
+      if rel == "node_modules" || rel.hasPrefix("node_modules/") { continue }
+
+      if (rel as NSString).lastPathComponent == ".gitignore" {
+        let baseDir = (abs as NSString).deletingLastPathComponent
+        guard let text = try? fileIO.readString(path: abs, encoding: .utf8) else { continue }
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+          let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+          if line.isEmpty || line.hasPrefix("#") { continue }
+          if line.hasPrefix("!") { continue }
 
           var pattern = line
           var anchored = false
