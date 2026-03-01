@@ -478,17 +478,12 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     await ensureAsyncBashRouter()
     let session = try await store.getSession(id: sessionID.rawValue)
 
-    let baseTools: [AnyAgentTool]
-    if let cwd = session.cwd {
-      let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
-      baseTools = WuhuTools.codingAgentTools(
-        cwd: cwd,
-        asyncBash: asyncBash,
-      )
-    } else {
-      baseTools = []
-    }
-
+    let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
+    let sid = sessionID.rawValue
+    let baseTools = WuhuTools.codingAgentTools(
+      cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
+      asyncBash: asyncBash,
+    )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
     let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn

@@ -155,7 +155,8 @@ private func printHelpAndExit() -> Never {
 }
 
 private func runWuhuFind(options: Options) async throws -> [String] {
-  let tools = WuhuTools.codingAgentTools(cwd: options.root)
+  let root = options.root
+  let tools = WuhuTools.codingAgentTools(cwdProvider: { root })
   guard let tool = tools.first(where: { $0.tool.name == "find" }) else {
     throw PiAIError.unsupported("find tool not found")
   }

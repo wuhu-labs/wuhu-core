@@ -44,6 +44,13 @@ enum WuhuPromptPreparation {
       messages.append(WuhuCompactionEngine.makeSummaryMessage(summary: summary))
     }
 
+    // Track pending tool calls so we can defer context entries that land
+    // between an assistant tool_use and its tool_result. Anthropic requires
+    // tool_result messages to immediately follow the assistant message that
+    // issued the tool_use — interleaving user messages breaks the API.
+    var pendingToolCallIDs: Set<String> = []
+    var deferredContextMessages: [Message] = []
+
     for (idx, entry) in transcript[startIndex...].enumerated() {
       let entryIndex = startIndex + idx
 
@@ -58,14 +65,45 @@ enum WuhuPromptPreparation {
          case let .string(text) = obj["text"],
          !text.isEmpty
       {
-        messages.append(.user(UserMessage(content: [.text(text)])))
+        let userMsg = Message.user(UserMessage(content: [.text(text)]))
+        if pendingToolCallIDs.isEmpty {
+          messages.append(userMsg)
+        } else {
+          // Defer until all pending tool results arrive
+          deferredContextMessages.append(userMsg)
+        }
         continue
       }
 
       guard case let .message(m) = entry.payload else { continue }
       guard let pi = WuhuGroupChat.renderForLLM(message: m, entryIndex: entryIndex, reminderIndex: reminderIndex) else { continue }
+
+      // Track tool call lifecycle
+      switch pi {
+      case let .assistant(a):
+        for block in a.content {
+          if case let .toolCall(call) = block {
+            pendingToolCallIDs.insert(call.id)
+          }
+        }
+      case let .toolResult(r):
+        pendingToolCallIDs.remove(r.toolCallId)
+        messages.append(pi)
+        // Flush deferred context messages once all tool results are in
+        if pendingToolCallIDs.isEmpty, !deferredContextMessages.isEmpty {
+          messages.append(contentsOf: deferredContextMessages)
+          deferredContextMessages.removeAll()
+        }
+        continue
+      default:
+        break
+      }
+
       messages.append(pi)
     }
+
+    // Flush any remaining deferred messages (shouldn't happen in normal flow)
+    messages.append(contentsOf: deferredContextMessages)
 
     return WuhuToolRepairer.repairMissingToolResultsInMemory(messages)
   }

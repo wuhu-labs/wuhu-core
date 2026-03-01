@@ -2,28 +2,40 @@ import Dependencies
 import Foundation
 import PiAI
 
+/// Closure that resolves the current working directory for the session.
+/// Returns nil when no mount has been set yet.
+public typealias CwdProvider = @Sendable () async throws -> String?
+
 public extension WuhuTools {
   static func codingAgentTools(
-    cwd: String,
+    cwdProvider: @escaping CwdProvider,
     asyncBash: WuhuAsyncBashToolContext = .init(),
   ) -> [AnyAgentTool] {
     [
-      readTool(cwd: cwd),
-      writeTool(cwd: cwd),
-      editTool(cwd: cwd),
-      lsTool(cwd: cwd),
-      findTool(cwd: cwd),
-      grepTool(cwd: cwd),
-      bashTool(cwd: cwd),
-      asyncBashTool(cwd: cwd, context: asyncBash),
+      readTool(cwdProvider: cwdProvider),
+      writeTool(cwdProvider: cwdProvider),
+      editTool(cwdProvider: cwdProvider),
+      lsTool(cwdProvider: cwdProvider),
+      findTool(cwdProvider: cwdProvider),
+      grepTool(cwdProvider: cwdProvider),
+      bashTool(cwdProvider: cwdProvider),
+      asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
   }
 }
 
+private let noCwdError = "No working directory set. Use the mount tool to mount a directory first."
+
+/// Resolve the live cwd, throwing a tool error if nil.
+private func requireCwd(_ provider: CwdProvider) async throws -> String {
+  guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
+  return cwd
+}
+
 // MARK: - read
 
-private func readTool(cwd: String) -> AnyAgentTool {
+private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
   // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
   // See https://github.com/wuhu-labs/wuhu/issues/12
@@ -86,6 +98,7 @@ private func readTool(cwd: String) -> AnyAgentTool {
   let tool = Tool(name: "read", description: description, parameters: schema)
 
   return AnyAgentTool(tool: tool, label: "read") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
 
@@ -178,7 +191,7 @@ private func readTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - write
 
-private func writeTool(cwd: String) -> AnyAgentTool {
+private func writeTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var content: String
@@ -208,6 +221,7 @@ private func writeTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
@@ -221,7 +235,7 @@ private func writeTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - edit
 
-private func editTool(cwd: String) -> AnyAgentTool {
+private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var oldText: String
@@ -254,6 +268,7 @@ private func editTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
@@ -314,7 +329,7 @@ private func editTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - ls
 
-private func lsTool(cwd: String) -> AnyAgentTool {
+private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String?
     var limit: Int?
@@ -344,6 +359,7 @@ private func lsTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
@@ -408,7 +424,7 @@ private func lsTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - find
 
-private func findTool(cwd: String) -> AnyAgentTool {
+private func findTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -441,6 +457,7 @@ private func findTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "find") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchRoot = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
@@ -504,7 +521,7 @@ private func findTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - grep
 
-private func grepTool(cwd: String) -> AnyAgentTool {
+private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -557,6 +574,7 @@ private func grepTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "grep") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let searchPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
@@ -696,7 +714,7 @@ private func grepTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(cwd: String) -> AnyAgentTool {
+private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -726,6 +744,7 @@ private func bashTool(cwd: String) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "bash") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     let params = try Params.parse(toolName: tool.name, args: args)
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
@@ -788,7 +807,7 @@ private func bashTool(cwd: String) -> AnyAgentTool {
 
 // MARK: - async_bash
 
-private func asyncBashTool(cwd: String, context: WuhuAsyncBashToolContext) -> AnyAgentTool {
+private func asyncBashTool(cwdProvider: @escaping CwdProvider, context: WuhuAsyncBashToolContext) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -818,6 +837,7 @@ private func asyncBashTool(cwd: String, context: WuhuAsyncBashToolContext) -> An
   )
 
   return AnyAgentTool(tool: tool, label: "async_bash") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
     let params = try Params.parse(toolName: tool.name, args: args)
     let started = try await context.registry.start(
       command: params.command,

@@ -18,7 +18,7 @@ struct InMemoryFileIOToolTests {
   private func tools() -> [String: AnyAgentTool] {
     Dictionary(
       uniqueKeysWithValues:
-      WuhuTools.codingAgentTools(cwd: cwd)
+      WuhuTools.codingAgentTools(cwdProvider: { cwd })
         .map { ($0.tool.name, $0) },
     )
   }

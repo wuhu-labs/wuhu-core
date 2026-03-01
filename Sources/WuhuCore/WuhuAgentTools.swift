@@ -479,7 +479,7 @@ extension WuhuService {
 
     let tool = Tool(
       name: WuhuAgentToolNames.mount,
-      description: "Mount a directory for this session. After mounting, filesystem tools become available if they weren't already. Injects AGENTS.md and skills from the mounted directory.",
+      description: "Mount a directory as the working directory for this session. Changes the cwd for all filesystem and bash tools. Injects AGENTS.md and skills from the mounted directory. Can be called multiple times to switch directories.",
       parameters: schema,
     )
 
@@ -497,21 +497,15 @@ extension WuhuService {
       let mountName = (params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let effectiveName = mountName.isEmpty ? URL(fileURLWithPath: mountPath).lastPathComponent : mountName
 
-      // Check if this session already has a primary mount
-      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
-      let hasPrimary = existingMounts.contains { $0.isPrimary }
-
       let mount = try await store.createMount(
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
-        isPrimary: !hasPrimary,
+        isPrimary: true,
       )
 
-      // Update session cwd if this is the first/primary mount
-      if mount.isPrimary {
-        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
-      }
+      // Always update cwd to the mounted directory
+      try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
 
       // Emit context entries
       try await emitMountContext(sessionID: currentSessionID, mount: mount)

@@ -209,7 +209,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     let settings = try await store.loadSettingsSnapshot(sessionID: sessionID)
 
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
-    let apiModel = Model(id: resolved.apiModelID, provider: session.provider.piProvider)
+    let provider = session.provider.piProvider
+    let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
     var requestOptions = makeRequestOptions(model: apiModel, settings: settings, userModelID: session.model)
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
@@ -378,7 +379,8 @@ struct WuhuSessionBehavior: AgentBehavior {
   func performCompaction(state: State) async throws -> [CommittedAction] {
     let session = try await store.getSession(id: sessionID.rawValue)
     // Use user-facing model ID for compaction settings (picks up 1M context window for aliases).
-    let settingsModel = Model(id: session.model, provider: session.provider.piProvider)
+    let provider = session.provider.piProvider
+    let settingsModel = Model(id: session.model, provider: provider)
     let settings = WuhuCompactionSettings.load(model: settingsModel)
 
     guard let prep = WuhuCompactionEngine.prepareCompaction(transcript: state.entries, settings: settings) else {
@@ -387,7 +389,7 @@ struct WuhuSessionBehavior: AgentBehavior {
 
     // Use resolved API model ID for the actual summarization call.
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
-    let apiModel = Model(id: resolved.apiModelID, provider: session.provider.piProvider)
+    let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
     let streamFn = await runtimeConfig.streamFn()
     var requestOptions = makeRequestOptions(model: apiModel, settings: state.settings, userModelID: session.model)
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
@@ -569,4 +571,17 @@ private func modelFromSettings(_ settings: SessionSettingsSnapshot) -> Model {
     .openai
   }
   return .init(id: settings.effectiveModel.id, provider: provider)
+}
+
+/// Resolves an optional base URL override for a provider from environment
+/// variables. Checks `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`.
+func providerBaseURL(for provider: Provider) -> URL? {
+  let envVar: String? = switch provider {
+  case .anthropic:
+    ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+  case .openai, .openaiCodex:
+    ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
+  }
+  guard let value = envVar, let url = URL(string: value) else { return nil }
+  return url
 }
