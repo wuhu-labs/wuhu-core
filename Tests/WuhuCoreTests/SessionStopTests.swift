@@ -18,8 +18,7 @@ struct SessionStopTests {
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
+      cwd: "/tmp",
     )
 
     let response = try await service.stopSession(sessionID: session.id, user: "alice")
@@ -37,8 +36,7 @@ struct SessionStopTests {
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
+      cwd: "/tmp",
     )
 
     _ = try await store.appendEntry(sessionID: session.id, payload: .message(.user(.init(
@@ -65,8 +63,7 @@ struct SessionStopTests {
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
+      cwd: "/tmp",
     )
 
     let now = Date(timeIntervalSince1970: 0)

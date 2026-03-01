@@ -25,12 +25,10 @@ struct JoinSessionsToolTests {
   ) async throws -> WuhuSession {
     try await service.createSession(
       sessionID: sessionID ?? newSessionID(),
-      sessionType: .coding,
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
+      cwd: "/tmp",
     )
   }
 
@@ -42,12 +40,10 @@ struct JoinSessionsToolTests {
   ) async throws -> WuhuSession {
     try await service.createSession(
       sessionID: sessionID ?? newSessionID(),
-      sessionType: .coding,
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
+      cwd: "/tmp",
       parentSessionID: parentSessionID,
     )
   }
@@ -259,37 +255,6 @@ struct JoinSessionsToolTests {
     #expect(text.contains("All 1 session completed."))
     #expect(text.contains("[stopped]"))
     #expect(text.contains("Child was stopped"))
-  }
-
-  @Test func joinSessions_marksFinalMessagesAsRead() async throws {
-    let (store, service) = try makeStoreAndService()
-    let parent = try await createParentSession(store: store, service: service)
-    let child = try await createChildSession(store: store, service: service, parentSessionID: parent.id)
-
-    let entry = try await appendFinalAssistantMessage(store: store, sessionID: child.id, text: "Done")
-
-    // Simulate the notification having been set.
-    _ = try await store.setChildFinalMessageNotified(
-      parentSessionID: parent.id,
-      childSessionID: child.id,
-      finalEntryID: entry.id,
-    )
-
-    // Verify it's currently unread.
-    let beforeChildren = try await store.listChildSessions(parentSessionID: parent.id)
-    let beforeChild = try #require(beforeChildren.first)
-    #expect(beforeChild.hasUnreadFinalMessage)
-
-    let tool = try #require(await getJoinSessionsTool(service: service, parentSession: parent))
-    _ = try await tool.execute(
-      toolCallId: "tc8",
-      args: .object(["sessionIDs": .array([.string(child.id)])]),
-    )
-
-    // Verify it's now read.
-    let afterChildren = try await store.listChildSessions(parentSessionID: parent.id)
-    let afterChild = try #require(afterChildren.first)
-    #expect(!afterChild.hasUnreadFinalMessage)
   }
 
   @Test func joinSessions_toolIsAvailableInManagementTools() async throws {

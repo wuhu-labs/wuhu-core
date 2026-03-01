@@ -79,8 +79,7 @@ struct AsyncBashTests {
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: dir),
+      cwd: dir,
     )
 
     let baselineCursor = session.tailEntryID

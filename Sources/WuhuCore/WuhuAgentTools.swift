@@ -147,7 +147,7 @@ extension WuhuService {
     }
   }
 
-  private func readSessionFinalMessageTool(currentSessionID: String) -> AnyAgentTool {
+  private func readSessionFinalMessageTool(currentSessionID _: String) -> AnyAgentTool {
     struct Params: Sendable {
       var sessionID: String
 
