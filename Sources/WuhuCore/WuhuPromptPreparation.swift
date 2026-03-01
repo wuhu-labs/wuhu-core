@@ -49,9 +49,11 @@ enum WuhuPromptPreparation {
 
       // Convert context custom entries (AGENTS.md, skills, mount announcements) into user messages
       if case let .custom(customType, data) = entry.payload,
-         [WuhuCustomMessageTypes.agentsContext,
-          WuhuCustomMessageTypes.skillsContext,
-          WuhuCustomMessageTypes.mountContext].contains(customType),
+         [
+           WuhuCustomMessageTypes.agentsContext,
+           WuhuCustomMessageTypes.skillsContext,
+           WuhuCustomMessageTypes.mountContext
+         ].contains(customType),
          case let .object(obj) = data,
          case let .string(text) = obj["text"],
          !text.isEmpty
