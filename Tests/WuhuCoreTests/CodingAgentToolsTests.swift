@@ -471,23 +471,4 @@ struct CodingAgentToolsTests {
     let out = textOutput(result)
     #expect(!out.isEmpty)
   }
-
-  // MARK: - swift tool (real filesystem — process execution)
-
-  @Test func swiftToolRunsSnippet() async throws {
-    let dir = try makeTempDir(prefix: "wuhu-swift-tool")
-    let t = try #require(realTools(cwd: dir)["swift"])
-
-    let code = """
-    import Foundation
-    print("hi")
-    """
-
-    let result = try await t.execute(toolCallId: "s1", args: .object([
-      "code": .string(code),
-      "timeout": .number(10),
-    ]))
-
-    #expect(textOutput(result).trimmingCharacters(in: .whitespacesAndNewlines) == "hi")
-  }
 }

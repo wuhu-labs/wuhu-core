@@ -12,14 +12,11 @@ struct ContractSessionCoreTests {
   private func makeSession(store: SQLiteSessionStore, systemPrompt: String = "You are helpful.") async throws -> WuhuSession {
     try await store.createSession(
       sessionID: UUID().uuidString.lowercased(),
-      sessionType: .coding,
       provider: .openai,
       model: "mock",
       reasoningEffort: nil,
       systemPrompt: systemPrompt,
-      environmentID: nil,
-      environment: .init(name: "test", type: .local, path: "/tmp"),
-      runnerName: nil,
+      cwd: "/tmp",
       parentSessionID: nil,
     )
   }

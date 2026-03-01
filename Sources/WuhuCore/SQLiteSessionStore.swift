@@ -15,22 +15,24 @@ public actor SQLiteSessionStore: SessionStore {
     try Self.migrator.migrate(dbQueue)
   }
 
-  public func createEnvironment(_ request: WuhuCreateEnvironmentRequest) async throws -> WuhuEnvironmentDefinition {
+  // MARK: - Mount Templates
+
+  public func createMountTemplate(_ request: WuhuCreateMountTemplateRequest) async throws -> WuhuMountTemplate {
     let now = Date()
     let id = UUID().uuidString.lowercased()
 
     let name = request.name.trimmingCharacters(in: .whitespacesAndNewlines)
-    let path = request.path.trimmingCharacters(in: .whitespacesAndNewlines)
-    let templatePath = request.templatePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let templatePath = request.templatePath.trimmingCharacters(in: .whitespacesAndNewlines)
+    let workspacesPath = request.workspacesPath.trimmingCharacters(in: .whitespacesAndNewlines)
     let startupScript = request.startupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
 
     return try await dbQueue.write { db in
-      var row = EnvironmentRow(
+      var row = MountTemplateRow(
         id: id,
         name: name,
         type: request.type.rawValue,
-        path: path,
-        templatePath: templatePath?.isEmpty == false ? templatePath : nil,
+        templatePath: templatePath,
+        workspacesPath: workspacesPath,
         startupScript: startupScript?.isEmpty == false ? startupScript : nil,
         createdAt: now,
         updatedAt: now,
@@ -40,64 +42,60 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  public func listEnvironments() async throws -> [WuhuEnvironmentDefinition] {
+  public func listMountTemplates() async throws -> [WuhuMountTemplate] {
     try await dbQueue.read { db in
-      try EnvironmentRow
+      try MountTemplateRow
         .order(Column("name").asc)
         .fetchAll(db)
         .map { try $0.toModel() }
     }
   }
 
-  public func getEnvironment(identifier raw: String) async throws -> WuhuEnvironmentDefinition {
+  public func getMountTemplate(identifier raw: String) async throws -> WuhuMountTemplate {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuEnvironmentResolutionError.unknownEnvironment(raw) }
+    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
 
     return try await dbQueue.read { db in
-      let row: EnvironmentRow? = if UUID(uuidString: identifier) != nil {
-        try EnvironmentRow.fetchOne(db, key: identifier.lowercased())
+      let row: MountTemplateRow? = if UUID(uuidString: identifier) != nil {
+        try MountTemplateRow.fetchOne(db, key: identifier.lowercased())
       } else {
-        try EnvironmentRow.filter(Column("name") == identifier).fetchOne(db)
+        try MountTemplateRow.filter(Column("name") == identifier).fetchOne(db)
       }
 
       guard let row else {
-        throw WuhuEnvironmentResolutionError.unknownEnvironment(identifier)
+        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
       }
       return try row.toModel()
     }
   }
 
-  public func updateEnvironment(
+  public func updateMountTemplate(
     identifier raw: String,
-    request: WuhuUpdateEnvironmentRequest,
-  ) async throws -> WuhuEnvironmentDefinition {
+    request: WuhuUpdateMountTemplateRequest,
+  ) async throws -> WuhuMountTemplate {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuEnvironmentResolutionError.unknownEnvironment(raw) }
+    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
 
     let now = Date()
     return try await dbQueue.write { db in
-      let row: EnvironmentRow? = if UUID(uuidString: identifier) != nil {
-        try EnvironmentRow.fetchOne(db, key: identifier.lowercased())
+      let row: MountTemplateRow? = if UUID(uuidString: identifier) != nil {
+        try MountTemplateRow.fetchOne(db, key: identifier.lowercased())
       } else {
-        try EnvironmentRow.filter(Column("name") == identifier).fetchOne(db)
+        try MountTemplateRow.filter(Column("name") == identifier).fetchOne(db)
       }
 
       guard var row else {
-        throw WuhuEnvironmentResolutionError.unknownEnvironment(identifier)
+        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
       }
 
       if let name = request.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
         row.name = name
       }
-      if let type = request.type {
-        row.type = type.rawValue
+      if let templatePath = request.templatePath?.trimmingCharacters(in: .whitespacesAndNewlines), !templatePath.isEmpty {
+        row.templatePath = templatePath
       }
-      if let path = request.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-        row.path = path
-      }
-      if let templatePath = request.templatePath {
-        let trimmed = templatePath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        row.templatePath = (trimmed?.isEmpty == false) ? trimmed : nil
+      if let workspacesPath = request.workspacesPath?.trimmingCharacters(in: .whitespacesAndNewlines), !workspacesPath.isEmpty {
+        row.workspacesPath = workspacesPath
       }
       if let startupScript = request.startupScript {
         let trimmed = startupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -110,50 +108,87 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  public func deleteEnvironment(identifier raw: String) async throws {
+  public func deleteMountTemplate(identifier raw: String) async throws {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuEnvironmentResolutionError.unknownEnvironment(raw) }
+    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
 
     try await dbQueue.write { db in
-      let row: EnvironmentRow? = if UUID(uuidString: identifier) != nil {
-        try EnvironmentRow.fetchOne(db, key: identifier.lowercased())
+      let row: MountTemplateRow? = if UUID(uuidString: identifier) != nil {
+        try MountTemplateRow.fetchOne(db, key: identifier.lowercased())
       } else {
-        try EnvironmentRow.filter(Column("name") == identifier).fetchOne(db)
+        try MountTemplateRow.filter(Column("name") == identifier).fetchOne(db)
       }
 
       guard let row else {
-        throw WuhuEnvironmentResolutionError.unknownEnvironment(identifier)
+        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
       }
       _ = try row.delete(db)
     }
   }
 
+  // MARK: - Mounts
+
+  public func createMount(
+    sessionID: String,
+    name: String,
+    path: String,
+    mountTemplateID: String? = nil,
+    isPrimary: Bool = true,
+  ) async throws -> WuhuMount {
+    let now = Date()
+    let id = UUID().uuidString.lowercased()
+
+    return try await dbQueue.write { db in
+      var row = MountRow(
+        id: id,
+        sessionID: sessionID,
+        name: name,
+        path: path,
+        mountTemplateID: mountTemplateID,
+        isPrimary: isPrimary,
+        createdAt: now,
+      )
+      try row.insert(db)
+      return row.toModel()
+    }
+  }
+
+  public func listMounts(sessionID: String) async throws -> [WuhuMount] {
+    try await dbQueue.read { db in
+      try MountRow
+        .filter(Column("sessionID") == sessionID)
+        .order(Column("createdAt").asc)
+        .fetchAll(db)
+        .map { $0.toModel() }
+    }
+  }
+
+  public func getPrimaryMount(sessionID: String) async throws -> WuhuMount? {
+    try await dbQueue.read { db in
+      try MountRow
+        .filter(Column("sessionID") == sessionID && Column("isPrimary") == true)
+        .fetchOne(db)
+        .map { $0.toModel() }
+    }
+  }
+
+  // MARK: - Sessions
+
   public func createSession(
     sessionID rawSessionID: String,
-    sessionType: WuhuSessionType,
     provider: WuhuProvider,
     model: String,
     reasoningEffort: ReasoningEffort?,
     systemPrompt: String,
-    environmentID: String?,
-    environment: WuhuEnvironment,
-    runnerName: String?,
+    cwd: String?,
     parentSessionID: String?,
-    workspaceRoot: String? = nil,
   ) async throws -> WuhuSession {
     let now = Date()
     let sessionID = rawSessionID.lowercased()
 
-    let skills = WuhuSkillsLoader.load(environmentRoot: environment.path, workspaceRoot: workspaceRoot)
-    let effectiveSystemPrompt: String = {
-      if skills.isEmpty { return systemPrompt }
-      return systemPrompt + WuhuSkills.promptSection(skills: skills)
-    }()
-
     return try await dbQueue.write { db in
       var sessionRow = SessionRow(
         id: sessionID,
-        sessionType: sessionType.rawValue,
         provider: provider.rawValue,
         model: model,
         effectiveReasoningEffort: reasoningEffort?.rawValue,
@@ -161,16 +196,8 @@ public actor SQLiteSessionStore: SessionStore {
         pendingModel: nil,
         pendingReasoningEffort: nil,
         executionStatus: SessionExecutionStatus.idle.rawValue,
-        environmentID: environmentID?.lowercased(),
-        environmentName: environment.name,
-        environmentType: environment.type.rawValue,
-        environmentPath: environment.path,
-        environmentTemplatePath: environment.templatePath,
-        environmentStartupScript: environment.startupScript,
-        cwd: environment.path,
-        runnerName: runnerName,
+        cwd: cwd,
         parentSessionID: parentSessionID,
-        displayStartEntryID: nil,
         isArchived: false,
         createdAt: now,
         updatedAt: now,
@@ -183,11 +210,8 @@ public actor SQLiteSessionStore: SessionStore {
       if let reasoningEffort {
         headerMetadata["reasoningEffort"] = .string(reasoningEffort.rawValue)
       }
-      if !skills.isEmpty {
-        headerMetadata[WuhuSkills.headerMetadataKey] = WuhuSkills.encodeForHeaderMetadata(skills)
-      }
       let headerPayload = WuhuEntryPayload.header(.init(
-        systemPrompt: effectiveSystemPrompt,
+        systemPrompt: systemPrompt,
         metadata: .object(headerMetadata),
       ))
       var headerRow = try EntryRow.new(
@@ -229,19 +253,11 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  // MARK: - Channels / Forking
+  // MARK: - Channels / Child Sessions
 
   struct ChildSessionRecord: Sendable, Hashable {
     var session: WuhuSession
     var executionStatus: SessionExecutionStatus
-    var lastNotifiedFinalEntryID: Int64?
-    var lastReadFinalEntryID: Int64?
-
-    var hasUnreadFinalMessage: Bool {
-      guard let lastNotifiedFinalEntryID else { return false }
-      let lastRead = lastReadFinalEntryID ?? 0
-      return lastNotifiedFinalEntryID > lastRead
-    }
   }
 
   func listChildSessions(parentSessionID: String) async throws -> [ChildSessionRecord] {
@@ -251,81 +267,14 @@ public actor SQLiteSessionStore: SessionStore {
         .order(Column("updatedAt").desc)
         .fetchAll(db)
 
-      let statusRows = try SessionChildStatusRow
-        .filter(Column("parentSessionID") == parentSessionID)
-        .fetchAll(db)
-      var statusByChild: [String: SessionChildStatusRow] = [:]
-      statusByChild.reserveCapacity(statusRows.count)
-      for row in statusRows {
-        statusByChild[row.childSessionID] = row
-      }
-
       return try sessionRows.map { row in
         let exec = SessionExecutionStatus(rawValue: row.executionStatus) ?? .idle
         let session = try row.toModel()
-        let status = statusByChild[row.id]
         return .init(
           session: session,
           executionStatus: exec,
-          lastNotifiedFinalEntryID: status?.lastNotifiedFinalEntryID,
-          lastReadFinalEntryID: status?.lastReadFinalEntryID,
         )
       }
-    }
-  }
-
-  func setChildFinalMessageNotified(
-    parentSessionID: String,
-    childSessionID: String,
-    finalEntryID: Int64,
-  ) async throws -> Bool {
-    let now = Date()
-    return try await dbQueue.write { db in
-      let existing = try SessionChildStatusRow
-        .filter(Column("parentSessionID") == parentSessionID && Column("childSessionID") == childSessionID)
-        .fetchOne(db)
-      if existing?.lastNotifiedFinalEntryID == finalEntryID {
-        return false
-      }
-
-      try db.execute(
-        sql: """
-        INSERT INTO session_child_status (parentSessionID, childSessionID, lastNotifiedFinalEntryID, lastReadFinalEntryID, updatedAt)
-        VALUES (?, ?, ?, COALESCE((SELECT lastReadFinalEntryID FROM session_child_status WHERE parentSessionID = ? AND childSessionID = ?), NULL), ?)
-        ON CONFLICT(parentSessionID, childSessionID)
-        DO UPDATE SET lastNotifiedFinalEntryID = excluded.lastNotifiedFinalEntryID, updatedAt = excluded.updatedAt
-        """,
-        arguments: [parentSessionID, childSessionID, finalEntryID, parentSessionID, childSessionID, now],
-      )
-      return true
-    }
-  }
-
-  func markChildFinalMessageRead(
-    parentSessionID: String,
-    childSessionID: String,
-    finalEntryID: Int64,
-  ) async throws {
-    let now = Date()
-    try await dbQueue.write { db in
-      try db.execute(
-        sql: """
-        INSERT INTO session_child_status (parentSessionID, childSessionID, lastNotifiedFinalEntryID, lastReadFinalEntryID, updatedAt)
-        VALUES (?, ?, NULL, ?, ?)
-        ON CONFLICT(parentSessionID, childSessionID)
-        DO UPDATE SET lastReadFinalEntryID = excluded.lastReadFinalEntryID, updatedAt = excluded.updatedAt
-        """,
-        arguments: [parentSessionID, childSessionID, finalEntryID, now],
-      )
-    }
-  }
-
-  func setDisplayStartEntryID(sessionID: String, entryID: Int64?) async throws {
-    try await dbQueue.write { db in
-      try db.execute(
-        sql: "UPDATE sessions SET displayStartEntryID = ?, updatedAt = ? WHERE id = ?",
-        arguments: [entryID, Date(), sessionID],
-      )
     }
   }
 
@@ -403,6 +352,16 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
+  /// Update the session's cwd.
+  func setSessionCwd(sessionID: String, cwd: String?) async throws {
+    try await dbQueue.write { db in
+      try db.execute(
+        sql: "UPDATE sessions SET cwd = ?, updatedAt = ? WHERE id = ?",
+        arguments: [cwd, Date(), sessionID],
+      )
+    }
+  }
+
   private static func linearize(
     entries: [WuhuSessionEntry],
     sessionID: String,
@@ -459,31 +418,57 @@ public actor SQLiteSessionStore: SessionStore {
   }
 }
 
-private struct EnvironmentRow: Codable, FetchableRecord, MutablePersistableRecord {
-  static let databaseTableName = "environments"
+// MARK: - Row types
+
+private struct MountTemplateRow: Codable, FetchableRecord, MutablePersistableRecord {
+  static let databaseTableName = "mount_templates"
 
   var id: String
   var name: String
   var type: String
-  var path: String
-  var templatePath: String?
+  var templatePath: String
+  var workspacesPath: String
   var startupScript: String?
   var createdAt: Date
   var updatedAt: Date
 
-  func toModel() throws -> WuhuEnvironmentDefinition {
-    guard let envType = WuhuEnvironmentType(rawValue: type) else {
-      throw WuhuEnvironmentResolutionError.unsupportedEnvironmentType(type)
+  func toModel() throws -> WuhuMountTemplate {
+    guard let mtType = WuhuMountTemplateType(rawValue: type) else {
+      throw WuhuMountTemplateResolutionError.unsupportedType(type)
     }
     return .init(
       id: id,
       name: name,
-      type: envType,
-      path: path,
+      type: mtType,
       templatePath: templatePath,
+      workspacesPath: workspacesPath,
       startupScript: startupScript,
       createdAt: createdAt,
       updatedAt: updatedAt,
+    )
+  }
+}
+
+private struct MountRow: Codable, FetchableRecord, MutablePersistableRecord {
+  static let databaseTableName = "mounts"
+
+  var id: String
+  var sessionID: String
+  var name: String
+  var path: String
+  var mountTemplateID: String?
+  var isPrimary: Bool
+  var createdAt: Date
+
+  func toModel() -> WuhuMount {
+    .init(
+      id: id,
+      sessionID: sessionID,
+      name: name,
+      path: path,
+      mountTemplateID: mountTemplateID,
+      isPrimary: isPrimary,
+      createdAt: createdAt,
     )
   }
 }
@@ -492,7 +477,6 @@ private struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "sessions"
 
   var id: String
-  var sessionType: String
   var provider: String
   var model: String
   var effectiveReasoningEffort: String?
@@ -500,16 +484,8 @@ private struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   var pendingModel: String?
   var pendingReasoningEffort: String?
   var executionStatus: String
-  var environmentID: String?
-  var environmentName: String
-  var environmentType: String
-  var environmentPath: String
-  var environmentTemplatePath: String?
-  var environmentStartupScript: String?
-  var cwd: String
-  var runnerName: String?
+  var cwd: String?
   var parentSessionID: String?
-  var displayStartEntryID: Int64?
   var customTitle: String?
   var isArchived: Bool
   var createdAt: Date
@@ -521,30 +497,15 @@ private struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
     guard let provider = WuhuProvider(rawValue: provider) else {
       throw WuhuStoreError.sessionCorrupt("Unknown provider: \(self.provider)")
     }
-    let type = WuhuSessionType(rawValue: sessionType) ?? .coding
     guard let headEntryID, let tailEntryID else {
       throw WuhuStoreError.sessionCorrupt("Session \(id) missing head/tail entry ids")
     }
-    guard let envType = WuhuEnvironmentType(rawValue: environmentType) else {
-      throw WuhuStoreError.sessionCorrupt("Unknown environment type: \(environmentType)")
-    }
     return .init(
       id: id,
-      type: type,
       provider: provider,
       model: model,
-      environmentID: environmentID,
-      environment: .init(
-        name: environmentName,
-        type: envType,
-        path: environmentPath,
-        templatePath: environmentTemplatePath,
-        startupScript: environmentStartupScript,
-      ),
       cwd: cwd,
-      runnerName: runnerName,
       parentSessionID: parentSessionID,
-      displayStartEntryID: displayStartEntryID,
       customTitle: customTitle,
       isArchived: isArchived,
       createdAt: createdAt,
@@ -608,12 +569,15 @@ private struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 }
 
+// MARK: - Migration
+
 extension SQLiteSessionStore {
   private static let migrator: DatabaseMigrator = {
     var migrator = DatabaseMigrator()
 
-    migrator.registerMigration("wuhu_contracts_v1") { db in
+    migrator.registerMigration("wuhu_v6_mounts") { db in
       // Hard reset: this repo intentionally does not migrate older schemas.
+      // Drop all old tables and recreate from scratch.
       try db.execute(sql: "DROP TABLE IF EXISTS tool_call_status")
       try db.execute(sql: "DROP TABLE IF EXISTS system_queue_pending")
       try db.execute(sql: "DROP TABLE IF EXISTS system_queue_journal")
@@ -621,9 +585,25 @@ extension SQLiteSessionStore {
       try db.execute(sql: "DROP TABLE IF EXISTS user_queue_journal")
       try db.execute(sql: "DROP TABLE IF EXISTS session_entries")
       try db.execute(sql: "DROP TABLE IF EXISTS session_child_status")
+      try db.execute(sql: "DROP TABLE IF EXISTS mounts")
       try db.execute(sql: "DROP TABLE IF EXISTS sessions")
       try db.execute(sql: "DROP TABLE IF EXISTS environments")
+      try db.execute(sql: "DROP TABLE IF EXISTS mount_templates")
 
+      // Mount templates (replaces environments)
+      try db.create(table: "mount_templates") { t in
+        t.column("id", .text).primaryKey()
+        t.column("name", .text).notNull()
+        t.column("type", .text).notNull()
+        t.column("templatePath", .text).notNull()
+        t.column("workspacesPath", .text).notNull()
+        t.column("startupScript", .text)
+        t.column("createdAt", .datetime).notNull()
+        t.column("updatedAt", .datetime).notNull()
+      }
+      try db.create(index: "mount_templates_unique_name", on: "mount_templates", columns: ["name"], unique: true)
+
+      // Sessions (simplified — no environment/type/runner columns)
       try db.create(table: "sessions") { t in
         t.column("id", .text).primaryKey()
         t.column("provider", .text).notNull()
@@ -633,20 +613,28 @@ extension SQLiteSessionStore {
         t.column("pendingModel", .text)
         t.column("pendingReasoningEffort", .text)
         t.column("executionStatus", .text).notNull()
-        t.column("environmentName", .text).notNull()
-        t.column("environmentType", .text).notNull()
-        t.column("environmentPath", .text).notNull()
-        t.column("environmentTemplatePath", .text)
-        t.column("environmentStartupScript", .text)
-        t.column("cwd", .text).notNull()
-        t.column("runnerName", .text)
+        t.column("cwd", .text) // nullable — no mount = no cwd
         t.column("parentSessionID", .text)
+        t.column("customTitle", .text)
+        t.column("isArchived", .boolean).notNull().defaults(to: false)
         t.column("createdAt", .datetime).notNull()
         t.column("updatedAt", .datetime).notNull()
         t.column("headEntryID", .integer)
         t.column("tailEntryID", .integer)
       }
 
+      // Mounts
+      try db.create(table: "mounts") { t in
+        t.column("id", .text).primaryKey()
+        t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
+        t.column("name", .text).notNull()
+        t.column("path", .text).notNull()
+        t.column("mountTemplateID", .text)
+        t.column("isPrimary", .boolean).notNull().defaults(to: false)
+        t.column("createdAt", .datetime).notNull()
+      }
+
+      // Session entries
       try db.create(table: "session_entries") { t in
         t.autoIncrementedPrimaryKey("id")
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -655,14 +643,10 @@ extension SQLiteSessionStore {
         t.column("payload", .blob).notNull()
         t.column("createdAt", .datetime).notNull().indexed()
       }
-
-      // Enforce "no fork within session": parentEntryID can have at most one child across the table.
-      // This also makes linear chain traversal O(n) and tail updates cheap.
       try db.create(index: "session_entries_unique_parent", on: "session_entries", columns: ["parentEntryID"], unique: true, condition: Column("parentEntryID") != nil)
-
-      // Enforce exactly one header per session: the only entry with parentEntryID IS NULL.
       try db.create(index: "session_entries_unique_header_per_session", on: "session_entries", columns: ["sessionID"], unique: true, condition: Column("parentEntryID") == nil)
 
+      // Tool call status
       try db.create(table: "tool_call_status") { t in
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
         t.column("toolCallID", .text).notNull()
@@ -672,6 +656,7 @@ extension SQLiteSessionStore {
         t.primaryKey(["sessionID", "toolCallID"])
       }
 
+      // User queue
       try db.create(table: "user_queue_pending") { t in
         t.column("id", .text).primaryKey()
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -679,7 +664,6 @@ extension SQLiteSessionStore {
         t.column("enqueuedAt", .datetime).notNull().indexed()
         t.column("payload", .blob).notNull()
       }
-
       try db.create(table: "user_queue_journal") { t in
         t.autoIncrementedPrimaryKey("id")
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
@@ -688,64 +672,18 @@ extension SQLiteSessionStore {
         t.column("createdAt", .datetime).notNull().indexed()
       }
 
+      // System queue
       try db.create(table: "system_queue_pending") { t in
         t.column("id", .text).primaryKey()
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
         t.column("enqueuedAt", .datetime).notNull().indexed()
         t.column("payload", .blob).notNull()
       }
-
       try db.create(table: "system_queue_journal") { t in
         t.autoIncrementedPrimaryKey("id")
         t.column("sessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
         t.column("payload", .blob).notNull()
         t.column("createdAt", .datetime).notNull().indexed()
-      }
-    }
-
-    migrator.registerMigration("wuhu_contracts_v2_environments") { db in
-      try db.create(table: "environments") { t in
-        t.column("id", .text).primaryKey()
-        t.column("name", .text).notNull()
-        t.column("type", .text).notNull()
-        t.column("path", .text).notNull()
-        t.column("templatePath", .text)
-        t.column("startupScript", .text)
-        t.column("createdAt", .datetime).notNull()
-        t.column("updatedAt", .datetime).notNull()
-      }
-      try db.create(index: "environments_unique_name", on: "environments", columns: ["name"], unique: true)
-
-      try db.alter(table: "sessions") { t in
-        t.add(column: "environmentID", .text)
-      }
-    }
-
-    migrator.registerMigration("wuhu_contracts_v3_channels") { db in
-      try db.alter(table: "sessions") { t in
-        t.add(column: "sessionType", .text).notNull().defaults(to: WuhuSessionType.coding.rawValue)
-        t.add(column: "displayStartEntryID", .integer)
-      }
-
-      try db.create(table: "session_child_status") { t in
-        t.column("parentSessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
-        t.column("childSessionID", .text).notNull().indexed().references("sessions", onDelete: .cascade)
-        t.column("lastNotifiedFinalEntryID", .integer)
-        t.column("lastReadFinalEntryID", .integer)
-        t.column("updatedAt", .datetime).notNull()
-        t.primaryKey(["parentSessionID", "childSessionID"])
-      }
-    }
-
-    migrator.registerMigration("wuhu_v4_custom_title") { db in
-      try db.alter(table: "sessions") { t in
-        t.add(column: "customTitle", .text)
-      }
-    }
-
-    migrator.registerMigration("wuhu_v5_archive") { db in
-      try db.alter(table: "sessions") { t in
-        t.add(column: "isArchived", .boolean).notNull().defaults(to: false)
       }
     }
 
@@ -880,7 +818,6 @@ extension SQLiteSessionStore {
       let provider = WuhuProvider(rawValue: p) ?? .openai
       let selection = WuhuSessionSettings(provider: provider, model: m, reasoningEffort: row.pendingReasoningEffort.flatMap(ReasoningEffort.init(rawValue:)))
 
-      // Append a settings entry; `appendEntryWithSession` will clear pending.
       let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &row, payload: .sessionSettings(selection), createdAt: Date())
       return try (row.toModel(), entryRow.toModel())
     }
@@ -1504,8 +1441,6 @@ extension SQLiteSessionStore {
     if case let .message(message) = payload,
        case .toolResult = message
     {
-      // Tool results imply the agent should take another turn. Mark the session running so the
-      // loop can resume (especially after crash/restart scenarios).
       try setExecutionStatus(db: db, sessionID: sessionRow.id, status: .running)
     }
 
@@ -1522,15 +1457,6 @@ private struct ToolCallStatusRow: Codable, FetchableRecord, TableRecord {
   var toolCallID: String
   var status: String
   var createdAt: Date
-  var updatedAt: Date
-}
-
-private struct SessionChildStatusRow: Codable, FetchableRecord, TableRecord {
-  static let databaseTableName = "session_child_status"
-  var parentSessionID: String
-  var childSessionID: String
-  var lastNotifiedFinalEntryID: Int64?
-  var lastReadFinalEntryID: Int64?
   var updatedAt: Date
 }
 

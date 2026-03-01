@@ -22,16 +22,12 @@ public enum WuhuStoreError: Error, Sendable, CustomStringConvertible {
 public protocol SessionStore: Sendable {
   func createSession(
     sessionID: String,
-    sessionType: WuhuSessionType,
     provider: WuhuProvider,
     model: String,
     reasoningEffort: ReasoningEffort?,
     systemPrompt: String,
-    environmentID: String?,
-    environment: WuhuEnvironment,
-    runnerName: String?,
+    cwd: String?,
     parentSessionID: String?,
-    workspaceRoot: String?,
   ) async throws -> WuhuSession
 
   func getSession(id: String) async throws -> WuhuSession

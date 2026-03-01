@@ -84,10 +84,6 @@ actor WuhuSessionRuntime {
     await runtimeConfig.setStreamFn(streamFn)
   }
 
-  func setContextCwd(_ cwd: String, environmentRoot: String? = nil, workspaceRoot: String? = nil) async {
-    await runtimeConfig.setContextActor(WuhuAgentsContextActor(cwd: cwd, environmentRoot: environmentRoot, workspaceRoot: workspaceRoot))
-  }
-
   func isIdle() -> Bool {
     // Fast-path: don't block callers on observation if they only need a best-effort hint.
     !streaming && !behavior.hasWork(state: observedState)

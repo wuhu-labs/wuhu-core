@@ -2,37 +2,31 @@ import Foundation
 import PiAI
 
 public struct WuhuCreateSessionRequest: Sendable, Hashable, Codable {
-  public var type: WuhuSessionType?
   public var provider: WuhuProvider
   public var model: String?
   public var reasoningEffort: ReasoningEffort?
   public var systemPrompt: String?
-  /// Environment identifier (UUID or unique name).
-  public var environment: String?
-  /// Direct environment path (bypass environment definitions). Intended for channel-agent workflows.
-  public var environmentPath: String?
-  public var runner: String?
+  /// Mount template identifier (UUID or unique name). Optional.
+  public var mountTemplate: String?
+  /// Direct path mount (bypass mount templates). Optional.
+  public var mountPath: String?
   public var parentSessionID: String?
 
   public init(
-    type: WuhuSessionType? = nil,
     provider: WuhuProvider,
     model: String? = nil,
     reasoningEffort: ReasoningEffort? = nil,
     systemPrompt: String? = nil,
-    environment: String? = nil,
-    environmentPath: String? = nil,
-    runner: String? = nil,
+    mountTemplate: String? = nil,
+    mountPath: String? = nil,
     parentSessionID: String? = nil,
   ) {
-    self.type = type
     self.provider = provider
     self.model = model
     self.reasoningEffort = reasoningEffort
     self.systemPrompt = systemPrompt
-    self.environment = environment
-    self.environmentPath = environmentPath
-    self.runner = runner
+    self.mountTemplate = mountTemplate
+    self.mountPath = mountPath
     self.parentSessionID = parentSessionID
   }
 }
@@ -84,20 +78,6 @@ public struct WuhuInProcessExecutionInfo: Sendable, Hashable, Codable {
 
   public init(activePromptCount: Int) {
     self.activePromptCount = activePromptCount
-  }
-}
-
-public struct WuhuRunnerInfo: Sendable, Hashable, Codable, Identifiable {
-  public var name: String
-  public var connected: Bool
-
-  public var id: String {
-    name
-  }
-
-  public init(name: String, connected: Bool) {
-    self.name = name
-    self.connected = connected
   }
 }
 

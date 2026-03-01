@@ -17,7 +17,6 @@ public extension WuhuTools {
       bashTool(cwd: cwd),
       asyncBashTool(cwd: cwd, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
-      swiftTool(cwd: cwd),
     ]
   }
 }
@@ -907,82 +906,6 @@ private func asyncBashStatusTool(context: WuhuAsyncBashToolContext) -> AnyAgentT
 
     let response: JSONValue = .object(obj)
     return AgentToolResult(content: [.text(wuhuEncodeToolJSON(response))], details: response)
-  }
-}
-
-// MARK: - swift
-
-private func swiftTool(cwd: String) -> AnyAgentTool {
-  struct Params: Sendable {
-    var code: String
-    var args: [String]?
-    var timeout: Double?
-
-    static func parse(toolName: String, args: JSONValue) throws -> Params {
-      let a = try ToolArgs(toolName: toolName, args: args)
-      let code = try a.requireString("code")
-      let argList = try a.optionalStringArray("args")
-      let timeout = try a.optionalDouble("timeout")
-      return .init(code: code, args: argList, timeout: timeout)
-    }
-  }
-
-  let schema: JSONValue = .object([
-    "type": .string("object"),
-    "properties": .object([
-      "code": .object(["type": .string("string"), "description": .string("Swift code to run (a full file).")]),
-      "args": .object(["type": .string("array"), "description": .string("Arguments passed to the Swift program."), "items": .object(["type": .string("string")])]),
-      "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional).")]),
-    ]),
-    "required": .array([.string("code")]),
-    "additionalProperties": .bool(false),
-  ])
-
-  let tool = Tool(
-    name: "swift",
-    description: "Run a Swift snippet by writing a temporary .swift file and executing `swift <file> [args...]` in the session working directory.",
-    parameters: schema,
-  )
-
-  return AnyAgentTool(tool: tool, label: "swift") { _, args in
-    let params = try Params.parse(toolName: tool.name, args: args)
-    let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("wuhu-swift-tool", isDirectory: true)
-    try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true, attributes: nil)
-    let fileURL = tmpDir.appendingPathComponent("snippet-\(UUID().uuidString.lowercased()).swift")
-    try params.code.write(to: fileURL, atomically: true, encoding: .utf8)
-
-    let argList = (params.args ?? []).map { String($0) }
-    let command = (["swift", fileURL.path] + argList).map(shellEscape).joined(separator: " ")
-
-    let run = try await runBash(
-      command: command,
-      cwd: cwd,
-      timeoutSeconds: params.timeout,
-    )
-    let exitCode = run.exitCode
-    let output = run.output
-    let timedOut = run.timedOut
-    let terminated = run.terminated
-    let fullOutputPath = run.fullOutputPath
-
-    var text = output.trimmingCharacters(in: .newlines)
-    if text.isEmpty { text = "(no output)" }
-
-    if timedOut {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(text + "\n\nSwift execution timed out")
-    }
-    if terminated {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(text + "\n\nSwift execution aborted")
-    }
-    if exitCode != 0 {
-      // Keep full output around for debugging.
-      throw ToolError.message(text + "\n\nSwift exited with code \(exitCode)")
-    }
-
-    try? FileManager.default.removeItem(atPath: fullOutputPath)
-    return AgentToolResult(content: [.text(text)], details: .object([:]))
   }
 }
 

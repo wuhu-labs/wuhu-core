@@ -17,49 +17,42 @@ public struct WuhuClient: Sendable {
     self.http = http
   }
 
-  public func listRunners() async throws -> [WuhuRunnerInfo] {
-    let url = baseURL.appending(path: "v1").appending(path: "runners")
+  public func listMountTemplates() async throws -> [WuhuMountTemplate] {
+    let url = baseURL.appending(path: "v1").appending(path: "mount-templates")
     let req = HTTPRequest(url: url, method: "GET")
     let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode([WuhuRunnerInfo].self, from: data)
+    return try WuhuJSON.decoder.decode([WuhuMountTemplate].self, from: data)
   }
 
-  public func listEnvironments() async throws -> [WuhuEnvironmentDefinition] {
-    let url = baseURL.appending(path: "v1").appending(path: "environments")
-    let req = HTTPRequest(url: url, method: "GET")
-    let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode([WuhuEnvironmentDefinition].self, from: data)
-  }
-
-  public func createEnvironment(_ request: WuhuCreateEnvironmentRequest) async throws -> WuhuEnvironmentDefinition {
-    let url = baseURL.appending(path: "v1").appending(path: "environments")
+  public func createMountTemplate(_ request: WuhuCreateMountTemplateRequest) async throws -> WuhuMountTemplate {
+    let url = baseURL.appending(path: "v1").appending(path: "mount-templates")
     var req = HTTPRequest(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
     req.body = try WuhuJSON.encoder.encode(request)
     let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode(WuhuEnvironmentDefinition.self, from: data)
+    return try WuhuJSON.decoder.decode(WuhuMountTemplate.self, from: data)
   }
 
-  public func getEnvironment(_ identifier: String) async throws -> WuhuEnvironmentDefinition {
-    let url = baseURL.appending(path: "v1").appending(path: "environments").appending(path: identifier)
+  public func getMountTemplate(_ identifier: String) async throws -> WuhuMountTemplate {
+    let url = baseURL.appending(path: "v1").appending(path: "mount-templates").appending(path: identifier)
     let req = HTTPRequest(url: url, method: "GET")
     let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode(WuhuEnvironmentDefinition.self, from: data)
+    return try WuhuJSON.decoder.decode(WuhuMountTemplate.self, from: data)
   }
 
-  public func updateEnvironment(_ identifier: String, request: WuhuUpdateEnvironmentRequest) async throws -> WuhuEnvironmentDefinition {
-    let url = baseURL.appending(path: "v1").appending(path: "environments").appending(path: identifier)
+  public func updateMountTemplate(_ identifier: String, request: WuhuUpdateMountTemplateRequest) async throws -> WuhuMountTemplate {
+    let url = baseURL.appending(path: "v1").appending(path: "mount-templates").appending(path: identifier)
     var req = HTTPRequest(url: url, method: "PATCH")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
     req.body = try WuhuJSON.encoder.encode(request)
     let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode(WuhuEnvironmentDefinition.self, from: data)
+    return try WuhuJSON.decoder.decode(WuhuMountTemplate.self, from: data)
   }
 
-  public func deleteEnvironment(_ identifier: String) async throws {
-    let url = baseURL.appending(path: "v1").appending(path: "environments").appending(path: identifier)
+  public func deleteMountTemplate(_ identifier: String) async throws {
+    let url = baseURL.appending(path: "v1").appending(path: "mount-templates").appending(path: identifier)
     let req = HTTPRequest(url: url, method: "DELETE")
     _ = try await http.data(for: req)
   }
@@ -206,31 +199,7 @@ public struct WuhuClient: Sendable {
     user: String? = nil,
     lane: EnqueueLane = .followUp,
   ) async throws -> String {
-    let url = baseURL
-      .appending(path: "v1")
-      .appending(path: "sessions")
-      .appending(path: sessionID)
-      .appending(path: "enqueue")
-
-    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-    components?.queryItems = [URLQueryItem(name: "lane", value: lane.rawValue)]
-
-    let author: Author = {
-      let trimmed = (user ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-      if trimmed.isEmpty { return .unknown }
-      return .participant(.init(rawValue: trimmed), kind: .human)
-    }()
-
-    let message = QueuedUserMessage(author: author, content: .text(input))
-
-    var req = HTTPRequest(url: components?.url ?? url, method: "POST")
-    req.setHeader("application/json", for: "Content-Type")
-    req.setHeader("application/json", for: "Accept")
-    req.body = try WuhuJSON.encoder.encode(message)
-
-    let (data, _) = try await http.data(for: req)
-    let qid = try WuhuJSON.decoder.decode(QueueItemID.self, from: data)
-    return qid.rawValue
+    try await enqueue(sessionID: sessionID, content: .text(input), user: user, lane: lane)
   }
 
   public func promptStream(

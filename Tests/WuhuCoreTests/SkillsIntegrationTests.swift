@@ -1,10 +1,11 @@
 import Foundation
+import PiAI
 import Testing
 import WuhuAPI
 import WuhuCore
 
 struct SkillsIntegrationTests {
-  @Test func createSessionLoadsSkillsIntoHeader() async throws {
+  @Test func mountContextLoadsSkillsFromMountPath() async throws {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-\(UUID().uuidString.lowercased())", isDirectory: true)
     let skillsDir = root.appendingPathComponent(".wuhu/skills/hello-skill", isDirectory: true)
@@ -27,41 +28,48 @@ struct SkillsIntegrationTests {
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let service = WuhuService(store: store, blobStore: blobStore)
 
-    let env = WuhuEnvironment(name: "local", type: .local, path: root.path)
-
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
       sessionID: sessionID,
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: env,
+      cwd: root.path,
     )
 
+    // Create a mount and emit mount context (skills are now injected as custom entries)
+    let mount = try await store.createMount(
+      sessionID: sessionID,
+      name: "test-mount",
+      path: root.path,
+      isPrimary: true,
+    )
+    try await service.emitMountContext(sessionID: sessionID, mount: mount)
+
     let entries = try await store.getEntries(sessionID: sessionID)
-    guard let headerEntry = entries.first(where: { if case .header = $0.payload { true } else { false } }),
-          case let .header(header) = headerEntry.payload
-    else {
-      Issue.record("Expected header entry")
-      return
+
+    // Find the skills context custom entry
+    let skillsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.skillsContext
+      }
+      return false
     }
+    #expect(skillsEntry != nil, "Expected a skills context custom entry")
 
-    #expect(header.systemPrompt.contains("<available_skills>"))
-    #expect(header.systemPrompt.contains("hello-skill"))
-
-    let skills = WuhuSkills.decodeFromHeaderMetadata(header.metadata)
-    #expect(skills.count == 1)
-    #expect(skills.first?.name == "hello-skill")
-    #expect(skills.first?.description == "A test skill.")
-    #expect(skills.first?.filePath.hasSuffix("/.wuhu/skills/hello-skill/SKILL.md") == true)
+    if case let .custom(_, data) = skillsEntry?.payload {
+      let skillsText = data?.object?["text"]?.stringValue ?? ""
+      #expect(skillsText.contains("<available_skills>"))
+      #expect(skillsText.contains("hello-skill"))
+      #expect(skillsText.contains("A test skill."))
+    }
   }
 
-  @Test func createSessionLoadsSkillsFromWorkspaceRoot() async throws {
+  @Test func workspaceContextLoadsSkillsFromWorkspaceRoot() async throws {
     let fm = FileManager.default
-    let envRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-env-\(UUID().uuidString.lowercased())", isDirectory: true)
+    let mountRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-mount-\(UUID().uuidString.lowercased())", isDirectory: true)
     let workspaceRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-ws-\(UUID().uuidString.lowercased())", isDirectory: true)
-    try fm.createDirectory(at: envRoot, withIntermediateDirectories: true)
+    try fm.createDirectory(at: mountRoot, withIntermediateDirectories: true)
 
     // Put a skill in the workspace root (skills/ directly under workspace root).
     let wsSkillDir = workspaceRoot.appendingPathComponent("skills/ws-skill", isDirectory: true)
@@ -75,7 +83,7 @@ struct SkillsIntegrationTests {
     """.write(to: wsSkillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
     defer {
-      try? fm.removeItem(at: envRoot)
+      try? fm.removeItem(at: mountRoot)
       try? fm.removeItem(at: workspaceRoot)
     }
 
@@ -83,38 +91,38 @@ struct SkillsIntegrationTests {
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path)
 
-    let env = WuhuEnvironment(name: "local", type: .local, path: envRoot.path)
-
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
       sessionID: sessionID,
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: env,
+      cwd: mountRoot.path,
     )
 
+    // Workspace-level skills are emitted during createSession when workspaceRoot is set.
     let entries = try await store.getEntries(sessionID: sessionID)
-    guard let headerEntry = entries.first(where: { if case .header = $0.payload { true } else { false } }),
-          case let .header(header) = headerEntry.payload
-    else {
-      Issue.record("Expected header entry")
-      return
+
+    let skillsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.skillsContext
+      }
+      return false
     }
+    #expect(skillsEntry != nil, "Expected a workspace skills context custom entry")
 
-    #expect(header.systemPrompt.contains("<available_skills>"))
-    #expect(header.systemPrompt.contains("ws-skill"))
-
-    let skills = WuhuSkills.decodeFromHeaderMetadata(header.metadata)
-    #expect(skills.count == 1)
-    #expect(skills.first?.name == "ws-skill")
-    #expect(skills.first?.source == "workspace")
+    if case let .custom(_, data) = skillsEntry?.payload {
+      let skillsText = data?.object?["text"]?.stringValue ?? ""
+      #expect(skillsText.contains("<available_skills>"))
+      #expect(skillsText.contains("ws-skill"))
+      let source = data?.object?["source"]?.stringValue
+      #expect(source == "workspace")
+    }
   }
 
-  @Test func projectSkillOverridesWorkspaceSkillWithSameName() async throws {
+  @Test func mountSkillOverridesWorkspaceSkillWithSameName() async throws {
     let fm = FileManager.default
-    let envRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-env-\(UUID().uuidString.lowercased())", isDirectory: true)
+    let mountRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-mount-\(UUID().uuidString.lowercased())", isDirectory: true)
     let workspaceRoot = fm.temporaryDirectory.appendingPathComponent("wuhu-skills-ws-\(UUID().uuidString.lowercased())", isDirectory: true)
 
     // Workspace skill
@@ -128,19 +136,19 @@ struct SkillsIntegrationTests {
     # WS
     """.write(to: wsSkillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
-    // Project skill with same name
-    let projSkillDir = envRoot.appendingPathComponent(".wuhu/skills/shared-skill", isDirectory: true)
-    try fm.createDirectory(at: projSkillDir, withIntermediateDirectories: true)
+    // Mount-level skill with same name
+    let mountSkillDir = mountRoot.appendingPathComponent(".wuhu/skills/shared-skill", isDirectory: true)
+    try fm.createDirectory(at: mountSkillDir, withIntermediateDirectories: true)
     try """
     ---
     name: shared-skill
-    description: Project version.
+    description: Mount version.
     ---
-    # Proj
-    """.write(to: projSkillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+    # Mount
+    """.write(to: mountSkillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
     defer {
-      try? fm.removeItem(at: envRoot)
+      try? fm.removeItem(at: mountRoot)
       try? fm.removeItem(at: workspaceRoot)
     }
 
@@ -148,31 +156,49 @@ struct SkillsIntegrationTests {
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path)
 
-    let env = WuhuEnvironment(name: "local", type: .local, path: envRoot.path)
-
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
       sessionID: sessionID,
       provider: .openai,
       model: "mock",
       systemPrompt: "You are helpful.",
-      environmentID: nil,
-      environment: env,
+      cwd: mountRoot.path,
     )
 
-    let entries = try await store.getEntries(sessionID: sessionID)
-    guard let headerEntry = entries.first(where: { if case .header = $0.payload { true } else { false } }),
-          case let .header(header) = headerEntry.payload
-    else {
-      Issue.record("Expected header entry")
-      return
-    }
+    // Create a mount and emit mount context (this emits mount-level skills)
+    let mount = try await store.createMount(
+      sessionID: sessionID,
+      name: "test-mount",
+      path: mountRoot.path,
+      isPrimary: true,
+    )
+    try await service.emitMountContext(sessionID: sessionID, mount: mount)
 
-    let skills = WuhuSkills.decodeFromHeaderMetadata(header.metadata)
-    #expect(skills.count == 1)
-    #expect(skills.first?.name == "shared-skill")
-    // Project skill should override the workspace skill.
-    #expect(skills.first?.description == "Project version.")
-    #expect(skills.first?.source == "project")
+    let entries = try await store.getEntries(sessionID: sessionID)
+
+    // There should be two skills context entries: workspace-level + mount-level.
+    // The mount-level entry should contain the mount version of shared-skill.
+    let skillsEntries = entries.filter { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.skillsContext
+      }
+      return false
+    }
+    #expect(skillsEntries.count == 2, "Expected workspace and mount skills context entries")
+
+    // The mount-level skills entry (source: "mount") should have the mount version.
+    let mountSkillsEntry = skillsEntries.first { entry in
+      if case let .custom(_, data) = entry.payload {
+        return data?.object?["source"]?.stringValue == "mount"
+      }
+      return false
+    }
+    #expect(mountSkillsEntry != nil, "Expected mount-level skills entry")
+
+    if case let .custom(_, data) = mountSkillsEntry?.payload {
+      let skillsText = data?.object?["text"]?.stringValue ?? ""
+      #expect(skillsText.contains("shared-skill"))
+      #expect(skillsText.contains("Mount version."))
+    }
   }
 }
