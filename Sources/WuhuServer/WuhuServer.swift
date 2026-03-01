@@ -59,6 +59,7 @@ public struct WuhuServer: Sendable {
       blobStore: blobStore,
       llmRequestLogger: requestLogger,
       workspaceRoot: workspaceRoot,
+      braveSearchAPIKey: config.braveSearchAPIKey,
     )
     await service.startAgentLoopManager()
 
