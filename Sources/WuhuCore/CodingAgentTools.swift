@@ -25,12 +25,33 @@ public extension WuhuTools {
   }
 }
 
-private let noCwdError = "No working directory set. Use the mount tool to mount a directory first."
+private let noCwdError = "No working directory set. Call the mount tool first — use mount({}) for a scratch directory, or mount({\"path\": \"/some/dir\"}) for a specific directory."
 
 /// Resolve the live cwd, throwing a tool error if nil.
 private func requireCwd(_ provider: CwdProvider) async throws -> String {
   guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
   return cwd
+}
+
+/// Resolve cwd for a filesystem tool that accepts a path argument.
+///
+/// - If the path is absolute (starts with `/` or `~`), it is expanded and returned directly
+///   without requiring a cwd.
+/// - If the path is relative, the cwd is required and the path is resolved against it.
+private func resolvePathOrRequireCwd(_ path: String?, defaultPath: String = ".", provider: CwdProvider) async throws -> (cwd: String, resolvedPath: String) {
+  let raw = (path ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
+  let expanded = ToolPath.expand(raw)
+
+  if expanded.hasPrefix("/") {
+    // Absolute path — cwd not required. Use "/" as a dummy cwd for ToolPath.resolveToCwd compatibility.
+    let cwdOrFallback = await (try? provider()) ?? "/"
+    return (cwd: cwdOrFallback, resolvedPath: expanded)
+  }
+
+  // Relative path — cwd is required.
+  guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
+  let resolved = ToolPath.resolveToCwd(raw, cwd: cwd)
+  return (cwd: cwd, resolvedPath: resolved)
 }
 
 // MARK: - read
@@ -98,10 +119,10 @@ private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   let tool = Tool(name: "read", description: description, parameters: schema)
 
   return AnyAgentTool(tool: tool, label: "read") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
 
+    let (cwd, _) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
     let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd, fileIO: fileIO)
 
     // Check if the file is an image — return as image content block.
@@ -221,10 +242,9 @@ private func writeTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
+    let (_, abs) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
     let dir = (abs as NSString).deletingLastPathComponent
     try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
     try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
@@ -268,10 +288,9 @@ private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let abs = ToolPath.resolveToCwd(params.path, cwd: cwd)
+    let (_, abs) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
     guard fileIO.exists(path: abs) else {
       throw ToolError.message("File not found: \(params.path)")
     }
@@ -359,11 +378,10 @@ private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
-    let dirPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
+    let (_, dirPath) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
 
     let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
     guard dirExists else {
@@ -457,10 +475,9 @@ private func findTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "find") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let searchRoot = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
+    let (_, searchRoot) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
     let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
     guard dirExists else {
       throw ToolError.message("Path not found: \(searchRoot)")
@@ -574,10 +591,9 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "grep") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let searchPath = ToolPath.resolveToCwd(params.path ?? ".", cwd: cwd)
+    let (_, searchPath) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
 
     let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
     guard pathExists else {
