@@ -812,7 +812,23 @@ extension SQLiteSessionStore {
       try db.execute(sql: "DROP TABLE IF EXISTS session_child_status")
       try db.execute(sql: "DROP TABLE IF EXISTS environments")
 
-      // 6. Re-enable FK enforcement and verify integrity
+      // 6. Repair data integrity issues from historical bugs before
+      //    re-enabling FK enforcement.
+
+      // Remove entries referencing sessions that no longer exist.
+      try db.execute(sql: """
+        DELETE FROM session_entries
+        WHERE sessionID NOT IN (SELECT id FROM sessions)
+      """)
+
+      // Fix orphaned parentEntryID references (e.g. parentEntryID = 0).
+      try db.execute(sql: """
+        UPDATE session_entries SET parentEntryID = NULL
+        WHERE parentEntryID IS NOT NULL
+          AND parentEntryID NOT IN (SELECT id FROM session_entries)
+      """)
+
+      // 7. Re-enable FK enforcement and verify integrity
       try db.execute(sql: "PRAGMA foreign_keys = ON")
 
       // Verify no FK violations were introduced

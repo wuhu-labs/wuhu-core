@@ -105,7 +105,7 @@ public enum WuhuModelCatalog {
     case .openai:
       "gpt-5.2-codex"
     case .anthropic:
-      "claude-sonnet-4-5"
+      "claude-opus-4-6"
     case .openaiCodex:
       "codex-mini-latest"
     }
