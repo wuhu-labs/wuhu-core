@@ -6,63 +6,34 @@ import WuhuClient
 import WuhuCoreClient
 
 struct WuhuClientTests {
-  @Test func listRunnersDecodesResponse() async throws {
+  @Test func listMountTemplatesDecodesResponse() async throws {
     let http = MockHTTPClient(
       dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/runners")
-        #expect(request.method == "GET")
-        let data = try WuhuJSON.encoder.encode(
-          [
-            WuhuRunnerInfo(name: "r1", connected: true),
-            WuhuRunnerInfo(name: "r2", connected: false),
-          ],
-        )
-        return (data, HTTPResponse(statusCode: 200, headers: [:]))
-      },
-    )
-
-    let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let runners = try await client.listRunners()
-    #expect(runners.map(\.name) == ["r1", "r2"])
-    #expect(runners.map(\.connected) == [true, false])
-  }
-
-  @Test func listEnvironmentsDecodesResponse() async throws {
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/environments")
+        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/mount-templates")
         #expect(request.method == "GET")
         let now = Date(timeIntervalSince1970: 0)
         let data = try WuhuJSON.encoder.encode(
           [
-            WuhuEnvironmentDefinition(
-              id: "e1",
-              name: "local",
-              type: .local,
-              path: "/tmp/repo",
-              createdAt: now,
-              updatedAt: now,
-            ),
-            WuhuEnvironmentDefinition(
-              id: "e2",
+            WuhuMountTemplate(
+              id: "mt1",
               name: "template",
-              type: .folderTemplate,
-              path: "/tmp/workspaces",
+              type: .folder,
               templatePath: "/tmp/template",
+              workspacesPath: "/tmp/workspaces",
               startupScript: "./startup.sh",
               createdAt: now,
               updatedAt: now,
             ),
-          ],
+          ] as [WuhuMountTemplate],
         )
         return (data, HTTPResponse(statusCode: 200, headers: [:]))
       },
     )
 
     let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let envs = try await client.listEnvironments()
-    #expect(envs.map(\.name) == ["local", "template"])
-    #expect(envs.map(\.type.rawValue) == ["local", "folder-template"])
+    let templates = try await client.listMountTemplates()
+    #expect(templates.map(\.name) == ["template"])
+    #expect(templates.map(\.type.rawValue) == ["folder"])
   }
 
   @Test func promptStreamDecodesSSEEvents() async throws {
@@ -88,9 +59,7 @@ struct WuhuClientTests {
               id: "s1",
               provider: .openai,
               model: "m",
-              environment: .init(name: "local", type: .local, path: "/tmp"),
               cwd: "/tmp",
-              runnerName: nil,
               parentSessionID: nil,
               createdAt: now,
               updatedAt: now,
@@ -118,8 +87,6 @@ struct WuhuClientTests {
         case 2:
           #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/enqueue?lane=followUp")
           #expect(request.method == "POST")
-          #expect(request.headers["Accept"] == "application/json")
-          #expect(request.headers["Content-Type"] == "application/json")
 
           let body = try #require(request.body)
           let decoded = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: body)
@@ -166,65 +133,37 @@ struct WuhuClientTests {
     #expect(sawDone)
   }
 
-  @Test func promptStreamSendsUserWhenProvided() async throws {
-    actor Counter {
-      var n = 0
-      func next() -> Int {
-        n += 1
-        return n
-      }
-    }
-    let counter = Counter()
-
+  @Test func setSessionModelPostsAndDecodesResponse() async throws {
     let http = MockHTTPClient(
       dataHandler: { request in
-        switch await counter.next() {
-        case 1:
-          let now = Date(timeIntervalSince1970: 0)
-          let baseline = WuhuGetSessionResponse(
-            session: WuhuSession(
-              id: "s1",
-              provider: .openai,
-              model: "m",
-              environment: .init(name: "local", type: .local, path: "/tmp"),
-              cwd: "/tmp",
-              runnerName: nil,
-              parentSessionID: nil,
-              createdAt: now,
-              updatedAt: now,
-              headEntryID: 1,
-              tailEntryID: 1,
-            ),
-            transcript: [],
-            inProcessExecution: .init(activePromptCount: 0),
-          )
-          let data = try WuhuJSON.encoder.encode(baseline)
-          return (data, HTTPResponse(statusCode: 200, headers: [:]))
+        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/model")
+        #expect(request.method == "POST")
 
-        case 2:
-          let body = try #require(request.body)
-          let decoded = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: body)
-          #expect(decoded.author == .participant(.init(rawValue: "alice"), kind: .human))
-          #expect(decoded.content == .text("hello"))
-
-          let data = try WuhuJSON.encoder.encode(QueueItemID(rawValue: "q1"))
-          return (data, HTTPResponse(statusCode: 200, headers: [:]))
-
-        default:
-          throw URLError(.badURL)
-        }
-      },
-      sseHandler: { _ in
-        AsyncThrowingStream { continuation in
-          continuation.yield(.init(data: #"{"type":"done"}"#))
-          continuation.finish()
-        }
+        let session = WuhuSession(
+          id: "s1",
+          provider: .openai,
+          model: "gpt-5.2-codex",
+          cwd: "/tmp",
+          parentSessionID: nil,
+          createdAt: Date(timeIntervalSince1970: 1),
+          updatedAt: Date(timeIntervalSince1970: 2),
+          headEntryID: 1,
+          tailEntryID: 2,
+        )
+        let response = WuhuSetSessionModelResponse(
+          session: session,
+          selection: .init(provider: .openai, model: "gpt-5.2-codex", reasoningEffort: .high),
+          applied: true,
+        )
+        let data = try WuhuJSON.encoder.encode(response)
+        return (data, HTTPResponse(statusCode: 200, headers: [:]))
       },
     )
 
     let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let stream = try await client.promptStream(sessionID: "s1", input: "hello", user: "alice")
-    for try await _ in stream {}
+    let response = try await client.setSessionModel(sessionID: "s1", provider: .openai, model: "gpt-5.2-codex", reasoningEffort: .high)
+    #expect(response.applied == true)
+    #expect(response.session.model == "gpt-5.2-codex")
   }
 
   @Test func followSessionStreamSetsAcceptHeaderAndDecodesEvents() async throws {
@@ -260,136 +199,6 @@ struct WuhuClientTests {
 
     #expect(sawIdle)
     #expect(sawDone)
-  }
-
-  @Test func setSessionModelPostsAndDecodesResponse() async throws {
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/model")
-        #expect(request.method == "POST")
-        #expect(request.headers["Accept"] == "application/json")
-        #expect(request.headers["Content-Type"] == "application/json")
-
-        let body = try #require(request.body)
-        let decoded = try WuhuJSON.decoder.decode(WuhuSetSessionModelRequest.self, from: body)
-        #expect(decoded.provider == .openai)
-        #expect(decoded.model == "gpt-5.2-codex")
-        #expect(decoded.reasoningEffort == .high)
-
-        let session = WuhuSession(
-          id: "s1",
-          provider: .openai,
-          model: "gpt-5.2-codex",
-          environment: .init(name: "local", type: .local, path: "/tmp"),
-          cwd: "/tmp",
-          runnerName: nil,
-          parentSessionID: nil,
-          createdAt: Date(timeIntervalSince1970: 1),
-          updatedAt: Date(timeIntervalSince1970: 2),
-          headEntryID: 1,
-          tailEntryID: 2,
-        )
-        let response = WuhuSetSessionModelResponse(
-          session: session,
-          selection: .init(provider: .openai, model: "gpt-5.2-codex", reasoningEffort: .high),
-          applied: true,
-        )
-        let data = try WuhuJSON.encoder.encode(response)
-        return (data, HTTPResponse(statusCode: 200, headers: [:]))
-      },
-    )
-
-    let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let response = try await client.setSessionModel(sessionID: "s1", provider: .openai, model: "gpt-5.2-codex", reasoningEffort: .high)
-    #expect(response.applied == true)
-    #expect(response.session.model == "gpt-5.2-codex")
-    #expect(response.selection.reasoningEffort == .high)
-  }
-
-  @Test func stopSessionPostsAndDecodesResponse() async throws {
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/stop")
-        #expect(request.method == "POST")
-        #expect(request.headers["Accept"] == "application/json")
-        #expect(request.headers["Content-Type"] == "application/json")
-
-        let body = try #require(request.body)
-        let decoded = try WuhuJSON.decoder.decode(WuhuStopSessionRequest.self, from: body)
-        #expect(decoded.user == "alice")
-
-        let now = Date(timeIntervalSince1970: 0)
-        let stopEntry = WuhuSessionEntry(
-          id: 2,
-          sessionID: "s1",
-          parentEntryID: 1,
-          createdAt: now,
-          payload: .message(.customMessage(.init(
-            customType: WuhuCustomMessageTypes.executionStopped,
-            content: [.text(text: "Execution stopped", signature: nil)],
-            details: nil,
-            display: true,
-            timestamp: now,
-          ))),
-        )
-        let response = WuhuStopSessionResponse(repairedEntries: [], stopEntry: stopEntry)
-        let data = try WuhuJSON.encoder.encode(response)
-        return (data, HTTPResponse(statusCode: 200, headers: [:]))
-      },
-    )
-
-    let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let response = try await client.stopSession(sessionID: "s1", user: "alice")
-    #expect(response.stopEntry?.id == 2)
-  }
-
-  @Test func listWorkspaceDocsDecodesResponse() async throws {
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/workspace/docs")
-        #expect(request.method == "GET")
-        let data = try WuhuJSON.encoder.encode(
-          [
-            WuhuWorkspaceDocSummary(
-              path: "issues/0020.md",
-              frontmatter: [
-                "title": .string("Workspace docs"),
-                "status": .string("open"),
-              ],
-            ),
-          ],
-        )
-        return (data, HTTPResponse(statusCode: 200, headers: [:]))
-      },
-    )
-
-    let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let docs = try await client.listWorkspaceDocs()
-    #expect(docs.map(\.path) == ["issues/0020.md"])
-    #expect(docs.first?.frontmatter["status"]?.stringValue == "open")
-  }
-
-  @Test func readWorkspaceDocEncodesPathQueryAndDecodes() async throws {
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/workspace/doc?path=issues/0020.md")
-        #expect(request.method == "GET")
-        let data = try WuhuJSON.encoder.encode(
-          WuhuWorkspaceDoc(
-            path: "issues/0020.md",
-            frontmatter: ["status": .string("open")],
-            body: "# Hello\n",
-          ),
-        )
-        return (data, HTTPResponse(statusCode: 200, headers: [:]))
-      },
-    )
-
-    let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), http: http)
-    let doc = try await client.readWorkspaceDoc(path: "issues/0020.md")
-    #expect(doc.path == "issues/0020.md")
-    #expect(doc.frontmatter["status"]?.stringValue == "open")
-    #expect(doc.body.contains("Hello"))
   }
 }
 

@@ -1,14 +1,11 @@
 import Foundation
 import Hummingbird
-import HummingbirdWebSocket
 
-struct WuhuRequestContext: RequestContext, WebSocketRequestContext {
+struct WuhuRequestContext: RequestContext {
   var coreContext: CoreRequestContextStorage
-  let webSocket: WebSocketHandlerReference<Self>
 
   init(source: Source) {
     coreContext = .init(source: source)
-    webSocket = .init()
   }
 
   var requestDecoder: JSONDecoder {

@@ -3,25 +3,19 @@ import PiAI
 import WuhuAPI
 
 enum WuhuAgentToolNames {
-  // Coding tools (used for channel restrictions).
   static let bash = "bash"
   static let asyncBash = "async_bash"
   static let asyncBashStatus = "async_bash_status"
-  static let swift = "swift"
 
-  // Channel management tools.
-  static let fork = "fork"
   static let listChildSessions = "list_child_sessions"
   static let readSessionFinalMessage = "read_session_final_message"
   static let sessionSteer = "session_steer"
   static let sessionFollowUp = "session_follow_up"
-  static let envList = "env_list"
-  static let envGet = "env_get"
-  static let envCreate = "env_create"
-  static let envUpdate = "env_update"
-  static let envDelete = "env_delete"
+  static let mountTemplateList = "mount_template_list"
+  static let mountTemplateGet = "mount_template_get"
   static let createSession = "create_session"
   static let joinSessions = "join_sessions"
+  static let mount = "mount"
 }
 
 extension WuhuService {
@@ -30,116 +24,22 @@ extension WuhuService {
     baseTools: [AnyAgentTool],
   ) -> [AnyAgentTool] {
     var tools = baseTools
-
-    switch session.type {
-    case .channel:
-      // Management/control-plane tools are available for all session types.
-      tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
-      // Enforce channel runtime restrictions via tool executor errors (keep schema identical).
-      tools = applyChannelRestrictions(tools)
-
-    case .forkedChannel, .coding:
-      // Both forked channels and coding sessions get full management tools
-      // without execution restrictions. This enables multi-session coordination
-      // patterns where coding sessions can spawn and manage child sessions.
-      tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
-    }
-
+    tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
     return tools
-  }
-
-  private func applyChannelRestrictions(_ tools: [AnyAgentTool]) -> [AnyAgentTool] {
-    func disabled(_ tool: AnyAgentTool, message: String) -> AnyAgentTool {
-      AnyAgentTool(tool: tool.tool, label: tool.label) { _, _ in
-        throw WuhuToolExecutionError(message: message)
-      }
-    }
-
-    return tools.map { tool in
-      switch tool.tool.name {
-      case WuhuAgentToolNames.bash:
-        disabled(
-          tool,
-          message: "Bash execution is not available in channel sessions. Use the fork tool to delegate work to a coding session.",
-        )
-      case WuhuAgentToolNames.asyncBash, WuhuAgentToolNames.asyncBashStatus, WuhuAgentToolNames.swift:
-        disabled(
-          tool,
-          message: "Command execution is not available in channel sessions. Use the fork tool to delegate work to a coding session.",
-        )
-      default:
-        tool
-      }
-    }
   }
 
   private func agentManagementTools(currentSessionID: String) -> [AnyAgentTool] {
     [
-      forkTool(currentSessionID: currentSessionID),
       createSessionTool(currentSessionID: currentSessionID),
       listChildSessionsTool(currentSessionID: currentSessionID),
       readSessionFinalMessageTool(currentSessionID: currentSessionID),
       joinSessionsTool(currentSessionID: currentSessionID),
       sessionSteerTool(),
       sessionFollowUpTool(),
-      envListTool(),
-      envGetTool(),
-      envCreateTool(),
-      envUpdateTool(),
-      envDeleteTool(),
+      mountTemplateListTool(),
+      mountTemplateGetTool(),
+      mountTool(currentSessionID: currentSessionID),
     ]
-  }
-
-  private func forkTool(currentSessionID: String) -> AnyAgentTool {
-    struct Params: Sendable {
-      var task: String
-
-      static func parse(toolName: String, args: JSONValue) throws -> Params {
-        let a = try ToolArgs(toolName: toolName, args: args)
-        let task = try a.requireString("task")
-        try a.ensureNoExtraKeys(allowed: ["task"])
-        return .init(task: task)
-      }
-    }
-
-    let schema: JSONValue = .object([
-      "type": .string("object"),
-      "properties": .object([
-        "task": .object([
-          "type": .string("string"),
-          "description": .string("Task description for the child coding session"),
-        ]),
-      ]),
-      "required": .array([.string("task")]),
-      "additionalProperties": .bool(false),
-    ])
-
-    let tool = Tool(
-      name: WuhuAgentToolNames.fork,
-      description: "Create a child coding session inheriting this conversation history, enqueue the task, and return the new session id.",
-      parameters: schema,
-    )
-
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.fork) { [weak self] toolCallId, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
-      let params = try Params.parse(toolName: tool.name, args: args)
-      let task = params.task.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !task.isEmpty else { throw WuhuToolExecutionError(message: "fork task must not be empty") }
-
-      let child = try await forkCodingSession(
-        parentSessionID: currentSessionID,
-        toolCallId: toolCallId,
-        task: task,
-      )
-
-      return try AgentToolResult(
-        content: [.text("Forked coding session: session://\(child.id)")],
-        details: .object([
-          "sessionID": .string(child.id),
-          "session": WuhuJSON.encoder.encodeToJSONValue(child),
-        ]),
-      )
-    }
   }
 
   private func createSessionTool(currentSessionID: String) -> AnyAgentTool {
@@ -188,7 +88,7 @@ extension WuhuService {
 
       let child = try await createDirectSession(
         parentSessionID: currentSessionID,
-        environmentIdentifier: envID,
+        mountTemplateIdentifier: envID,
         task: task,
       )
 
@@ -230,18 +130,13 @@ extension WuhuService {
       let children = try await store.listChildSessions(parentSessionID: currentSessionID)
 
       let lines = children.map { record in
-        let unread = record.hasUnreadFinalMessage ? "unread" : "read"
-        return "\(record.session.type.rawValue) \(record.session.id) [\(record.executionStatus.rawValue)] \(unread)"
+        "\(record.session.id) [\(record.executionStatus.rawValue)]"
       }
 
       let sessionsJSON: [JSONValue] = children.map { record in
         .object([
           "id": .string(record.session.id),
-          "type": .string(record.session.type.rawValue),
           "status": .string(record.executionStatus.rawValue),
-          "hasUnreadFinalMessage": .bool(record.hasUnreadFinalMessage),
-          "lastNotifiedFinalEntryID": record.lastNotifiedFinalEntryID.map { .string(String($0)) } ?? .null,
-          "lastReadFinalEntryID": record.lastReadFinalEntryID.map { .string(String($0)) } ?? .null,
         ])
       }
 
@@ -289,11 +184,6 @@ extension WuhuService {
       guard !targetID.isEmpty else { throw WuhuToolExecutionError(message: "sessionID is required") }
 
       let final = try await loadFinalAssistantMessage(sessionID: targetID)
-      if let session = try? await store.getSession(id: targetID),
-         session.parentSessionID == currentSessionID
-      {
-        try? await store.markChildFinalMessageRead(parentSessionID: currentSessionID, childSessionID: targetID, finalEntryID: final.entryID)
-      }
 
       return AgentToolResult(
         content: [.text(final.text)],
@@ -349,7 +239,6 @@ extension WuhuService {
       let ids = params.sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
       guard !ids.isEmpty else { throw WuhuToolExecutionError(message: "sessionIDs must not be empty") }
 
-      // Validate all are children of current session.
       let children = try await store.listChildSessions(parentSessionID: currentSessionID)
       let childIDs = Set(children.map(\.session.id))
       for id in ids {
@@ -370,7 +259,6 @@ extension WuhuService {
       }
       var results: [SessionResult] = []
 
-      // Check immediately before entering the wait loop — some sessions may already be done.
       do {
         let snapshot = try await store.listChildSessions(parentSessionID: currentSessionID)
         let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.session.id, $0) })
@@ -380,9 +268,6 @@ extension WuhuService {
           if record.executionStatus != .running {
             let final = try? await loadFinalAssistantMessage(sessionID: id)
             results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
-            if let entryID = final?.entryID {
-              try? await store.markChildFinalMessageRead(parentSessionID: currentSessionID, childSessionID: id, finalEntryID: entryID)
-            }
           }
         }
         for r in results {
@@ -390,7 +275,6 @@ extension WuhuService {
         }
       }
 
-      // Poll with exponential backoff: 2s, 4s, 8s, ... capped at 30s.
       var intervalNs: UInt64 = 2_000_000_000
       let maxIntervalNs: UInt64 = 30_000_000_000
 
@@ -408,9 +292,6 @@ extension WuhuService {
           if record.executionStatus != .running {
             let final = try? await loadFinalAssistantMessage(sessionID: id)
             results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
-            if let entryID = final?.entryID {
-              try? await store.markChildFinalMessageRead(parentSessionID: currentSessionID, childSessionID: id, finalEntryID: entryID)
-            }
             newlyDone.append(id)
           }
         }
@@ -419,7 +300,6 @@ extension WuhuService {
         }
       }
 
-      // Build response.
       let allDone = pending.isEmpty
 
       let completedJSON: [JSONValue] = results.map { r in
@@ -522,23 +402,23 @@ extension WuhuService {
     }
   }
 
-  private func envListTool() -> AnyAgentTool {
+  private func mountTemplateListTool() -> AnyAgentTool {
     let schema: JSONValue = .object([
       "type": .string("object"),
       "properties": .object([:]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.envList, description: "List canonical environments.", parameters: schema)
+    let tool = Tool(name: WuhuAgentToolNames.mountTemplateList, description: "List canonical environments.", parameters: schema)
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.envList) { [weak self] _, args in
+    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateList) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let a = try ToolArgs(toolName: tool.name, args: args)
       try a.ensureNoExtraKeys(allowed: [])
 
-      let envs = try await store.listEnvironments()
-      let lines = envs.map { "\($0.name) (\($0.type.rawValue)) id=\($0.id)" }
-      let json: [JSONValue] = envs.map { env in
-        (try? WuhuJSON.encoder.encodeToJSONValue(env)) ?? .null
+      let templates = try await store.listMountTemplates()
+      let lines = templates.map { "\($0.name) (\($0.type.rawValue)) id=\($0.id)" }
+      let json: [JSONValue] = templates.map { t in
+        (try? WuhuJSON.encoder.encodeToJSONValue(t)) ?? .null
       }
       return AgentToolResult(
         content: [.text(lines.isEmpty ? "(no environments)" : lines.joined(separator: "\n"))],
@@ -547,7 +427,7 @@ extension WuhuService {
     }
   }
 
-  private func envGetTool() -> AnyAgentTool {
+  private func mountTemplateGetTool() -> AnyAgentTool {
     let schema: JSONValue = .object([
       "type": .string("object"),
       "properties": .object([
@@ -556,308 +436,139 @@ extension WuhuService {
       "required": .array([.string("identifier")]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.envGet, description: "Get a canonical environment definition.", parameters: schema)
+    let tool = Tool(name: WuhuAgentToolNames.mountTemplateGet, description: "Get a canonical environment definition.", parameters: schema)
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.envGet) { [weak self] _, args in
+    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateGet) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let a = try ToolArgs(toolName: tool.name, args: args)
       let identifier = try a.requireString("identifier").trimmingCharacters(in: .whitespacesAndNewlines)
       try a.ensureNoExtraKeys(allowed: ["identifier"])
       guard !identifier.isEmpty else { throw WuhuToolExecutionError(message: "identifier is required") }
 
-      let env = try await store.getEnvironment(identifier: identifier)
+      let t = try await store.getMountTemplate(identifier: identifier)
       return try AgentToolResult(
-        content: [.text("\(env.name) (\(env.type.rawValue)) id=\(env.id)\npath=\(env.path)")],
-        details: WuhuJSON.encoder.encodeToJSONValue(env),
+        content: [.text("\(t.name) (\(t.type.rawValue)) id=\(t.id)\ntemplatePath=\(t.templatePath)")],
+        details: WuhuJSON.encoder.encodeToJSONValue(t),
       )
     }
   }
 
-  private func envCreateTool() -> AnyAgentTool {
+  private func mountTool(currentSessionID: String) -> AnyAgentTool {
+    struct Params: Sendable {
+      var path: String
+      var name: String?
+
+      static func parse(toolName: String, args: JSONValue) throws -> Params {
+        let a = try ToolArgs(toolName: toolName, args: args)
+        let path = try a.requireString("path")
+        let name = try a.optionalString("name")
+        try a.ensureNoExtraKeys(allowed: ["path", "name"])
+        return .init(path: path, name: name)
+      }
+    }
+
     let schema: JSONValue = .object([
       "type": .string("object"),
       "properties": .object([
-        "name": .object(["type": .string("string")]),
-        "type": .object(["type": .string("string"), "description": .string("local or folder-template")]),
-        "path": .object(["type": .string("string")]),
-        "templatePath": .object(["type": .string("string")]),
-        "startupScript": .object(["type": .string("string")]),
+        "path": .object(["type": .string("string"), "description": .string("Absolute path to the directory to mount")]),
+        "name": .object(["type": .string("string"), "description": .string("Optional label for the mount")]),
       ]),
-      "required": .array([.string("name"), .string("type"), .string("path")]),
+      "required": .array([.string("path")]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.envCreate, description: "Create a canonical environment definition.", parameters: schema)
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.envCreate) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
-      let a = try ToolArgs(toolName: tool.name, args: args)
-      let name = try a.requireString("name").trimmingCharacters(in: .whitespacesAndNewlines)
-      let typeRaw = try a.requireString("type").trimmingCharacters(in: .whitespacesAndNewlines)
-      let path = try a.requireString("path").trimmingCharacters(in: .whitespacesAndNewlines)
-      let templatePath = try a.optionalString("templatePath")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let startupScript = try a.optionalString("startupScript")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      try a.ensureNoExtraKeys(allowed: ["name", "type", "path", "templatePath", "startupScript"])
-
-      guard !name.isEmpty else { throw WuhuToolExecutionError(message: "name is required") }
-      guard !path.isEmpty else { throw WuhuToolExecutionError(message: "path is required") }
-      guard let type = WuhuEnvironmentType(rawValue: typeRaw) else {
-        throw WuhuToolExecutionError(message: "Invalid environment type: \(typeRaw)")
-      }
-
-      switch type {
-      case .local:
-        if let templatePath, !templatePath.isEmpty { throw WuhuToolExecutionError(message: "local environments must not set templatePath") }
-        if let startupScript, !startupScript.isEmpty { throw WuhuToolExecutionError(message: "local environments must not set startupScript") }
-      case .folderTemplate:
-        let t = (templatePath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { throw WuhuToolExecutionError(message: "folder-template requires templatePath") }
-      }
-
-      let env = try await store.createEnvironment(.init(
-        name: name,
-        type: type,
-        path: path,
-        templatePath: (templatePath?.isEmpty == false) ? templatePath : nil,
-        startupScript: (startupScript?.isEmpty == false) ? startupScript : nil,
-      ))
-
-      return try AgentToolResult(
-        content: [.text("created env \(env.name) id=\(env.id)")],
-        details: WuhuJSON.encoder.encodeToJSONValue(env),
-      )
-    }
-  }
-
-  private func envUpdateTool() -> AnyAgentTool {
-    let schema: JSONValue = .object([
-      "type": .string("object"),
-      "properties": .object([
-        "identifier": .object(["type": .string("string")]),
-        "name": .object(["type": .string("string")]),
-        "type": .object(["type": .string("string"), "description": .string("local or folder-template")]),
-        "path": .object(["type": .string("string")]),
-        "templatePath": .object(["type": .string("string")]),
-        "startupScript": .object(["type": .string("string")]),
-        "clearTemplatePath": .object(["type": .string("boolean")]),
-        "clearStartupScript": .object(["type": .string("boolean")]),
-      ]),
-      "required": .array([.string("identifier")]),
-      "additionalProperties": .bool(false),
-    ])
-    let tool = Tool(name: WuhuAgentToolNames.envUpdate, description: "Update a canonical environment definition.", parameters: schema)
-
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.envUpdate) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
-      let a = try ToolArgs(toolName: tool.name, args: args)
-      let identifier = try a.requireString("identifier").trimmingCharacters(in: .whitespacesAndNewlines)
-      let name = try a.optionalString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let typeRaw = try a.optionalString("type")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let path = try a.optionalString("path")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let templatePathStr = try a.optionalString("templatePath")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let startupScriptStr = try a.optionalString("startupScript")?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let clearTemplatePath = try (a.optionalBool("clearTemplatePath")) ?? false
-      let clearStartupScript = try (a.optionalBool("clearStartupScript")) ?? false
-      try a.ensureNoExtraKeys(allowed: ["identifier", "name", "type", "path", "templatePath", "startupScript", "clearTemplatePath", "clearStartupScript"])
-
-      guard !identifier.isEmpty else { throw WuhuToolExecutionError(message: "identifier is required") }
-
-      let type = typeRaw.flatMap(WuhuEnvironmentType.init(rawValue:))
-      if typeRaw != nil, type == nil {
-        throw WuhuToolExecutionError(message: "Invalid environment type: \(typeRaw!)")
-      }
-
-      let templatePath: String?? = if clearTemplatePath {
-        .some(nil)
-      } else if let templatePathStr {
-        .some(templatePathStr.isEmpty ? nil : templatePathStr)
-      } else {
-        nil
-      }
-
-      let startupScript: String?? = if clearStartupScript {
-        .some(nil)
-      } else if let startupScriptStr {
-        .some(startupScriptStr.isEmpty ? nil : startupScriptStr)
-      } else {
-        nil
-      }
-
-      let update = WuhuUpdateEnvironmentRequest(
-        name: name?.isEmpty == false ? name : nil,
-        type: type,
-        path: path?.isEmpty == false ? path : nil,
-        templatePath: templatePath,
-        startupScript: startupScript,
-      )
-
-      let env = try await store.updateEnvironment(identifier: identifier, request: update)
-      return try AgentToolResult(
-        content: [.text("updated env \(env.name) id=\(env.id)")],
-        details: WuhuJSON.encoder.encodeToJSONValue(env),
-      )
-    }
-  }
-
-  private func envDeleteTool() -> AnyAgentTool {
-    let schema: JSONValue = .object([
-      "type": .string("object"),
-      "properties": .object([
-        "identifier": .object(["type": .string("string")]),
-      ]),
-      "required": .array([.string("identifier")]),
-      "additionalProperties": .bool(false),
-    ])
-    let tool = Tool(name: WuhuAgentToolNames.envDelete, description: "Delete a canonical environment definition.", parameters: schema)
-
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.envDelete) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
-      let a = try ToolArgs(toolName: tool.name, args: args)
-      let identifier = try a.requireString("identifier").trimmingCharacters(in: .whitespacesAndNewlines)
-      try a.ensureNoExtraKeys(allowed: ["identifier"])
-      guard !identifier.isEmpty else { throw WuhuToolExecutionError(message: "identifier is required") }
-
-      try await store.deleteEnvironment(identifier: identifier)
-      return AgentToolResult(content: [.text("deleted env \(identifier)")], details: .object([:]))
-    }
-  }
-
-  private func forkCodingSession(parentSessionID: String, toolCallId: String, task: String) async throws -> WuhuSession {
-    let parent = try await store.getSession(id: parentSessionID)
-    guard parent.type == .channel || parent.type == .forkedChannel else {
-      throw WuhuToolExecutionError(message: "fork is only supported from channel sessions")
-    }
-
-    let settings = try await store.loadSettingsSnapshot(sessionID: .init(rawValue: parentSessionID))
-    let reasoningEffort = settings.effectiveReasoningEffort
-
-    let childSessionID = UUID().uuidString.lowercased()
-
-    _ = try await store.createSession(
-      sessionID: childSessionID,
-      sessionType: .forkedChannel,
-      provider: parent.provider,
-      model: parent.model,
-      reasoningEffort: reasoningEffort,
-      systemPrompt: WuhuDefaultSystemPrompts.forkedChannelAgent,
-      environmentID: parent.environmentID,
-      environment: parent.environment,
-      runnerName: parent.runnerName,
-      parentSessionID: parentSessionID,
-      workspaceRoot: workspaceRoot,
+    let tool = Tool(
+      name: WuhuAgentToolNames.mount,
+      description: "Mount a directory for this session. After mounting, filesystem tools become available if they weren't already. Injects AGENTS.md and skills from the mounted directory.",
+      parameters: schema,
     )
 
-    let parentTranscript = try await store.getEntries(sessionID: parentSessionID)
-    let cutoff = parentTranscript.lastIndex { entry in
-      guard case let .message(m) = entry.payload else { return false }
-      guard case let .assistant(a) = m else { return false }
-      return a.content.contains { block in
-        guard case let .toolCall(id: id, name: _, arguments: _) = block else { return false }
-        return id == toolCallId
+    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mount) { [weak self] _, args in
+      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+      let params = try Params.parse(toolName: tool.name, args: args)
+      let mountPath = params.path.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !mountPath.isEmpty else { throw WuhuToolExecutionError(message: "path is required") }
+
+      var isDir: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: mountPath, isDirectory: &isDir), isDir.boolValue else {
+        throw WuhuToolExecutionError(message: "Directory not found: \(mountPath)")
       }
-    } ?? (parentTranscript.count - 1)
 
-    if cutoff >= 0 {
-      for entry in parentTranscript[0 ... cutoff] {
-        guard case let .message(m) = entry.payload else { continue }
-        _ = try await store.appendEntryWithSession(
-          sessionID: .init(rawValue: childSessionID),
-          payload: .message(m),
-          createdAt: entry.createdAt,
-        )
+      let mountName = (params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let effectiveName = mountName.isEmpty ? URL(fileURLWithPath: mountPath).lastPathComponent : mountName
+
+      // Check if this session already has a primary mount
+      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
+      let hasPrimary = existingMounts.contains { $0.isPrimary }
+
+      let mount = try await store.createMount(
+        sessionID: currentSessionID,
+        name: effectiveName,
+        path: mountPath,
+        isPrimary: !hasPrimary,
+      )
+
+      // Update session cwd if this is the first/primary mount
+      if mount.isPrimary {
+        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
       }
-    }
 
-    let forkResult = AgentToolResult(
-      content: [.text("Forked coding session: session://\(childSessionID)")],
-      details: .object(["sessionID": .string(childSessionID)]),
-    )
-    let now = Date()
-    let toolResultMessage: Message = .toolResult(.init(
-      toolCallId: toolCallId,
-      toolName: WuhuAgentToolNames.fork,
-      content: forkResult.content,
-      details: forkResult.details,
-      isError: false,
-      timestamp: now,
-    ))
-    _ = try await store.appendEntryWithSession(
-      sessionID: .init(rawValue: childSessionID),
-      payload: .message(.fromPi(toolResultMessage)),
-      createdAt: now,
-    )
+      // Emit context entries
+      try await emitMountContext(sessionID: currentSessionID, mount: mount)
 
-    let forkPoint = try await store.appendEntry(
-      sessionID: childSessionID,
-      payload: .custom(
-        customType: "wuhu_fork_point_v1",
-        data: .object([
-          "parentSessionID": .string(parentSessionID),
-          "childSessionID": .string(childSessionID),
-          "task": .string(task),
+      return AgentToolResult(
+        content: [.text("Mounted '\(effectiveName)' at \(mountPath)")],
+        details: .object([
+          "mountID": .string(mount.id),
+          "name": .string(effectiveName),
+          "path": .string(mountPath),
+          "isPrimary": .bool(mount.isPrimary),
         ]),
-      ),
-    )
-    try await store.setDisplayStartEntryID(sessionID: childSessionID, entryID: forkPoint.id)
-
-    // Ensure copied history doesn't leave the child marked running before we enqueue the task.
-    try await store.setSessionExecutionStatus(sessionID: .init(rawValue: childSessionID), status: .idle)
-
-    let author: Author = .participant(.init(rawValue: "channel-agent"), kind: .bot)
-    let message = QueuedUserMessage(author: author, content: .text(task))
-    _ = try await enqueue(sessionID: .init(rawValue: childSessionID), message: message, lane: .followUp)
-
-    return try await store.getSession(id: childSessionID)
+      )
+    }
   }
 
-  private func createDirectSession(parentSessionID: String, environmentIdentifier: String, task: String) async throws -> WuhuSession {
+  private func createDirectSession(parentSessionID: String, mountTemplateIdentifier: String, task: String) async throws -> WuhuSession {
     let parent = try await store.getSession(id: parentSessionID)
     let settings = try await store.loadSettingsSnapshot(sessionID: .init(rawValue: parentSessionID))
     let reasoningEffort = settings.effectiveReasoningEffort
 
-    let envDef = try await store.getEnvironment(identifier: environmentIdentifier)
+    let mt = try await store.getMountTemplate(identifier: mountTemplateIdentifier)
     let childSessionID = UUID().uuidString.lowercased()
 
     let serverCwd = FileManager.default.currentDirectoryPath
-    let environment: WuhuEnvironment
-    switch envDef.type {
-    case .local:
-      let resolvedPath = ToolPath.resolveToCwd(envDef.path, cwd: serverCwd)
-      environment = WuhuEnvironment(name: envDef.name, type: .local, path: resolvedPath)
-    case .folderTemplate:
-      guard let templatePathRaw = envDef.templatePath else {
-        throw WuhuToolExecutionError(message: "folder-template environment '\(envDef.name)' requires templatePath")
-      }
-      let templatePath = ToolPath.resolveToCwd(templatePathRaw, cwd: serverCwd)
-      let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(envDef.path)
-      let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
-        sessionID: childSessionID,
-        templatePath: templatePath,
-        startupScript: envDef.startupScript,
-        workspacesPath: workspacesRoot,
-      )
-      environment = WuhuEnvironment(
-        name: envDef.name,
-        type: .folderTemplate,
-        path: workspacePath,
-        templatePath: templatePath,
-        startupScript: envDef.startupScript,
-      )
-    }
-
-    _ = try await store.createSession(
+    let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
+    let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+    let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
       sessionID: childSessionID,
-      sessionType: .coding,
+      templatePath: templatePath,
+      startupScript: mt.startupScript,
+      workspacesPath: workspacesRoot,
+    )
+
+    _ = try await createSession(
+      sessionID: childSessionID,
       provider: parent.provider,
       model: parent.model,
       reasoningEffort: reasoningEffort,
       systemPrompt: WuhuDefaultSystemPrompts.codingAgent,
-      environmentID: envDef.id,
-      environment: environment,
-      runnerName: parent.runnerName,
+      cwd: workspacePath,
       parentSessionID: parentSessionID,
-      workspaceRoot: workspaceRoot,
     )
 
+    // Create mount record
+    let mount = try await store.createMount(
+      sessionID: childSessionID,
+      name: mt.name,
+      path: workspacePath,
+      mountTemplateID: mt.id,
+      isPrimary: true,
+    )
+
+    // Emit mount-level context
+    try await emitMountContext(sessionID: childSessionID, mount: mount)
+
+    // Enqueue the task
     let author: Author = .participant(.init(rawValue: "channel-agent"), kind: .bot)
     let message = QueuedUserMessage(author: author, content: .text(task))
     _ = try await enqueue(sessionID: .init(rawValue: childSessionID), message: message, lane: .followUp)

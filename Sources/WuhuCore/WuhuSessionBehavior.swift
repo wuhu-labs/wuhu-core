@@ -217,11 +217,9 @@ struct WuhuSessionBehavior: AgentBehavior {
     let streamFn = await runtimeConfig.streamFn()
 
     var effectiveSystemPrompt = context.systemPrompt ?? ""
-    let ctxSection = await runtimeConfig.contextSection()
-    if !ctxSection.isEmpty {
-      effectiveSystemPrompt += ctxSection
+    if let cwd = session.cwd {
+      effectiveSystemPrompt += "\n\nWorking directory: \(cwd)\nAll relative paths are resolved from this directory."
     }
-    effectiveSystemPrompt += "\n\nWorking directory: \(session.cwd)\nAll relative paths are resolved from this directory."
 
     let effectiveContext = Context(
       systemPrompt: effectiveSystemPrompt,

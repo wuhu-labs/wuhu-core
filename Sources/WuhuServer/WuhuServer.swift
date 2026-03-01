@@ -1,11 +1,8 @@
 import Foundation
 import Hummingbird
 import HummingbirdCore
-import HummingbirdWebSocket
 import Logging
 import NIOCore
-import WSClient
-import WSCore
 import WuhuAPI
 import WuhuCore
 
@@ -57,33 +54,24 @@ public struct WuhuServer: Sendable {
       return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
     }
 
-    let runnerRegistry = RunnerRegistry()
-
     let service = WuhuService(
       store: store,
       blobStore: blobStore,
       llmRequestLogger: requestLogger,
-      remoteToolsProvider: { sessionID, runnerName in
-        WuhuRemoteTools.makeTools(
-          sessionID: sessionID,
-          runnerName: runnerName,
-          runnerRegistry: runnerRegistry,
-        )
-      },
       workspaceRoot: workspaceRoot,
     )
     await service.startAgentLoopManager()
 
     let router = Router(context: WuhuRequestContext.self)
 
-    @Sendable func resolveEnvironment(_ identifier: String, missingStatus: HTTPResponse.Status) async throws -> WuhuEnvironmentDefinition {
+    @Sendable func resolveMountTemplate(_ identifier: String, missingStatus: HTTPResponse.Status) async throws -> WuhuMountTemplate {
       do {
-        return try await store.getEnvironment(identifier: identifier)
-      } catch let err as WuhuEnvironmentResolutionError {
+        return try await store.getMountTemplate(identifier: identifier)
+      } catch let err as WuhuMountTemplateResolutionError {
         switch err {
-        case .unknownEnvironment:
+        case .unknownMountTemplate:
           throw HTTPError(missingStatus, message: err.description)
-        case .unsupportedEnvironmentType, .missingSessionIDForFolderTemplate:
+        case .unsupportedType:
           throw HTTPError(.badRequest, message: err.description)
         }
       }
@@ -93,48 +81,56 @@ public struct WuhuServer: Sendable {
       "ok"
     }
 
-    router.get("v1/runners") { _, _ async -> [WuhuRunnerInfo] in
-      let configured = (config.runners ?? []).map(\.name)
-      let connected = await runnerRegistry.listRunnerNames()
-      let connectedSet = Set(connected)
-      let all = Set(configured).union(connectedSet).sorted()
-      return all.map { .init(name: $0, connected: connectedSet.contains($0)) }
+    // MARK: - Mount Templates (replacing environments)
+
+    router.get("v1/mount-templates") { request, context async throws -> Response in
+      let templates = try await store.listMountTemplates()
+      return try context.responseEncoder.encode(templates, from: request, context: context)
     }
 
-    router.get("v1/environments") { request, context async throws -> Response in
-      let envs = try await store.listEnvironments()
-      return try context.responseEncoder.encode(envs, from: request, context: context)
-    }
-
-    router.post("v1/environments") { request, context async throws -> Response in
-      let create = try await request.decode(as: WuhuCreateEnvironmentRequest.self, context: context)
+    router.post("v1/mount-templates") { request, context async throws -> Response in
+      let create = try await request.decode(as: WuhuCreateMountTemplateRequest.self, context: context)
       let name = create.name.trimmingCharacters(in: .whitespacesAndNewlines)
-      let path = create.path.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !name.isEmpty else { throw HTTPError(.badRequest, message: "Environment name is required") }
-      guard !path.isEmpty else { throw HTTPError(.badRequest, message: "Environment path is required") }
+      let templatePath = create.templatePath.trimmingCharacters(in: .whitespacesAndNewlines)
+      let workspacesPath = create.workspacesPath.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !name.isEmpty else { throw HTTPError(.badRequest, message: "Mount template name is required") }
+      guard !templatePath.isEmpty else { throw HTTPError(.badRequest, message: "templatePath is required") }
+      guard !workspacesPath.isEmpty else { throw HTTPError(.badRequest, message: "workspacesPath is required") }
 
-      switch create.type {
-      case .local:
-        if let templatePath = create.templatePath, !templatePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          throw HTTPError(.badRequest, message: "local environments must not set templatePath")
-        }
-        if let startupScript = create.startupScript, !startupScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          throw HTTPError(.badRequest, message: "local environments must not set startupScript")
-        }
-      case .folderTemplate:
-        let templatePath = (create.templatePath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !templatePath.isEmpty else { throw HTTPError(.badRequest, message: "folder-template requires templatePath") }
-      }
-
-      let env = try await store.createEnvironment(create)
-      return try context.responseEncoder.encode(env, from: request, context: context)
+      let mt = try await store.createMountTemplate(create)
+      return try context.responseEncoder.encode(mt, from: request, context: context)
     }
 
-    router.get("v1/environments/:identifier") { request, context async throws -> Response in
+    router.get("v1/mount-templates/:identifier") { request, context async throws -> Response in
       let identifier = try context.parameters.require("identifier")
-      let env = try await resolveEnvironment(identifier, missingStatus: .notFound)
-      return try context.responseEncoder.encode(env, from: request, context: context)
+      let mt = try await resolveMountTemplate(identifier, missingStatus: .notFound)
+      return try context.responseEncoder.encode(mt, from: request, context: context)
     }
+
+    router.patch("v1/mount-templates/:identifier") { request, context async throws -> Response in
+      let identifier = try context.parameters.require("identifier")
+      let update = try await request.decode(as: WuhuUpdateMountTemplateRequest.self, context: context)
+      _ = try await resolveMountTemplate(identifier, missingStatus: .notFound)
+      let mt = try await store.updateMountTemplate(identifier: identifier, request: update)
+      return try context.responseEncoder.encode(mt, from: request, context: context)
+    }
+
+    router.delete("v1/mount-templates/:identifier") { _, context async throws -> Response in
+      let identifier = try context.parameters.require("identifier")
+      do {
+        try await store.deleteMountTemplate(identifier: identifier)
+      } catch let err as WuhuMountTemplateResolutionError {
+        switch err {
+        case .unknownMountTemplate:
+          throw HTTPError(.notFound, message: err.description)
+        case .unsupportedType:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+      return Response(status: .noContent)
+    }
+
+    // MARK: - Workspace docs
 
     router.get("v1/workspace/docs") { _, _ async throws -> [WuhuWorkspaceDocSummary] in
       try await workspaceDocsStore.listDocs()
@@ -213,55 +209,7 @@ public struct WuhuServer: Sendable {
       )
     }
 
-    router.patch("v1/environments/:identifier") { request, context async throws -> Response in
-      let identifier = try context.parameters.require("identifier")
-      let update = try await request.decode(as: WuhuUpdateEnvironmentRequest.self, context: context)
-      let existing = try await resolveEnvironment(identifier, missingStatus: .notFound)
-
-      let candidateType = update.type ?? existing.type
-      let candidatePath = (update.path ?? existing.path).trimmingCharacters(in: .whitespacesAndNewlines)
-      let candidateTemplatePath: String? = {
-        if let v = update.templatePath { return v }
-        return existing.templatePath
-      }()
-      let candidateStartupScript: String? = {
-        if let v = update.startupScript { return v }
-        return existing.startupScript
-      }()
-
-      guard !candidatePath.isEmpty else { throw HTTPError(.badRequest, message: "Environment path is required") }
-
-      switch candidateType {
-      case .local:
-        if let templatePath = candidateTemplatePath, !templatePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          throw HTTPError(.badRequest, message: "local environments must not set templatePath")
-        }
-        if let startupScript = candidateStartupScript, !startupScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          throw HTTPError(.badRequest, message: "local environments must not set startupScript")
-        }
-      case .folderTemplate:
-        let templatePath = (candidateTemplatePath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !templatePath.isEmpty else { throw HTTPError(.badRequest, message: "folder-template requires templatePath") }
-      }
-
-      let env = try await store.updateEnvironment(identifier: identifier, request: update)
-      return try context.responseEncoder.encode(env, from: request, context: context)
-    }
-
-    router.delete("v1/environments/:identifier") { _, context async throws -> Response in
-      let identifier = try context.parameters.require("identifier")
-      do {
-        try await store.deleteEnvironment(identifier: identifier)
-      } catch let err as WuhuEnvironmentResolutionError {
-        switch err {
-        case .unknownEnvironment:
-          throw HTTPError(.notFound, message: err.description)
-        case .unsupportedEnvironmentType, .missingSessionIDForFolderTemplate:
-          throw HTTPError(.badRequest, message: err.description)
-        }
-      }
-      return Response(status: .noContent)
-    }
+    // MARK: - Sessions
 
     router.get("v1/sessions") { request, context async throws -> [WuhuSession] in
       struct Query: Decodable {
@@ -294,105 +242,87 @@ public struct WuhuServer: Sendable {
     router.post("v1/sessions") { request, context async throws -> Response in
       let create = try await request.decode(as: WuhuCreateSessionRequest.self, context: context)
 
-      let sessionType = create.type ?? .coding
       let model = (create.model?.isEmpty == false) ? create.model! : WuhuModelCatalog.defaultModelID(for: create.provider)
       let systemPrompt: String = if let prompt = create.systemPrompt, !prompt.isEmpty {
         prompt
       } else {
-        switch sessionType {
-        case .coding:
-          WuhuDefaultSystemPrompts.codingAgent
-        case .channel:
-          WuhuDefaultSystemPrompts.channelAgent
-        case .forkedChannel:
-          WuhuDefaultSystemPrompts.forkedChannelAgent
-        }
+        WuhuDefaultSystemPrompts.codingAgent
       }
       let sessionID = UUID().uuidString.lowercased()
 
-      let session: WuhuSession
-      if let runnerName = create.runner, !runnerName.isEmpty {
-        if let directPath = create.environmentPath, !directPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          throw HTTPError(.badRequest, message: "environmentPath is not supported for runner sessions")
-        }
+      let cwd: String?
+      var mountToEmit: WuhuMount?
 
-        let envIdentifier = (create.environment ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !envIdentifier.isEmpty else { throw HTTPError(.badRequest, message: "Environment identifier is required") }
-        let environmentDefinition = try await resolveEnvironment(envIdentifier, missingStatus: .badRequest)
-
-        guard let runner = await runnerRegistry.get(runnerName: runnerName) else {
-          throw HTTPError(.badRequest, message: "Unknown or disconnected runner: \(runnerName)")
-        }
-        let environment = try await runner.resolveEnvironment(sessionID: sessionID, environment: environmentDefinition)
-        session = try await service.createSession(
+      if let mountPath = create.mountPath, !mountPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // Direct path mount
+        let resolvedPath = ToolPath.resolveToCwd(mountPath, cwd: FileManager.default.currentDirectoryPath)
+        cwd = resolvedPath
+      } else if let mtIdentifier = create.mountTemplate, !mtIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // Mount template
+        let mt = try await resolveMountTemplate(mtIdentifier, missingStatus: .badRequest)
+        let serverCwd = FileManager.default.currentDirectoryPath
+        let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
+        let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+        let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
           sessionID: sessionID,
-          sessionType: sessionType,
-          provider: create.provider,
-          model: model,
-          reasoningEffort: create.reasoningEffort,
-          systemPrompt: systemPrompt,
-          environmentID: environmentDefinition.id,
-          environment: environment,
-          runnerName: runnerName,
-          parentSessionID: create.parentSessionID,
+          templatePath: templatePath,
+          startupScript: mt.startupScript,
+          workspacesPath: workspacesRoot,
         )
-        try await runner.registerSession(sessionID: session.id, environment: environment)
+        cwd = workspacePath
       } else {
-        let environment: WuhuEnvironment
-        var environmentID: String?
+        // No mount
+        cwd = nil
+      }
 
-        if let directPath = create.environmentPath, !directPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          let resolvedPath = ToolPath.resolveToCwd(directPath, cwd: FileManager.default.currentDirectoryPath)
-          let candidate = URL(fileURLWithPath: resolvedPath).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-          let name = candidate.isEmpty ? "workspace" : candidate
-          environment = WuhuEnvironment(name: name, type: .local, path: resolvedPath)
-          environmentID = nil
+      _ = try await service.createSession(
+        sessionID: sessionID,
+        provider: create.provider,
+        model: model,
+        reasoningEffort: create.reasoningEffort,
+        systemPrompt: systemPrompt,
+        cwd: cwd,
+        parentSessionID: create.parentSessionID,
+      )
+
+      // Create mount record if we have a cwd
+      if let cwd {
+        let mountName: String
+        let mountTemplateID: String?
+
+        if let mtIdentifier = create.mountTemplate, !mtIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          let mt = try await store.getMountTemplate(identifier: mtIdentifier)
+          mountName = mt.name
+          mountTemplateID = mt.id
         } else {
-          let envIdentifier = (create.environment ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-          guard !envIdentifier.isEmpty else { throw HTTPError(.badRequest, message: "Environment identifier is required") }
-          let environmentDefinition = try await resolveEnvironment(envIdentifier, missingStatus: .badRequest)
-          environmentID = environmentDefinition.id
-
-          switch environmentDefinition.type {
-          case .local:
-            let resolvedPath = ToolPath.resolveToCwd(environmentDefinition.path, cwd: FileManager.default.currentDirectoryPath)
-            environment = WuhuEnvironment(name: environmentDefinition.name, type: .local, path: resolvedPath)
-          case .folderTemplate:
-            guard let templatePathRaw = environmentDefinition.templatePath else {
-              throw HTTPError(.badRequest, message: "folder-template requires templatePath")
-            }
-            let templatePath = ToolPath.resolveToCwd(templatePathRaw, cwd: FileManager.default.currentDirectoryPath)
-            let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(environmentDefinition.path)
-            let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
-              sessionID: sessionID,
-              templatePath: templatePath,
-              startupScript: environmentDefinition.startupScript,
-              workspacesPath: workspacesRoot,
-            )
-            environment = WuhuEnvironment(
-              name: environmentDefinition.name,
-              type: .folderTemplate,
-              path: workspacePath,
-              templatePath: templatePath,
-              startupScript: environmentDefinition.startupScript,
-            )
-          }
+          let candidate = URL(fileURLWithPath: cwd).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+          mountName = candidate.isEmpty ? "workspace" : candidate
+          mountTemplateID = nil
         }
 
-        session = try await service.createSession(
+        let mount = try await store.createMount(
           sessionID: sessionID,
-          sessionType: sessionType,
-          provider: create.provider,
-          model: model,
-          reasoningEffort: create.reasoningEffort,
-          systemPrompt: systemPrompt,
-          environmentID: environmentID,
-          environment: environment,
-          runnerName: nil,
-          parentSessionID: create.parentSessionID,
+          name: mountName,
+          path: cwd,
+          mountTemplateID: mountTemplateID,
+          isPrimary: true,
         )
+        mountToEmit = mount
       }
-      return try context.responseEncoder.encode(session, from: request, context: context)
+
+      // Emit mount-level context entries
+      if let mount = mountToEmit {
+        try await service.emitMountContext(sessionID: sessionID, mount: mount)
+      }
+
+      let finalSession = try await service.getSession(id: sessionID)
+      return try context.responseEncoder.encode(finalSession, from: request, context: context)
+    }
+
+    router.get("v1/sessions/:id/mounts") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      let mounts = try await store.listMounts(sessionID: id)
+      return try context.responseEncoder.encode(mounts, from: request, context: context)
     }
 
     router.patch("v1/sessions/:id") { request, context async throws -> Response in
@@ -586,40 +516,13 @@ public struct WuhuServer: Sendable {
       )
     }
 
-    router.ws("/v1/runners/ws") { _, _ in
-      .upgrade()
-    } onUpgrade: { inbound, outbound, wsContext in
-      do {
-        try await runnerRegistry.acceptRunnerClient(inbound: inbound, outbound: outbound, logger: wsContext.logger)
-      } catch {
-        wsContext.logger.debug("Runner WebSocket error", metadata: ["error": "\(error)"])
-      }
-    }
-
     let port = config.port ?? 5530
     let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
 
     let app = Application(
       router: router,
-      server: .http1WebSocketUpgrade(webSocketRouter: router),
       configuration: .init(address: .hostname(host, port: port)),
     )
-
-    if let runners = config.runners, !runners.isEmpty {
-      let logger = Logger(label: "WuhuServer")
-      for r in runners {
-        Task {
-          while !Task.isCancelled {
-            do {
-              try await runnerRegistry.connectToRunnerServer(runner: r, logger: logger)
-            } catch {
-              logger.error("Failed to connect to runner", metadata: ["runner": "\(r.name)", "error": "\(error)"])
-              try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
-          }
-        }
-      }
-    }
     try await app.runService()
   }
 }
@@ -630,5 +533,3 @@ private func ensureDirectoryExists(forDatabasePath path: String) throws {
   let dir = url.deletingLastPathComponent()
   try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 }
-
-// Session follow streaming emits `WuhuSessionStreamEvent` directly (no mapping layer).

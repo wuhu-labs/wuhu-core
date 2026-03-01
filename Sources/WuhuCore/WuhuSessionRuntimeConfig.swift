@@ -4,7 +4,6 @@ import PiAI
 actor WuhuSessionRuntimeConfig {
   private var _tools: [AnyAgentTool] = []
   private var _streamFn: StreamFn = PiAI.streamSimple
-  private var _contextActor: WuhuAgentsContextActor?
 
   func setTools(_ tools: [AnyAgentTool]) {
     _tools = tools
@@ -20,14 +19,5 @@ actor WuhuSessionRuntimeConfig {
 
   func streamFn() -> StreamFn {
     _streamFn
-  }
-
-  func setContextActor(_ actor: WuhuAgentsContextActor?) {
-    _contextActor = actor
-  }
-
-  func contextSection() async -> String {
-    guard let actor = _contextActor else { return "" }
-    return await actor.contextSection()
   }
 }

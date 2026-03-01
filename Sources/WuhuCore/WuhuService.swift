@@ -8,7 +8,6 @@ public actor WuhuService {
   private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
-  private let remoteToolsProvider: (@Sendable (_ sessionID: String, _ runnerName: String) async throws -> [AnyAgentTool])?
   private let baseStreamFn: StreamFn
   let workspaceRoot: String?
   private let instanceID: String
@@ -24,7 +23,6 @@ public actor WuhuService {
     llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
-    remoteToolsProvider: (@Sendable (_ sessionID: String, _ runnerName: String) async throws -> [AnyAgentTool])? = nil,
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
   ) {
@@ -33,7 +31,6 @@ public actor WuhuService {
     self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
-    self.remoteToolsProvider = remoteToolsProvider
     self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     instanceID = UUID().uuidString.lowercased()
@@ -49,8 +46,6 @@ public actor WuhuService {
   }
 
   public func startAgentLoopManager() async {
-    // Backwards-compatible entrypoint: keep background listeners alive even as execution
-    // is delegated to per-session actors.
     await ensureAsyncBashRouter()
   }
 
@@ -82,10 +77,7 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
-      onIdle: { [weak self] idleSessionID in
-        guard let self else { return }
-        await handleSessionIdle(sessionID: idleSessionID)
-      },
+      onIdle: nil,
     )
     runtimes[sessionID] = runtime
     return runtime
@@ -94,66 +86,6 @@ public actor WuhuService {
   private func enqueueSystemJSON(sessionID: String, jsonText: String, timestamp: Date) async throws {
     let input = SystemUrgentInput(source: .asyncBashCallback, content: .text(jsonText))
     try await runtime(for: sessionID).enqueueSystem(input: input, enqueuedAt: timestamp)
-  }
-
-  private func handleSessionIdle(sessionID: String) async {
-    let childSession: WuhuSession
-    do {
-      childSession = try await store.getSession(id: sessionID)
-    } catch {
-      logServiceError("handleSessionIdle: failed to load child session '\(sessionID)'", error: error)
-      return
-    }
-
-    guard let parentSessionID = childSession.parentSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
-          !parentSessionID.isEmpty
-    else { return }
-
-    let parentSession: WuhuSession
-    do {
-      parentSession = try await store.getSession(id: parentSessionID)
-    } catch {
-      logServiceError("handleSessionIdle: failed to load parent session '\(parentSessionID)' for child '\(sessionID)'", error: error)
-      return
-    }
-    guard parentSession.type == .channel || parentSession.type == .forkedChannel else { return }
-
-    let final: (entryID: Int64, text: String)
-    do {
-      final = try await loadFinalAssistantMessage(sessionID: sessionID)
-    } catch {
-      logServiceError("handleSessionIdle: failed to load final assistant message for child '\(sessionID)'", error: error)
-      return
-    }
-
-    let didUpdate: Bool
-    do {
-      didUpdate = try await store.setChildFinalMessageNotified(
-        parentSessionID: parentSessionID,
-        childSessionID: sessionID,
-        finalEntryID: final.entryID,
-      )
-    } catch {
-      logServiceError(
-        "handleSessionIdle: failed to mark final-message notified for parent '\(parentSessionID)' child '\(sessionID)' entryID=\(final.entryID)",
-        error: error,
-      )
-      return
-    }
-    guard didUpdate else { return }
-
-    let text = [
-      "Child session is idle: session://\(sessionID)",
-      "",
-      "Final message:",
-      final.text,
-    ].joined(separator: "\n")
-    let input = SystemUrgentInput(source: .asyncTaskNotification, content: .text(text))
-    do {
-      try await runtime(for: parentSessionID).enqueueSystem(input: input, enqueuedAt: Date())
-    } catch {
-      logServiceError("handleSessionIdle: failed to enqueue parent notification into '\(parentSessionID)'", error: error)
-    }
   }
 
   private func logServiceError(_ message: String, error: Error) {
@@ -225,29 +157,120 @@ public actor WuhuService {
 
   public func createSession(
     sessionID: String,
-    sessionType: WuhuSessionType = .coding,
     provider: WuhuProvider,
     model: String,
     reasoningEffort: ReasoningEffort? = nil,
     systemPrompt: String,
-    environmentID: String?,
-    environment: WuhuEnvironment,
-    runnerName: String? = nil,
+    cwd: String?,
     parentSessionID: String? = nil,
   ) async throws -> WuhuSession {
-    try await store.createSession(
+    let session = try await store.createSession(
       sessionID: sessionID,
-      sessionType: sessionType,
       provider: provider,
       model: model,
       reasoningEffort: reasoningEffort,
       systemPrompt: systemPrompt,
-      environmentID: environmentID,
-      environment: environment,
-      runnerName: runnerName,
+      cwd: cwd,
       parentSessionID: parentSessionID,
-      workspaceRoot: workspaceRoot,
     )
+
+    // Emit workspace-level context entries if workspace root is configured
+    if let workspaceRoot {
+      try await emitWorkspaceContext(sessionID: session.id, workspaceRoot: workspaceRoot)
+    }
+
+    return try await store.getSession(id: session.id)
+  }
+
+  /// Emit context entries for a mount (AGENTS.md, skills).
+  public func emitMountContext(sessionID: String, mount: WuhuMount) async throws {
+    // Mount announcement
+    let announcementPayload: WuhuEntryPayload = .custom(
+      customType: WuhuCustomMessageTypes.mountContext,
+      data: .object([
+        "mountID": .string(mount.id),
+        "name": .string(mount.name),
+        "path": .string(mount.path),
+        "text": .string("Mounted '\(mount.name)' at \(mount.path)"),
+      ]),
+    )
+    _ = try await store.appendEntry(sessionID: sessionID, payload: announcementPayload)
+
+    // Mount-level AGENTS.md
+    let agentsFiles = loadAgentsFiles(at: mount.path)
+    if !agentsFiles.isEmpty {
+      let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
+      let agentsPayload: WuhuEntryPayload = .custom(
+        customType: WuhuCustomMessageTypes.agentsContext,
+        data: .object([
+          "source": .string("mount"),
+          "mountID": .string(mount.id),
+          "text": .string(rendered),
+        ]),
+      )
+      _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
+    }
+
+    // Mount-level skills
+    let mountSkillsDir = URL(fileURLWithPath: mount.path, isDirectory: true)
+      .appendingPathComponent(".wuhu")
+      .appendingPathComponent("skills")
+      .path
+    let mountSkills = WuhuSkillsLoader.load(userSkillsDir: "/dev/null", projectSkillsDir: mountSkillsDir)
+    if !mountSkills.isEmpty {
+      let rendered = WuhuSkills.promptSection(skills: mountSkills)
+      let skillsPayload: WuhuEntryPayload = .custom(
+        customType: WuhuCustomMessageTypes.skillsContext,
+        data: .object([
+          "source": .string("mount"),
+          "mountID": .string(mount.id),
+          "text": .string(rendered),
+        ]),
+      )
+      _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
+    }
+  }
+
+  /// Emit workspace-level context entries (AGENTS.md, skills).
+  private func emitWorkspaceContext(sessionID: String, workspaceRoot: String) async throws {
+    // Workspace AGENTS.md
+    let agentsFiles = loadAgentsFiles(at: workspaceRoot)
+    if !agentsFiles.isEmpty {
+      let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
+      let agentsPayload: WuhuEntryPayload = .custom(
+        customType: WuhuCustomMessageTypes.agentsContext,
+        data: .object([
+          "source": .string("workspace"),
+          "text": .string(rendered),
+        ]),
+      )
+      _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
+    }
+
+    // Workspace skills (from workspace root + ~/.wuhu/skills/)
+    let homeSkillsDir = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".wuhu")
+      .appendingPathComponent("skills")
+      .path
+    let workspaceSkillsDir = URL(fileURLWithPath: workspaceRoot, isDirectory: true)
+      .appendingPathComponent("skills")
+      .path
+    let skills = WuhuSkillsLoader.load(
+      userSkillsDir: homeSkillsDir,
+      workspaceSkillsDir: workspaceSkillsDir,
+      projectSkillsDir: "/dev/null",
+    )
+    if !skills.isEmpty {
+      let rendered = WuhuSkills.promptSection(skills: skills)
+      let skillsPayload: WuhuEntryPayload = .custom(
+        customType: WuhuCustomMessageTypes.skillsContext,
+        data: .object([
+          "source": .string("workspace"),
+          "text": .string(rendered),
+        ]),
+      )
+      _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
+    }
   }
 
   public func listSessions(limit: Int? = nil, includeArchived: Bool = false) async throws -> [WuhuSession] {
@@ -385,7 +408,6 @@ public actor WuhuService {
                 return
               }
             case .done:
-              // Should not be published to live subscribers.
               break
             }
           }
@@ -409,8 +431,44 @@ public actor WuhuService {
       }
     }
   }
+}
 
-  // Async bash completion handling lives in `WuhuAsyncBashCompletionRouter`.
+// MARK: - Context helpers
+
+private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
+  let fm = FileManager.default
+  let candidates = [
+    URL(fileURLWithPath: root).appendingPathComponent("AGENTS.md").path,
+    URL(fileURLWithPath: root).appendingPathComponent("AGENTS.local.md").path,
+  ]
+
+  var files: [WuhuContextFile] = []
+  for path in candidates {
+    guard fm.fileExists(atPath: path) else { continue }
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+    files.append(.init(path: path, content: content))
+  }
+  return files
+}
+
+struct WuhuContextFile: Sendable, Hashable {
+  var path: String
+  var content: String
+}
+
+enum WuhuContextRenderer {
+  static func renderAgentsFiles(_ files: [WuhuContextFile]) -> String {
+    guard !files.isEmpty else { return "" }
+    var s = "# Project Context\n\n"
+    s += "Project-specific instructions and guidelines:\n\n"
+    for f in files {
+      s += "## \(f.path)\n\n"
+      s += f.content
+      if !s.hasSuffix("\n") { s += "\n" }
+      s += "\n"
+    }
+    return s
+  }
 }
 
 // MARK: - New session contracts
@@ -421,19 +479,14 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     let session = try await store.getSession(id: sessionID.rawValue)
 
     let baseTools: [AnyAgentTool]
-    if let runnerName = session.runnerName, !runnerName.isEmpty {
-      if let remoteToolsProvider {
-        baseTools = try await remoteToolsProvider(sessionID.rawValue, runnerName)
-      } else {
-        // Remote sessions require a server-provided tool executor; fail loudly.
-        throw PiAIError.unsupported("Session '\(sessionID.rawValue)' uses runner '\(runnerName)', but no remoteToolsProvider is configured")
-      }
-    } else {
+    if let cwd = session.cwd {
       let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
       baseTools = WuhuTools.codingAgentTools(
-        cwd: session.cwd,
+        cwd: cwd,
         asyncBash: asyncBash,
       )
+    } else {
+      baseTools = []
     }
 
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
@@ -441,7 +494,6 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
 
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.setContextCwd(session.cwd, environmentRoot: session.environment.path, workspaceRoot: workspaceRoot)
     await runtime.setTools(resolvedTools)
     await runtime.setStreamFn(streamFn)
     await runtime.ensureStarted()
@@ -458,16 +510,13 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
   public func subscribe(sessionID: SessionID, since request: SessionSubscriptionRequest) async throws -> SessionSubscription {
     _ = try await store.getSession(id: sessionID.rawValue)
 
-    // Subscribe first, then backfill (bufferingNewest in the hub bridges the gap).
     let live = await subscriptionHub.subscribe(sessionID: sessionID.rawValue)
 
-    // Ensure the session actor is running so future events will be published.
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.ensureStarted()
 
     var initial = try await loadInitialState(sessionID: sessionID, request: request)
 
-    // Seed inflight streaming text for mid-stream reconnection.
     let inflightText = await runtime.currentInflightText()
     initial.inflightStreamText = inflightText
 
