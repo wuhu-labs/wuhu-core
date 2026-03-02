@@ -496,6 +496,35 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
+  func needsInference(state: State) -> Bool {
+    // Walk backwards to find the last message entry (skip custom/header entries).
+    for entry in state.entries.reversed() {
+      switch entry.payload {
+      case let .message(m):
+        switch m {
+        case .toolResult:
+          // Last message is a tool result the model hasn't responded to.
+          return true
+        case .user:
+          // Last message is a user message with no assistant response.
+          return true
+        case .assistant:
+          // Model already responded — nothing to do.
+          return false
+        case .customMessage:
+          // Skip custom messages (e.g., "Execution stopped") and keep looking.
+          continue
+        case .unknown:
+          continue
+        }
+      default:
+        // Skip non-message entries (header, sessionSettings, etc.).
+        continue
+      }
+    }
+    return false
+  }
+
   // MARK: - Image blob hydration
 
   /// Replace blob URIs in image content blocks with base64-encoded data for LLM consumption.

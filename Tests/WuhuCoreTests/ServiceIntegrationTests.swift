@@ -476,3 +476,129 @@ struct ServiceCompactionTests {
     }
   }
 }
+
+// MARK: - Inference retry and mid-turn recovery tests
+
+struct InferenceRetryTests {
+  /// Transient HTTP 500 errors during inference are retried and the session recovers
+  /// without user intervention.
+  @Test func transientErrorRetriedAndRecovers() async throws {
+    // Two transient 500 errors, then a successful response.
+    let mock = MockStreamFn(responses: [
+      .transientError(code: 500),
+      .transientError(code: 500),
+      .text("recovered after retries"),
+    ])
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession()
+    try await harness.enqueueAndWaitForIdle("hello", sessionID: session.id, timeout: 30)
+
+    let texts = try await harness.assistantTexts(sessionID: session.id)
+    #expect(texts.contains("recovered after retries"))
+    #expect(mock.callCount == 3) // 2 failures + 1 success
+  }
+
+  /// Mid-turn recovery: after a tool call + tool result, if inference fails transiently
+  /// and the loop restarts, the model still responds to the tool result.
+  @Test func midTurnRecoveryAfterToolResult() async throws {
+    let fileIO = InMemoryFileIO()
+    let cwd = "/test-ws"
+    fileIO.seedDirectory(path: cwd)
+    fileIO.seedFile(path: "\(cwd)/hello.txt", content: "hello world")
+
+    // Turn 1: LLM calls read tool
+    // Turn 2: Transient error (simulates HTTP 500 after tool result)
+    // Turn 3: Transient error again
+    // Turn 4: Successful response analyzing tool result
+    let mock = MockStreamFn(responses: [
+      .toolCalls([MockToolCall(name: "read", arguments: .object(["path": .string("hello.txt")]))]),
+      .transientError(code: 500),
+      .transientError(code: 529),
+      .text("The file contains hello world."),
+    ])
+
+    let harness = try TestHarness(mockLLM: mock, fileIO: fileIO)
+
+    let session = try await withDependencies {
+      $0.fileIO = fileIO
+    } operation: {
+      try await harness.createSession(cwd: cwd)
+    }
+
+    try await withDependencies {
+      $0.fileIO = fileIO
+    } operation: {
+      try await harness.enqueueAndWaitForIdle("read hello.txt", sessionID: session.id, timeout: 30)
+    }
+
+    let texts = try await harness.assistantTexts(sessionID: session.id)
+    #expect(texts.contains { $0.contains("hello world") })
+    #expect(mock.callCount == 4) // tool call + 2 retries + success
+  }
+
+  /// Stopping a session cancels the retry backoff sleep immediately.
+  @Test func stopBreaksRetryLoop() async throws {
+    // Return transient errors forever — the loop will keep retrying.
+    let mock = MockStreamFn(responses: [
+      .transientError(code: 500),
+    ])
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession()
+
+    // Enqueue a message to start inference (which will fail and retry).
+    let message = QueuedUserMessage(
+      author: .participant(.init(rawValue: "test-user"), kind: .human),
+      content: .text("trigger retry"),
+    )
+    _ = try await harness.service.enqueue(
+      sessionID: .init(rawValue: session.id),
+      message: message,
+      lane: .followUp,
+    )
+
+    // Give the loop time to start retrying (first attempt + first backoff).
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+
+    // The mock should have been called at least once.
+    #expect(mock.callCount >= 1)
+
+    // Now stop the session — this should cancel the retry loop.
+    let start = ContinuousClock.now
+    let response = try await harness.service.stopSession(sessionID: session.id)
+    let elapsed = ContinuousClock.now - start
+
+    // Stop should complete quickly (not wait for the full backoff schedule).
+    #expect(elapsed < .seconds(5), "Stop should break the retry loop promptly, took \(elapsed)")
+    #expect(response.stopEntry != nil)
+  }
+
+  /// Non-transient errors (e.g., 401 auth errors) are not retried by the
+  /// inference retry loop — they propagate immediately. The outer runtime
+  /// restart loop may trigger a second attempt via `needsInference` recovery,
+  /// but there is no exponential backoff between attempts.
+  @Test func nonTransientErrorNotRetried() async throws {
+    let mock = MockStreamFn(responses: [
+      .transientError(code: 401),
+      .text("recovered after restart"),
+    ])
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession()
+
+    // The 401 error propagates immediately without retries from
+    // performInferenceWithRetry. The outer WuhuSessionRuntime restarts
+    // the loop after 1 second, at which point needsInference detects
+    // the unanswered user message and triggers a fresh inference call.
+    try await harness.enqueueAndWaitForIdle("hello", sessionID: session.id, timeout: 10)
+
+    // Two calls: one failed (401), one succeeded (after runtime restart).
+    // Critically, there is NO exponential backoff between them — just the
+    // runtime's fixed 1-second restart delay.
+    #expect(mock.callCount == 2)
+
+    let texts = try await harness.assistantTexts(sessionID: session.id)
+    #expect(texts.contains("recovered after restart"))
+  }
+}

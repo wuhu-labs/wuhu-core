@@ -150,6 +150,14 @@ public actor AgentLoop<B: AgentBehavior> {
   private func runUntilIdle() async throws {
     var hasToolResults = try await recoverStaleToolCalls()
 
+    // Detect mid-turn state from a prior crash/restart: the transcript
+    // ends with a tool result or user message that the model never
+    // responded to (e.g., inference failed with a transient API error
+    // and all retries were exhausted).
+    if !hasToolResults, behavior.needsInference(state: state) {
+      hasToolResults = true
+    }
+
     while !Task.isCancelled {
       // Interrupt checkpoint
       let interruptActions = try await serialized { [behavior] state in
@@ -171,9 +179,9 @@ public actor AgentLoop<B: AgentBehavior> {
 
       hasToolResults = false
 
-      // Inference
+      // Inference (with retry for transient errors)
       let context = behavior.buildContext(state: state)
-      let message = try await performInference(context: context)
+      let message = try await performInferenceWithRetry(context: context)
 
       // Persist assistant entry
       try await serialized { [behavior] state in
@@ -200,7 +208,68 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  // MARK: - Inference (with streaming)
+  // MARK: - Inference (with streaming + retry)
+
+  /// Maximum number of retry attempts for transient inference errors.
+  private static var maxInferenceRetries: Int {
+    10
+  }
+
+  /// Retry inference with exponential backoff for transient errors.
+  ///
+  /// Retries up to ``maxInferenceRetries`` times. Each retry waits
+  /// `base * 2^attempt` seconds (1, 2, 4, 8, …) capped at 60 seconds,
+  /// with ±25% jitter. Cancellation (e.g., the user stopping execution)
+  /// breaks the retry loop immediately via `CancellationError`.
+  private func performInferenceWithRetry(context: Context) async throws -> AssistantMessage {
+    var lastError: (any Error)?
+    for attempt in 0 ... Self.maxInferenceRetries {
+      // Back off before retries (not before the first attempt).
+      if attempt > 0 {
+        let delay = min(pow(2, Double(attempt - 1)), 60)
+        let jitter = delay * Double.random(in: -0.25 ... 0.25)
+        let total = UInt64((delay + jitter) * 1_000_000_000)
+        // Task.sleep throws CancellationError if the task was cancelled
+        // (e.g., user stopped execution), which propagates out immediately.
+        try await Task.sleep(nanoseconds: total)
+      }
+
+      do {
+        return try await performInference(context: context)
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        lastError = error
+        guard Self.isTransientError(error) else { throw error }
+        // Transient error — loop continues to the next attempt.
+      }
+    }
+    // All retries exhausted.
+    throw lastError ?? AgentLoopError.inferenceProducedNoResult
+  }
+
+  /// Whether an error is transient and worth retrying.
+  private nonisolated static func isTransientError(_ error: any Error) -> Bool {
+    // PiAI HTTP status errors: retry on server errors and rate limits.
+    if let piError = error as? PiAIError,
+       case let .httpStatus(code, _) = piError
+    {
+      // 429 = rate limited, 500/502/503 = server errors, 529 = overloaded
+      return code == 429 || code == 500 || code == 502 || code == 503 || code == 529
+    }
+
+    // AsyncHTTPClient connection-level errors (string-matched because
+    // the concrete error types are internal to AsyncHTTPClient).
+    let description = String(describing: error)
+    if description.contains("remoteConnectionClosed")
+      || description.contains("connectTimeout")
+      || description.contains("readTimeout")
+    {
+      return true
+    }
+
+    return false
+  }
 
   private func performInference(context: Context) async throws -> AssistantMessage {
     emit(.streamBegan)

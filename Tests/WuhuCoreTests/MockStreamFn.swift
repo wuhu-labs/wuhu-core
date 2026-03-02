@@ -75,6 +75,10 @@ final class MockStreamFn: @unchecked Sendable {
       AsyncThrowingStream { continuation in
         continuation.finish(throwing: error)
       }
+    case let .transientError(code):
+      AsyncThrowingStream { continuation in
+        continuation.finish(throwing: PiAIError.httpStatus(code: code, body: "overloaded"))
+      }
     }
   }
 
@@ -175,6 +179,8 @@ enum MockLLMResponse: Sendable {
   case textAndToolCalls(String, [MockToolCall])
   /// Throw an error on this call.
   case error(MockLLMError)
+  /// Throw a transient HTTP error (retryable by the agent loop).
+  case transientError(code: Int = 500)
 }
 
 struct MockToolCall: Sendable {

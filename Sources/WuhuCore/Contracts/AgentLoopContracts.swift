@@ -177,6 +177,28 @@ public protocol AgentBehavior: Sendable {
 
   /// Whether the loaded state has pending work.
   func hasWork(state: State) -> Bool
+
+  /// Whether the transcript is mid-turn and needs an inference call.
+  ///
+  /// Called at the top of ``AgentLoop/runUntilIdle()`` to detect a
+  /// state where the transcript ends with a tool result (or user
+  /// message) that the model has not yet responded to. This happens
+  /// when a prior inference attempt failed (e.g., HTTP 500 from a
+  /// transient API error) and the loop restarted.
+  ///
+  /// When this returns `true`, the loop skips the "is there new work
+  /// to drain?" check and proceeds directly to inference.
+  ///
+  /// Default implementation returns `false`.
+  func needsInference(state: State) -> Bool
+}
+
+// MARK: - Default Implementations
+
+public extension AgentBehavior {
+  func needsInference(state _: State) -> Bool {
+    false
+  }
 }
 
 // MARK: - Tool Call Status
