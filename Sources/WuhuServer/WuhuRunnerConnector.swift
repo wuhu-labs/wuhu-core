@@ -8,14 +8,17 @@ import WuhuCore
 enum WuhuRunnerConnector {
   /// Connect to a remote runner and register it in the registry.
   /// Runs until the WebSocket connection closes or is cancelled.
+  /// Returns true if a connection was established (and later dropped), false if it never connected.
+  @discardableResult
   static func connect(
     name: String,
     address: String,
     registry: RunnerRegistry,
     logger: Logger,
-  ) async {
+  ) async -> Bool {
     let wsURL = wsURLFromAddress(address, path: "/v1/runner/ws")
     logger.info("Connecting to runner '\(name)' at \(wsURL)")
+    nonisolated(unsafe) var didConnect = false
 
     do {
       try await WebSocketClient.connect(url: wsURL, logger: logger) { inbound, outbound, _ in
@@ -39,6 +42,7 @@ enum WuhuRunnerConnector {
         }
 
         logger.info("Runner '\(runnerName)' connected (protocol v\(version))")
+        didConnect = true
 
         // Create connection + RemoteRunnerClient
         let connection = RunnerConnection(runnerName: runnerName)
@@ -72,6 +76,7 @@ enum WuhuRunnerConnector {
     } catch {
       logger.error("Failed to connect to runner '\(name)': \(error)")
     }
+    return didConnect
   }
 
   /// Start background tasks to connect to all configured runners.
@@ -88,9 +93,14 @@ enum WuhuRunnerConnector {
         let maxBackoff: UInt64 = 30_000_000_000 // 30s
 
         while !Task.isCancelled {
-          await connect(name: runner.name, address: runner.address, registry: registry, logger: logger)
+          let connected = await connect(name: runner.name, address: runner.address, registry: registry, logger: logger)
 
-          // Connection dropped — wait and retry
+          // Reset backoff after successful connection (was connected then dropped)
+          if connected {
+            backoff = 1_000_000_000
+          }
+
+          // Connection dropped or failed — wait and retry
           if Task.isCancelled { break }
           logger.info("Will reconnect to runner '\(runner.name)' in \(backoff / 1_000_000_000)s")
           try? await Task.sleep(nanoseconds: backoff)
