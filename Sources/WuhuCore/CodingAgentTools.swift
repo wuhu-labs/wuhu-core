@@ -772,7 +772,7 @@ private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
       throw ToolError.message("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
     }
 
-    let run = try await runBash(
+    let run = try await LocalBash.run(
       command: params.command,
       cwd: cwd,
       timeoutSeconds: params.timeout,
@@ -781,7 +781,7 @@ private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
     let output = run.output
     let timedOut = run.timedOut
     let terminated = run.terminated
-    let fullOutputPath = run.fullOutputPath
+    let fullOutputPath = run.fullOutputPath ?? ""
 
     let truncation = ToolTruncation.truncateTail(output)
     var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
@@ -1094,111 +1094,9 @@ private func shellEscape(_ s: String) -> String {
   return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-private struct BashRunResult: Sendable {
-  var exitCode: Int32
-  var output: String
-  var timedOut: Bool
-  var terminated: Bool
-  var fullOutputPath: String
-}
-
-private func runBash(command: String, cwd: String, timeoutSeconds: Double?) async throws -> BashRunResult {
-  #if os(macOS) || os(Linux)
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = ["-lc", command]
-    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-    process.standardInput = FileHandle.nullDevice
-
-    // Run tools in a non-interactive environment. Some CLIs (notably `gh`) will attempt to prompt
-    // via the controlling TTY, which can hang an agent loop indefinitely.
-    var env = ProcessInfo.processInfo.environment
-    env["CI"] = "1"
-    env["TERM"] = env["TERM"]?.nilIfEqual("") ?? "dumb"
-    env["PAGER"] = "cat"
-    env["GIT_PAGER"] = "cat"
-    env["GH_PAGER"] = "cat"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GH_PROMPT_DISABLED"] = "1"
-    process.environment = env
-
-    let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
-    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-    let outputHandle = try FileHandle(forWritingTo: outputURL)
-    process.standardOutput = outputHandle
-    process.standardError = outputHandle
-
-    try process.run()
-    let pid = process.processIdentifier
-
-    let start = Date()
-    var timedOut = false
-    var terminated = false
-    do {
-      while process.isRunning {
-        if Task.isCancelled {
-          terminated = true
-          process.terminate()
-          break
-        }
-        if let timeoutSeconds, timeoutSeconds > 0, Date().timeIntervalSince(start) > timeoutSeconds {
-          timedOut = true
-          process.terminate()
-          break
-        }
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        // Fallback: Foundation's Process.isRunning relies on a dispatch source
-        // that can miss fast exits in rare cases. If the process no longer exists
-        // at the OS level, break out instead of polling forever.
-        if process.isRunning, !processExistsAtOSLevel(pid) {
-          break
-        }
-      }
-    } catch is CancellationError {
-      terminated = true
-      process.terminate()
-    }
-
-    // Async-safe wait: avoid process.waitUntilExit() which is a synchronous
-    // blocking call that can hang when Foundation's dispatch source misses
-    // the process exit notification.
-    if terminated || timedOut {
-      // Give the process up to 3s to exit after SIGTERM.
-      let sigtermDeadline = Date().addingTimeInterval(3)
-      while process.isRunning, Date() < sigtermDeadline {
-        try? await Task.sleep(nanoseconds: 100_000_000)
-      }
-
-      // Escalate to SIGKILL if the process is still alive.
-      if process.isRunning {
-        kill(pid, SIGKILL)
-        let sigkillDeadline = Date().addingTimeInterval(2)
-        while process.isRunning, Date() < sigkillDeadline {
-          try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-      }
-    }
-
-    try? outputHandle.close()
-
-    let data = (try? Data(contentsOf: outputURL)) ?? Data()
-    let output = String(decoding: data, as: UTF8.self)
-    return .init(exitCode: process.terminationStatus, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
-  #else
-    throw PiAIError.unsupported("bash is not supported on this platform")
-  #endif
-}
-
-/// Check whether a process still exists at the OS level, bypassing Foundation's
-/// internal bookkeeping. Returns false when the PID no longer refers to a live
-/// process (ESRCH). This catches the rare case where Foundation's dispatch-source
-/// based termination detection misses a fast exit.
-private func processExistsAtOSLevel(_ pid: Int32) -> Bool {
-  // kill(pid, 0) sends no signal but checks for process existence.
-  // Returns 0 if the process exists (or is a zombie); -1/ESRCH if gone.
-  kill(pid, 0) != -1 || errno != ESRCH
-}
+// Bash execution is provided by LocalBash (Sources/WuhuCore/LocalBash.swift).
+// The bash tool still calls LocalBash.run() directly for local execution.
+// When runner-aware tools land, bash will go through the Runner protocol instead.
 
 private extension String {
   func nilIfEqual(_ other: String) -> String? {

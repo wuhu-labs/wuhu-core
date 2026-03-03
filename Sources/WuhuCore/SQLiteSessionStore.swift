@@ -134,6 +134,7 @@ public actor SQLiteSessionStore: SessionStore {
     path: String,
     mountTemplateID: String? = nil,
     isPrimary: Bool = true,
+    runnerID: RunnerID = .local,
   ) async throws -> WuhuMount {
     let now = Date()
     let id = UUID().uuidString.lowercased()
@@ -146,6 +147,7 @@ public actor SQLiteSessionStore: SessionStore {
         path: path,
         mountTemplateID: mountTemplateID,
         isPrimary: isPrimary,
+        runnerID: runnerID.wireValue,
         createdAt: now,
       )
       try row.insert(db)
@@ -458,16 +460,25 @@ private struct MountRow: Codable, FetchableRecord, MutablePersistableRecord {
   var path: String
   var mountTemplateID: String?
   var isPrimary: Bool
+  var runnerID: String
   var createdAt: Date
 
   func toModel() -> WuhuMount {
-    .init(
+    let runner: RunnerID = if runnerID == "local" {
+      .local
+    } else if runnerID.hasPrefix("remote:") {
+      .remote(name: String(runnerID.dropFirst("remote:".count)))
+    } else {
+      .local
+    }
+    return .init(
       id: id,
       sessionID: sessionID,
       name: name,
       path: path,
       mountTemplateID: mountTemplateID,
       isPrimary: isPrimary,
+      runnerID: runner,
       createdAt: createdAt,
     )
   }
@@ -836,6 +847,13 @@ extension SQLiteSessionStore {
         throw WuhuStoreError.sessionCorrupt(
           "Foreign key violations after v6 migration: \(violations)",
         )
+      }
+    }
+
+    // ── v7: add runnerID to mounts ──────────────────────────────────
+    migrator.registerMigration("wuhu_v7_runner") { db in
+      try db.alter(table: "mounts") { t in
+        t.add(column: "runnerID", .text).notNull().defaults(to: "local")
       }
     }
 
