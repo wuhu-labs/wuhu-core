@@ -15,6 +15,7 @@ public actor WuhuService {
   private let eventHub = WuhuLiveEventHub()
   private let subscriptionHub = WuhuSessionSubscriptionHub()
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
+  public let runnerRegistry: RunnerRegistry
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
@@ -27,6 +28,7 @@ public actor WuhuService {
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
+    runnerRegistry: RunnerRegistry? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -36,6 +38,7 @@ public actor WuhuService {
     self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
+    self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
     instanceID = UUID().uuidString.lowercased()
   }
 

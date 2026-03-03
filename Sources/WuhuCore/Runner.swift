@@ -67,7 +67,7 @@ public struct EnumeratedEntry: Sendable, Hashable, Codable {
 /// `RemoteRunnerClient` implements this by forwarding calls over WebSocket
 /// to a `RunnerServerHandler` wrapping any `Runner`.
 public protocol Runner: Actor, Sendable {
-  var id: RunnerID { get }
+  nonisolated var id: RunnerID { get }
 
   // -- Process execution --
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
