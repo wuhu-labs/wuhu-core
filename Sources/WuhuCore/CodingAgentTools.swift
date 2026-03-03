@@ -9,6 +9,7 @@ public typealias CwdProvider = @Sendable () async throws -> String?
 public extension WuhuTools {
   static func codingAgentTools(
     cwdProvider: @escaping CwdProvider,
+    mountResolver: MountResolver? = nil,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
   ) -> [AnyAgentTool] {
@@ -19,12 +20,15 @@ public extension WuhuTools {
       lsTool(cwdProvider: cwdProvider),
       findTool(cwdProvider: cwdProvider),
       grepTool(cwdProvider: cwdProvider),
-      bashTool(cwdProvider: cwdProvider),
+      bashTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
     if let braveSearchAPIKey, !braveSearchAPIKey.isEmpty {
       tools.append(webSearchTool(apiKey: braveSearchAPIKey))
+    }
+    if let mountResolver {
+      tools.append(copyTool(mountResolver: mountResolver))
     }
     return tools
   }
@@ -735,25 +739,32 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
+    var mount: String?
 
     static func parse(toolName: String, args: JSONValue) throws -> Params {
       let a = try ToolArgs(toolName: toolName, args: args)
       let command = try a.requireString("command")
       let timeout = try a.optionalDouble("timeout")
-      return .init(command: command, timeout: timeout)
+      let mount = try a.optionalString("mount")
+      return .init(command: command, timeout: timeout, mount: mount)
     }
+  }
+
+  var properties: [String: JSONValue] = [
+    "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
+    "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
+  ]
+  if mountResolver != nil {
+    properties["mount"] = .object(["type": .string("string"), "description": .string("Mount name to execute on (optional, defaults to primary mount)")])
   }
 
   let schema: JSONValue = .object([
     "type": .string("object"),
-    "properties": .object([
-      "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
-      "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
-    ]),
+    "properties": .object(properties),
     "required": .array([.string("command")]),
     "additionalProperties": .bool(false),
   ])
@@ -765,8 +776,31 @@ private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "bash") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     let params = try Params.parse(toolName: tool.name, args: args)
+
+    // If a mount is specified and we have a mount resolver, use it
+    if let mountResolver, params.mount != nil {
+      let resolved = try await mountResolver(params.mount)
+      let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+      return try formatBashResult(run)
+    }
+
+    // If no mount specified but we have a resolver, resolve primary mount (may be remote)
+    if let mountResolver {
+      do {
+        let resolved = try await mountResolver(nil)
+        if resolved.mount?.runnerID != .local {
+          // Remote primary mount — execute through runner
+          let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+          return try formatBashResult(run)
+        }
+      } catch {
+        // Fall through to local execution if mount resolution fails
+      }
+    }
+
+    // Local execution path (original behavior)
+    let cwd = try await requireCwd(cwdProvider)
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
       throw ToolError.message("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
@@ -777,53 +811,64 @@ private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
       cwd: cwd,
       timeoutSeconds: params.timeout,
     )
-    let exitCode = run.exitCode
-    let output = run.output
-    let timedOut = run.timedOut
-    let terminated = run.terminated
-    let fullOutputPath = run.fullOutputPath ?? ""
-
-    let truncation = ToolTruncation.truncateTail(output)
-    var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
-
-    var details: [String: JSONValue] = [:]
-    if truncation.truncated {
-      details["truncation"] = truncation.toJSON()
-      details["fullOutputPath"] = .string(fullOutputPath)
-
-      let startLine = truncation.totalLines - truncation.outputLines + 1
-      let endLine = truncation.totalLines
-      if truncation.lastLinePartial {
-        let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
-        let lastSize = ToolTruncation.formatSize(last.utf8.count)
-        if !outputText.isEmpty { outputText += "\n\n" }
-        outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize)). Full output: \(fullOutputPath)]"
-      } else if truncation.truncatedBy == "lines" {
-        outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines). Full output: \(fullOutputPath)]"
-      } else {
-        outputText +=
-          "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit). Full output: \(fullOutputPath)]"
-      }
-    }
-
-    if timedOut {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(outputText + "\n\nCommand timed out")
-    }
-    if terminated {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(outputText + "\n\nCommand aborted")
-    }
-    if exitCode != 0 {
-      // Keep full output around for debugging.
-      throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
-    }
-
-    if !truncation.truncated {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-    }
-    return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
+    return try formatBashResult(run)
   }
+}
+
+/// Format a BashResult into an AgentToolResult with truncation handling.
+private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
+  let exitCode = run.exitCode
+  let output = run.output
+  let timedOut = run.timedOut
+  let terminated = run.terminated
+  let fullOutputPath = run.fullOutputPath ?? ""
+
+  let truncation = ToolTruncation.truncateTail(output)
+  var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
+
+  var details: [String: JSONValue] = [:]
+  if truncation.truncated {
+    details["truncation"] = truncation.toJSON()
+    if !fullOutputPath.isEmpty {
+      details["fullOutputPath"] = .string(fullOutputPath)
+    }
+
+    let startLine = truncation.totalLines - truncation.outputLines + 1
+    let endLine = truncation.totalLines
+    if truncation.lastLinePartial {
+      let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+      let lastSize = ToolTruncation.formatSize(last.utf8.count)
+      if !outputText.isEmpty { outputText += "\n\n" }
+      outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize))."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else if truncation.truncatedBy == "lines" {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    }
+  }
+
+  if timedOut {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand timed out")
+  }
+  if terminated {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand aborted")
+  }
+  if exitCode != 0 {
+    throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
+  }
+
+  if !truncation.truncated, !fullOutputPath.isEmpty {
+    try? FileManager.default.removeItem(atPath: fullOutputPath)
+  }
+  return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
 }
 
 // MARK: - async_bash
@@ -1095,8 +1140,81 @@ private func shellEscape(_ s: String) -> String {
 }
 
 // Bash execution is provided by LocalBash (Sources/WuhuCore/LocalBash.swift).
-// The bash tool still calls LocalBash.run() directly for local execution.
-// When runner-aware tools land, bash will go through the Runner protocol instead.
+// The bash tool calls LocalBash.run() for local execution and Runner.runBash()
+// for remote execution via the mount resolver.
+
+// MARK: - copy tool
+
+private func copyTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
+  struct Params: Sendable {
+    var source: String
+    var destination: String
+    var sourceMount: String?
+    var destMount: String?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let source = try a.requireString("source")
+      let destination = try a.requireString("destination")
+      let sourceMount = try a.optionalString("sourceMount")
+      let destMount = try a.optionalString("destMount")
+      return .init(source: source, destination: destination, sourceMount: sourceMount, destMount: destMount)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "source": .object(["type": .string("string"), "description": .string("Source file path (absolute, or relative to source mount)")]),
+      "destination": .object(["type": .string("string"), "description": .string("Destination file path (absolute, or relative to destination mount)")]),
+      "sourceMount": .object(["type": .string("string"), "description": .string("Source mount name (optional, defaults to primary mount)")]),
+      "destMount": .object(["type": .string("string"), "description": .string("Destination mount name (optional, defaults to primary mount)")]),
+    ]),
+    "required": .array([.string("source"), .string("destination")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "copy",
+    description: "Copy a file between mounts (potentially on different runners/machines). For same-runner copies, this is efficient. For cross-runner copies, the file is streamed through the server.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "copy") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+
+    let srcResolved = try await mountResolver(params.sourceMount)
+    let dstResolved = try await mountResolver(params.destMount)
+
+    // Resolve paths
+    let srcPath: String = if params.source.hasPrefix("/") {
+      params.source
+    } else {
+      URL(fileURLWithPath: srcResolved.cwd).appendingPathComponent(params.source).standardizedFileURL.path
+    }
+
+    let dstPath: String = if params.destination.hasPrefix("/") {
+      params.destination
+    } else {
+      URL(fileURLWithPath: dstResolved.cwd).appendingPathComponent(params.destination).standardizedFileURL.path
+    }
+
+    // Read from source runner, write to destination runner
+    let data = try await srcResolved.runner.readData(path: srcPath)
+    try await dstResolved.runner.writeData(path: dstPath, data: data, createIntermediateDirectories: true)
+
+    let size = data.count
+    let sizeStr = ToolTruncation.formatSize(size)
+    return AgentToolResult(
+      content: [.text("Copied \(sizeStr) from \(params.source) to \(params.destination)")],
+      details: .object([
+        "sourcePath": .string(srcPath),
+        "destinationPath": .string(dstPath),
+        "bytes": .number(Double(size)),
+      ]),
+    )
+  }
+}
 
 private extension String {
   func nilIfEqual(_ other: String) -> String? {

@@ -451,12 +451,12 @@ struct RunnerWireProtocolTests {
     ]
 
     let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
     let decoder = JSONDecoder()
     for response in responses {
       let data = try encoder.encode(response)
       let decoded = try decoder.decode(RunnerResponse.self, from: data)
-      // We can't use == because RunnerResponse doesn't conform to Equatable
-      // (BashResult? makes it tricky). Verify by re-encoding.
+      // Verify round-trip by re-encoding with sorted keys and comparing.
       let reEncoded = try encoder.encode(decoded)
       #expect(data == reEncoded)
     }

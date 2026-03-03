@@ -174,6 +174,15 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
+  public func getMountByName(sessionID: String, name: String) async throws -> WuhuMount? {
+    try await dbQueue.read { db in
+      try MountRow
+        .filter(Column("sessionID") == sessionID && Column("name") == name)
+        .fetchOne(db)
+        .map { $0.toModel() }
+    }
+  }
+
   // MARK: - Sessions
 
   public func createSession(

@@ -486,8 +486,14 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
 
     let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
+    let mountResolver = MountResolverFactory.make(
+      sessionID: sid,
+      store: store,
+      runnerRegistry: runnerRegistry,
+    )
     let baseTools = WuhuTools.codingAgentTools(
       cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
+      mountResolver: mountResolver,
       asyncBash: asyncBash,
       braveSearchAPIKey: braveSearchAPIKey,
     )
