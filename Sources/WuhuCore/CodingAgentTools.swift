@@ -159,7 +159,7 @@ private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
     let (mount, resolved) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
     let runner = mount?.runner
 
-    // Helper to read string via runner or fileIO
+    /// Helper to read string via runner or fileIO
     func readStringContent(path: String) async throws -> String {
       if let runner {
         return try await runner.readString(path: path, encoding: .utf8)

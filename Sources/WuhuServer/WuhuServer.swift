@@ -542,7 +542,9 @@ public struct WuhuServer: Sendable {
     try await app.runService()
 
     // Cancel runner connection tasks on shutdown
-    for task in _runnerTasks { task.cancel() }
+    for task in _runnerTasks {
+      task.cancel()
+    }
   }
 }
 

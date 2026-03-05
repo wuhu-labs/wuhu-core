@@ -50,7 +50,7 @@ public actor RemoteRunnerClient: Runner {
     }
   }
 
-  public func readString(path: String, encoding: String.Encoding) async throws -> String {
+  public func readString(path: String, encoding _: String.Encoding) async throws -> String {
     let rid = Self.makeID()
     let (response, _) = try await connection.request(
       .read(id: rid, ReadRequest(path: path, binary: false)),
@@ -83,7 +83,7 @@ public actor RemoteRunnerClient: Runner {
     if case let .failure(e) = result { throw RunnerError.requestFailed(message: e.message) }
   }
 
-  public func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding: String.Encoding) async throws {
+  public func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding _: String.Encoding) async throws {
     let rid = Self.makeID()
     let (response, _) = try await connection.request(
       .write(id: rid, WriteRequest(path: path, createDirs: createIntermediateDirectories, content: content)),
@@ -256,16 +256,15 @@ public actor RunnerConnection {
     guard var p = pending.removeValue(forKey: id) else { return }
 
     // Check if this response expects companion binary data
-    let needsBinary: Bool
-    if case let .read(_, result) = response {
+    let needsBinary = if case let .read(_, result) = response {
       switch result {
       case let .success(readResp) where readResp.content == nil:
-        needsBinary = true
+        true
       default:
-        needsBinary = false
+        false
       }
     } else {
-      needsBinary = false
+      false
     }
 
     if needsBinary {
@@ -309,5 +308,7 @@ public actor RunnerConnection {
     pending.removeAll()
   }
 
-  public var closed: Bool { isClosed }
+  public var closed: Bool {
+    isClosed
+  }
 }

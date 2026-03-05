@@ -5,14 +5,14 @@ public let runnerProtocolVersion = 5
 
 // MARK: - Wire envelope
 
-/// JSON envelope for all text-frame messages.
-/// Requests:  {"v":5, "id":"<uuid>", "op":"<op>", "p":{...}}
-/// Responses: {"v":5, "id":"<uuid>", "op":"<op>", "ok":{...}}  (success)
-///            {"v":5, "id":"<uuid>", "op":"<op>", "err":"..."}  (error)
-///
-/// Binary frames use a length-prefixed ID for correlation (see `RunnerBinaryFrame`).
-/// A binary frame is always a companion to a preceding text-frame request/response
-/// that references the same ID.
+// JSON envelope for all text-frame messages.
+// Requests:  {"v":5, "id":"<uuid>", "op":"<op>", "p":{...}}
+// Responses: {"v":5, "id":"<uuid>", "op":"<op>", "ok":{...}}  (success)
+//            {"v":5, "id":"<uuid>", "op":"<op>", "err":"..."}  (error)
+//
+// Binary frames use a length-prefixed ID for correlation (see `RunnerBinaryFrame`).
+// A binary frame is always a companion to a preceding text-frame request/response
+// that references the same ID.
 
 // MARK: - Request payloads
 
@@ -66,17 +66,23 @@ public struct WriteRequest: Sendable, Hashable, Codable {
 
 public struct ExistsRequest: Sendable, Hashable, Codable {
   public var path: String
-  public init(path: String) { self.path = path }
+  public init(path: String) {
+    self.path = path
+  }
 }
 
 public struct LsRequest: Sendable, Hashable, Codable {
   public var path: String
-  public init(path: String) { self.path = path }
+  public init(path: String) {
+    self.path = path
+  }
 }
 
 public struct EnumerateRequest: Sendable, Hashable, Codable {
   public var root: String
-  public init(root: String) { self.root = root }
+  public init(root: String) {
+    self.root = root
+  }
 }
 
 public struct MkdirRequest: Sendable, Hashable, Codable {
@@ -119,22 +125,30 @@ public struct ReadResponse: Sendable, Hashable, Codable {
 
 public struct WriteResponse: Sendable, Hashable, Codable {
   public var bytesWritten: Int
-  public init(bytesWritten: Int) { self.bytesWritten = bytesWritten }
+  public init(bytesWritten: Int) {
+    self.bytesWritten = bytesWritten
+  }
 }
 
 public struct ExistsResponse: Sendable, Hashable, Codable {
   public var existence: FileExistence
-  public init(existence: FileExistence) { self.existence = existence }
+  public init(existence: FileExistence) {
+    self.existence = existence
+  }
 }
 
 public struct LsResponse: Sendable, Hashable, Codable {
   public var entries: [DirectoryEntry]
-  public init(entries: [DirectoryEntry]) { self.entries = entries }
+  public init(entries: [DirectoryEntry]) {
+    self.entries = entries
+  }
 }
 
 public struct EnumerateResponse: Sendable, Hashable, Codable {
   public var entries: [EnumeratedEntry]
-  public init(entries: [EnumeratedEntry]) { self.entries = entries }
+  public init(entries: [EnumeratedEntry]) {
+    self.entries = entries
+  }
 }
 
 public struct MkdirResponse: Sendable, Hashable, Codable {
@@ -150,9 +164,13 @@ public struct MkdirResponse: Sendable, Hashable, Codable {
 public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringConvertible {
   public var message: String
 
-  public init(_ message: String) { self.message = message }
+  public init(_ message: String) {
+    self.message = message
+  }
 
-  public var description: String { message }
+  public var description: String {
+    message
+  }
 
   public init(from decoder: any Decoder) throws {
     message = try decoder.singleValueContainer().decode(String.self)
@@ -287,16 +305,16 @@ extension RunnerRequest: Codable {
     let id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
 
     switch op {
-    case "hello": self = .hello(try c.decode(HelloRequest.self, forKey: .p))
-    case "bash": self = .bash(id: id, try c.decode(BashRequest.self, forKey: .p))
-    case "read": self = .read(id: id, try c.decode(ReadRequest.self, forKey: .p))
-    case "write": self = .write(id: id, try c.decode(WriteRequest.self, forKey: .p))
-    case "exists": self = .exists(id: id, try c.decode(ExistsRequest.self, forKey: .p))
-    case "ls": self = .ls(id: id, try c.decode(LsRequest.self, forKey: .p))
-    case "enumerate": self = .enumerate(id: id, try c.decode(EnumerateRequest.self, forKey: .p))
-    case "mkdir": self = .mkdir(id: id, try c.decode(MkdirRequest.self, forKey: .p))
-    case "find": self = .find(id: id, try c.decode(FindParams.self, forKey: .p))
-    case "grep": self = .grep(id: id, try c.decode(GrepParams.self, forKey: .p))
+    case "hello": self = try .hello(c.decode(HelloRequest.self, forKey: .p))
+    case "bash": self = try .bash(id: id, c.decode(BashRequest.self, forKey: .p))
+    case "read": self = try .read(id: id, c.decode(ReadRequest.self, forKey: .p))
+    case "write": self = try .write(id: id, c.decode(WriteRequest.self, forKey: .p))
+    case "exists": self = try .exists(id: id, c.decode(ExistsRequest.self, forKey: .p))
+    case "ls": self = try .ls(id: id, c.decode(LsRequest.self, forKey: .p))
+    case "enumerate": self = try .enumerate(id: id, c.decode(EnumerateRequest.self, forKey: .p))
+    case "mkdir": self = try .mkdir(id: id, c.decode(MkdirRequest.self, forKey: .p))
+    case "find": self = try .find(id: id, c.decode(FindParams.self, forKey: .p))
+    case "grep": self = try .grep(id: id, c.decode(GrepParams.self, forKey: .p))
     default:
       throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "Unknown op: \(op)")
     }
@@ -308,7 +326,7 @@ extension RunnerResponse: Codable {
     var c = encoder.container(keyedBy: EnvelopeKey.self)
     try c.encode(runnerProtocolVersion, forKey: .v)
 
-    func encodeResult<T: Encodable>(_ id: String, _ op: RunnerOp, _ result: Result<T, RunnerWireError>) throws {
+    func encodeResult(_ id: String, _ op: RunnerOp, _ result: Result<some Encodable, RunnerWireError>) throws {
       try c.encode(id, forKey: .id)
       try c.encode(op.rawValue, forKey: .op)
       switch result {
@@ -339,25 +357,25 @@ extension RunnerResponse: Codable {
     let id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
     let hasError = c.contains(.err)
 
-    func decodeResult<T: Decodable>(_ type: T.Type) throws -> Result<T, RunnerWireError> {
+    func decodeResult<T: Decodable>(_: T.Type) throws -> Result<T, RunnerWireError> {
       if hasError {
         let msg = try c.decode(String.self, forKey: .err)
         return .failure(RunnerWireError(msg))
       }
-      return .success(try c.decode(T.self, forKey: .ok))
+      return try .success(c.decode(T.self, forKey: .ok))
     }
 
     switch op {
-    case "hello": self = .hello(try c.decode(HelloResponse.self, forKey: .ok))
-    case "bash": self = .bash(id: id, try decodeResult(BashResult.self))
-    case "read": self = .read(id: id, try decodeResult(ReadResponse.self))
-    case "write": self = .write(id: id, try decodeResult(WriteResponse.self))
-    case "exists": self = .exists(id: id, try decodeResult(ExistsResponse.self))
-    case "ls": self = .ls(id: id, try decodeResult(LsResponse.self))
-    case "enumerate": self = .enumerate(id: id, try decodeResult(EnumerateResponse.self))
-    case "mkdir": self = .mkdir(id: id, try decodeResult(MkdirResponse.self))
-    case "find": self = .find(id: id, try decodeResult(FindResult.self))
-    case "grep": self = .grep(id: id, try decodeResult(GrepResult.self))
+    case "hello": self = try .hello(c.decode(HelloResponse.self, forKey: .ok))
+    case "bash": self = try .bash(id: id, decodeResult(BashResult.self))
+    case "read": self = try .read(id: id, decodeResult(ReadResponse.self))
+    case "write": self = try .write(id: id, decodeResult(WriteResponse.self))
+    case "exists": self = try .exists(id: id, decodeResult(ExistsResponse.self))
+    case "ls": self = try .ls(id: id, decodeResult(LsResponse.self))
+    case "enumerate": self = try .enumerate(id: id, decodeResult(EnumerateResponse.self))
+    case "mkdir": self = try .mkdir(id: id, decodeResult(MkdirResponse.self))
+    case "find": self = try .find(id: id, decodeResult(FindResult.self))
+    case "grep": self = try .grep(id: id, decodeResult(GrepResult.self))
     default:
       throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "Unknown op: \(op)")
     }

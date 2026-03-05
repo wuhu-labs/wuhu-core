@@ -512,7 +512,7 @@ extension WuhuService {
       // Validate runner is available
       let runnerAvailable = await runnerRegistry.isAvailable(runnerID)
       guard runnerAvailable else {
-        throw WuhuToolExecutionError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(await runnerRegistry.listRunnerNames().joined(separator: ", "))")
+        throw await WuhuToolExecutionError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(runnerRegistry.listRunnerNames().joined(separator: ", "))")
       }
 
       let mountPath: String

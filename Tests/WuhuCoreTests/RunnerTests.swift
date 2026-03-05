@@ -28,7 +28,7 @@ actor InMemoryRunner: Runner {
     files[path] = Data(content.utf8)
     // Ensure parent directories exist
     var dir = (path as NSString).deletingLastPathComponent
-    while dir != "/" && !dir.isEmpty {
+    while dir != "/", !dir.isEmpty {
       directories.insert(dir)
       dir = (dir as NSString).deletingLastPathComponent
     }
@@ -37,7 +37,7 @@ actor InMemoryRunner: Runner {
   func seedFile(path: String, data: Data) {
     files[path] = data
     var dir = (path as NSString).deletingLastPathComponent
-    while dir != "/" && !dir.isEmpty {
+    while dir != "/", !dir.isEmpty {
       directories.insert(dir)
       dir = (dir as NSString).deletingLastPathComponent
     }
@@ -46,7 +46,7 @@ actor InMemoryRunner: Runner {
   func seedDirectory(path: String) {
     directories.insert(path)
     var dir = (path as NSString).deletingLastPathComponent
-    while dir != "/" && !dir.isEmpty {
+    while dir != "/", !dir.isEmpty {
       directories.insert(dir)
       dir = (dir as NSString).deletingLastPathComponent
     }
@@ -62,7 +62,7 @@ actor InMemoryRunner: Runner {
 
   // MARK: - Runner protocol
 
-  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
+  func runBash(command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
     for (pattern, result) in bashResponses {
       if command.contains(pattern) { return result }
     }
@@ -86,7 +86,7 @@ actor InMemoryRunner: Runner {
   func writeData(path: String, data: Data, createIntermediateDirectories: Bool) async throws {
     if createIntermediateDirectories {
       var dir = (path as NSString).deletingLastPathComponent
-      while dir != "/" && !dir.isEmpty {
+      while dir != "/", !dir.isEmpty {
         directories.insert(dir)
         dir = (dir as NSString).deletingLastPathComponent
       }
@@ -119,7 +119,7 @@ actor InMemoryRunner: Runner {
       }
     }
     for dir in directories {
-      if dir.hasPrefix(prefix) && dir != path {
+      if dir.hasPrefix(prefix), dir != path {
         let rest = String(dir.dropFirst(prefix.count))
         let firstComponent = rest.split(separator: "/", maxSplits: 1).first.map(String.init) ?? rest
         if !firstComponent.isEmpty { entries.insert(firstComponent) }
@@ -143,7 +143,7 @@ actor InMemoryRunner: Runner {
       }
     }
     for dir in directories.sorted() {
-      if dir.hasPrefix(prefix) && dir != root {
+      if dir.hasPrefix(prefix), dir != root {
         let rel = String(dir.dropFirst(prefix.count))
         results.append(EnumeratedEntry(relativePath: rel, absolutePath: dir, isDirectory: true))
       }
@@ -154,7 +154,7 @@ actor InMemoryRunner: Runner {
   func createDirectory(path: String, withIntermediateDirectories: Bool) async throws {
     if withIntermediateDirectories {
       var dir = path
-      while dir != "/" && !dir.isEmpty {
+      while dir != "/", !dir.isEmpty {
         directories.insert(dir)
         dir = (dir as NSString).deletingLastPathComponent
       }
@@ -219,7 +219,7 @@ actor InMemoryRunner: Runner {
 // MARK: - LocalRunner Tests
 
 struct LocalRunnerTests {
-  @Test func localRunnerHasLocalID() async {
+  @Test func localRunnerHasLocalID() {
     let runner = LocalRunner()
     #expect(runner.id == .local)
   }
@@ -326,7 +326,7 @@ struct RunnerServerHandlerTests {
     #expect(r.content == nil) // binary mode — content in companion frame
     #expect(r.size == 5)
     #expect(binaryData != nil)
-    #expect(String(decoding: binaryData!, as: UTF8.self) == "world")
+    #expect(try String(decoding: #require(binaryData), as: UTF8.self) == "world")
   }
 
   @Test func handlerDispatchesReadText() async throws {
@@ -363,7 +363,7 @@ struct RunnerServerHandlerTests {
     #expect(r.content == "created")
   }
 
-  @Test func handlerReturnsErrorForMissingFile() async throws {
+  @Test func handlerReturnsErrorForMissingFile() async {
     let mem = InMemoryRunner()
     let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
@@ -424,7 +424,7 @@ struct RunnerServerHandlerTests {
     #expect(try existsResult.get().existence == .directory)
   }
 
-  @Test func handlerHelloResponse() async throws {
+  @Test func handlerHelloResponse() async {
     let mem = InMemoryRunner()
     let handler = RunnerServerHandler(runner: mem, name: "my-runner")
 
@@ -518,7 +518,7 @@ struct RunnerWireProtocolTests {
     // Verify the envelope structure has v, id, op, p keys
     let request = RunnerRequest.bash(id: "test-123", BashRequest(command: "ls", cwd: "/tmp"))
     let data = try JSONEncoder().encode(request)
-    let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     #expect(json["v"] as? Int == 5)
     #expect(json["id"] as? String == "test-123")
     #expect(json["op"] as? String == "bash")
@@ -575,7 +575,7 @@ struct RunnerWireProtocolTests {
     // Success: has "ok" key
     let success = RunnerResponse.bash(id: "x", .success(BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)))
     let sData = try JSONEncoder().encode(success)
-    let sJson = try JSONSerialization.jsonObject(with: sData) as! [String: Any]
+    let sJson = try #require(JSONSerialization.jsonObject(with: sData) as? [String: Any])
     #expect(sJson["v"] as? Int == 5)
     #expect(sJson["id"] as? String == "x")
     #expect(sJson["op"] as? String == "bash")
@@ -585,12 +585,12 @@ struct RunnerWireProtocolTests {
     // Error: has "err" key
     let error = RunnerResponse.bash(id: "y", .failure(RunnerWireError("oops")))
     let eData = try JSONEncoder().encode(error)
-    let eJson = try JSONSerialization.jsonObject(with: eData) as! [String: Any]
+    let eJson = try #require(JSONSerialization.jsonObject(with: eData) as? [String: Any])
     #expect(eJson["err"] as? String == "oops")
     #expect(eJson["ok"] == nil)
   }
 
-  @Test func binaryFrameRoundTrip() throws {
+  @Test func binaryFrameRoundTrip() {
     let id = "550e8400-e29b-41d4-a716-446655440000"
     let payload = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) // PNG magic
     let frame = RunnerBinaryFrame.encode(id: id, data: payload)
@@ -606,7 +606,7 @@ struct RunnerWireProtocolTests {
     #expect(decodedPayload == payload)
   }
 
-  @Test func binaryFrameShortID() throws {
+  @Test func binaryFrameShortID() {
     let id = "req-1"
     let payload = Data([0xCA, 0xFE])
     let frame = RunnerBinaryFrame.encode(id: id, data: payload)
@@ -620,7 +620,7 @@ struct RunnerWireProtocolTests {
     #expect(decodedPayload == payload)
   }
 
-  @Test func binaryFrameEmptyPayload() throws {
+  @Test func binaryFrameEmptyPayload() {
     let id = "test-empty"
     let frame = RunnerBinaryFrame.encode(id: id, data: Data())
     #expect(frame.count == 2 + id.utf8.count)
@@ -633,7 +633,7 @@ struct RunnerWireProtocolTests {
     #expect(decodedPayload.isEmpty)
   }
 
-  @Test func binaryFrameTooShort() throws {
+  @Test func binaryFrameTooShort() {
     // Only 1 byte — can't even read the length prefix
     let result = RunnerBinaryFrame.decode(Data([0x01]))
     #expect(result == nil)
@@ -780,14 +780,14 @@ struct RunnerConnectionTests {
 // MARK: - RunnerRegistry Tests
 
 struct RunnerRegistryTests {
-  @Test func registryAlwaysHasLocal() async throws {
+  @Test func registryAlwaysHasLocal() async {
     let registry = RunnerRegistry()
     let local = await registry.get(.local)
     #expect(local != nil)
     #expect(local?.id == .local)
   }
 
-  @Test func registryRegisterAndGet() async throws {
+  @Test func registryRegisterAndGet() async {
     let registry = RunnerRegistry()
     let mem = InMemoryRunner(id: .remote(name: "build-linux"))
     await registry.register(mem)
@@ -797,7 +797,7 @@ struct RunnerRegistryTests {
     #expect(fetched?.id == .remote(name: "build-linux"))
   }
 
-  @Test func registryRemoveRemote() async throws {
+  @Test func registryRemoveRemote() async {
     let registry = RunnerRegistry()
     let mem = InMemoryRunner(id: .remote(name: "temp"))
     await registry.register(mem)
@@ -808,13 +808,13 @@ struct RunnerRegistryTests {
     #expect(!stillAvailable)
   }
 
-  @Test func registryCannotRemoveLocal() async throws {
+  @Test func registryCannotRemoveLocal() async {
     let registry = RunnerRegistry()
     await registry.remove(.local)
     #expect(await registry.isAvailable(.local))
   }
 
-  @Test func registryListNames() async throws {
+  @Test func registryListNames() async {
     let registry = RunnerRegistry()
     let mem1 = InMemoryRunner(id: .remote(name: "alpha"))
     let mem2 = InMemoryRunner(id: .remote(name: "beta"))

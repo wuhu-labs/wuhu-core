@@ -167,7 +167,7 @@ public struct GrepResult: Sendable, Hashable, Codable {
 public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
-  // -- Process execution --
+  /// -- Process execution --
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
 
   // -- File I/O --

@@ -55,11 +55,16 @@ public struct WuhuRunnerServer: Sendable {
     let logger = Logger(label: "WuhuRunner")
     logger.info("Starting runner '\(config.name)' on \(host):\(port)")
 
-    /// Track pending binary writes: id → (path, createDirs)
+    // Track pending binary writes: id → (path, createDirs)
     actor PendingBinaryWrites {
       var writes: [String: (path: String, createDirs: Bool)] = [:]
-      func set(_ id: String, path: String, createDirs: Bool) { writes[id] = (path, createDirs) }
-      func remove(_ id: String) -> (path: String, createDirs: Bool)? { writes.removeValue(forKey: id) }
+      func set(_ id: String, path: String, createDirs: Bool) {
+        writes[id] = (path, createDirs)
+      }
+
+      func remove(_ id: String) -> (path: String, createDirs: Bool)? {
+        writes.removeValue(forKey: id)
+      }
     }
 
     let wsRouter = Router(context: BasicWebSocketRequestContext.self)
