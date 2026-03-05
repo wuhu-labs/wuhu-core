@@ -46,7 +46,12 @@ public struct WuhuRunnerServer: Sendable {
   public func run(configPath: String?) async throws {
     let path = (configPath?.isEmpty == false) ? configPath! : WuhuRunnerConfig.defaultPath()
     let config = try WuhuRunnerConfig.load(path: path)
+    try await run(config: config)
+  }
 
+  /// Run with an already-loaded config. Use this when embedding the runner
+  /// in an app or test harness where loading from a file path is not desired.
+  public func run(config: WuhuRunnerConfig) async throws {
     let runner = LocalRunner()
     let handler = RunnerServerHandler(runner: runner, name: config.name)
 
