@@ -1,7 +1,7 @@
 import Foundation
 
 /// Current runner wire protocol version.
-public let runnerProtocolVersion = 5
+public let runnerProtocolVersion = 6
 
 // MARK: - Wire envelope
 
@@ -94,6 +94,21 @@ public struct MkdirRequest: Sendable, Hashable, Codable {
   }
 }
 
+public struct MaterializeRequest: Sendable, Hashable, Codable {
+  /// Source directory on the runner's filesystem to copy from.
+  public var templatePath: String
+  /// Destination directory on the runner's filesystem to copy to.
+  public var destinationPath: String
+  /// Optional startup script to run after copying. If relative, resolved against the destination.
+  public var startupScript: String?
+
+  public init(templatePath: String, destinationPath: String, startupScript: String? = nil) {
+    self.templatePath = templatePath
+    self.destinationPath = destinationPath
+    self.startupScript = startupScript
+  }
+}
+
 // FindParams and GrepParams are defined in Runner.swift.
 
 // MARK: - Response payloads
@@ -155,6 +170,12 @@ public struct MkdirResponse: Sendable, Hashable, Codable {
   public init() {}
 }
 
+public struct MaterializeResponse: Sendable, Hashable, Codable {
+  /// The absolute path of the materialized workspace on the runner.
+  public var workspacePath: String
+  public init(workspacePath: String) { self.workspacePath = workspacePath }
+}
+
 // FindResult and GrepResult are defined in Runner.swift.
 
 // MARK: - Wire error type
@@ -196,6 +217,7 @@ public enum RunnerOp: String, Sendable, Hashable, Codable {
   case mkdir
   case find
   case grep
+  case materialize
 }
 
 /// A runner request (text frame).
@@ -210,6 +232,7 @@ public enum RunnerRequest: Sendable, Hashable {
   case mkdir(id: String, MkdirRequest)
   case find(id: String, FindParams)
   case grep(id: String, GrepParams)
+  case materialize(id: String, MaterializeRequest)
 
   public var requestID: String? {
     switch self {
@@ -223,6 +246,7 @@ public enum RunnerRequest: Sendable, Hashable {
     case let .mkdir(id, _): id
     case let .find(id, _): id
     case let .grep(id, _): id
+    case let .materialize(id, _): id
     }
   }
 
@@ -238,6 +262,7 @@ public enum RunnerRequest: Sendable, Hashable {
     case .mkdir: .mkdir
     case .find: .find
     case .grep: .grep
+    case .materialize: .materialize
     }
   }
 }
@@ -254,6 +279,7 @@ public enum RunnerResponse: Sendable {
   case mkdir(id: String, Result<MkdirResponse, RunnerWireError>)
   case find(id: String, Result<FindResult, RunnerWireError>)
   case grep(id: String, Result<GrepResult, RunnerWireError>)
+  case materialize(id: String, Result<MaterializeResponse, RunnerWireError>)
 
   public var responseID: String? {
     switch self {
@@ -267,6 +293,7 @@ public enum RunnerResponse: Sendable {
     case let .mkdir(id, _): id
     case let .find(id, _): id
     case let .grep(id, _): id
+    case let .materialize(id, _): id
     }
   }
 }
@@ -296,6 +323,7 @@ extension RunnerRequest: Codable {
     case let .mkdir(_, p): try c.encode(p, forKey: .p)
     case let .find(_, p): try c.encode(p, forKey: .p)
     case let .grep(_, p): try c.encode(p, forKey: .p)
+    case let .materialize(_, p): try c.encode(p, forKey: .p)
     }
   }
 
@@ -315,6 +343,7 @@ extension RunnerRequest: Codable {
     case "mkdir": self = try .mkdir(id: id, c.decode(MkdirRequest.self, forKey: .p))
     case "find": self = try .find(id: id, c.decode(FindParams.self, forKey: .p))
     case "grep": self = try .grep(id: id, c.decode(GrepParams.self, forKey: .p))
+    case "materialize": self = try .materialize(id: id, c.decode(MaterializeRequest.self, forKey: .p))
     default:
       throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "Unknown op: \(op)")
     }
@@ -348,6 +377,7 @@ extension RunnerResponse: Codable {
     case let .mkdir(id, r): try encodeResult(id, .mkdir, r)
     case let .find(id, r): try encodeResult(id, .find, r)
     case let .grep(id, r): try encodeResult(id, .grep, r)
+    case let .materialize(id, r): try encodeResult(id, .materialize, r)
     }
   }
 
@@ -376,6 +406,7 @@ extension RunnerResponse: Codable {
     case "mkdir": self = try .mkdir(id: id, decodeResult(MkdirResponse.self))
     case "find": self = try .find(id: id, decodeResult(FindResult.self))
     case "grep": self = try .grep(id: id, decodeResult(GrepResult.self))
+    case "materialize": self = try .materialize(id: id, decodeResult(MaterializeResponse.self))
     default:
       throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "Unknown op: \(op)")
     }

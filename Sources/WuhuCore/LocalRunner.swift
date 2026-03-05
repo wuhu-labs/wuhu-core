@@ -77,6 +77,64 @@ public actor LocalRunner: Runner {
     try fileIO.createDirectory(atPath: path, withIntermediateDirectories: withIntermediateDirectories)
   }
 
+  // MARK: - Workspace materialization
+
+  public func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
+    let fm = FileManager.default
+    let templatePath = ToolPath.expand(params.templatePath)
+    let destinationPath = ToolPath.expand(params.destinationPath)
+
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: templatePath, isDirectory: &isDir), isDir.boolValue else {
+      throw RunnerError.fileNotFound(path: templatePath)
+    }
+
+    // Ensure parent directory exists
+    let parentDir = (destinationPath as NSString).deletingLastPathComponent
+    try fm.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
+
+    do {
+      try fm.copyItem(
+        at: URL(fileURLWithPath: templatePath),
+        to: URL(fileURLWithPath: destinationPath),
+      )
+    } catch {
+      throw RunnerError.requestFailed(
+        message: "Failed to copy template: \(templatePath) -> \(destinationPath) (\(error))",
+      )
+    }
+
+    // Run startup script if provided
+    if let script = params.startupScript, !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      let scriptPath: String = {
+        let expanded = ToolPath.expand(script)
+        if expanded.hasPrefix("/") { return expanded }
+        return URL(fileURLWithPath: destinationPath).appendingPathComponent(expanded).path
+      }()
+      guard fm.fileExists(atPath: scriptPath) else {
+        throw RunnerError.requestFailed(message: "Startup script not found: \(scriptPath)")
+      }
+      let result = try await LocalBash.run(
+        command: "bash \(shellEscape(scriptPath))",
+        cwd: destinationPath,
+        timeoutSeconds: 120,
+      )
+      if result.exitCode != 0 {
+        throw RunnerError.requestFailed(
+          message: "Startup script failed (exit \(result.exitCode)): \(result.output)",
+        )
+      }
+    }
+
+    return MaterializeResponse(workspacePath: destinationPath)
+  }
+
+  private func shellEscape(_ s: String) -> String {
+    if s.isEmpty { return "''" }
+    if s.range(of: #"[^A-Za-z0-9_\/\.\-]"#, options: .regularExpression) == nil { return s }
+    return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  }
+
   // MARK: - Search
 
   public func find(params: FindParams) async throws -> FindResult {
