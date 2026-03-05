@@ -12,6 +12,16 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     }
   }
 
+  public struct Runner: Sendable, Hashable, Codable {
+    public var name: String
+    public var address: String
+
+    public init(name: String, address: String) {
+      self.name = name
+      self.address = address
+    }
+  }
+
   public var llm: LLM?
   public var databasePath: String?
   public var llmRequestLogDir: String?
@@ -19,6 +29,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   public var host: String?
   public var port: Int?
   public var braveSearchAPIKey: String?
+  public var runners: [Runner]?
 
   public init(
     llm: LLM? = nil,
@@ -28,6 +39,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     host: String? = nil,
     port: Int? = nil,
     braveSearchAPIKey: String? = nil,
+    runners: [Runner]? = nil,
   ) {
     self.llm = llm
     self.databasePath = databasePath
@@ -36,6 +48,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     self.host = host
     self.port = port
     self.braveSearchAPIKey = braveSearchAPIKey
+    self.runners = runners
   }
 
   enum CodingKeys: String, CodingKey {
@@ -46,6 +59,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     case host
     case port
     case braveSearchAPIKey = "brave_search_api_key"
+    case runners
   }
 
   public static func load(path: String) throws -> WuhuServerConfig {

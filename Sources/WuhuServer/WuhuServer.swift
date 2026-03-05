@@ -54,12 +54,27 @@ public struct WuhuServer: Sendable {
       return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
     }
 
+    // Runner registry — connect to configured remote runners
+    let runnerRegistry = RunnerRegistry()
+    let logger = Logger(label: "WuhuServer")
+    // Runner tasks are retained to keep the connections alive for the server lifetime.
+    // They auto-cancel when the process exits.
+    var _runnerTasks: [Task<Void, Never>] = []
+    if let runners = config.runners, !runners.isEmpty {
+      _runnerTasks = WuhuRunnerConnector.connectAll(
+        runners: runners,
+        registry: runnerRegistry,
+        logger: logger,
+      )
+    }
+
     let service = WuhuService(
       store: store,
       blobStore: blobStore,
       llmRequestLogger: requestLogger,
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
+      runnerRegistry: runnerRegistry,
     )
     await service.startAgentLoopManager()
 
@@ -525,6 +540,11 @@ public struct WuhuServer: Sendable {
       configuration: .init(address: .hostname(host, port: port)),
     )
     try await app.runService()
+
+    // Cancel runner connection tasks on shutdown
+    for task in _runnerTasks {
+      task.cancel()
+    }
   }
 }
 

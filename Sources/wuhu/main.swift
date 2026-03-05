@@ -6,6 +6,7 @@ import WuhuClient
 import WuhuCLIKit
 import WuhuCore
 import WuhuCoreClient
+import WuhuRunner
 import WuhuServer
 import Yams
 
@@ -21,6 +22,7 @@ struct WuhuCLI: AsyncParsableCommand {
     subcommands: [
       Server.self,
       Client.self,
+      RunnerCommand.self,
     ],
   )
 
@@ -38,6 +40,20 @@ struct WuhuCLI: AsyncParsableCommand {
 
     func run() async throws {
       try await WuhuServer().run(configPath: config, llmRequestLogDir: llmRequestLogDir)
+    }
+  }
+
+  struct RunnerCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+      commandName: "runner",
+      abstract: "Run a Wuhu runner (accepts connections from a Wuhu server).",
+    )
+
+    @Option(help: "Path to runner config YAML (default: ~/.wuhu/runner.yml).")
+    var config: String?
+
+    func run() async throws {
+      try await WuhuRunnerServer().run(configPath: config)
     }
   }
 

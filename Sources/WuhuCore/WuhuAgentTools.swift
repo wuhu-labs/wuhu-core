@@ -458,14 +458,18 @@ extension WuhuService {
       var path: String?
       var name: String?
       var mountTemplateID: String?
+      var primary: Bool?
+      var runner: String?
 
       static func parse(toolName: String, args: JSONValue) throws -> Params {
         let a = try ToolArgs(toolName: toolName, args: args)
         let path = try a.optionalString("path")
         let name = try a.optionalString("name")
         let mountTemplateID = try a.optionalString("mountTemplateID")
-        try a.ensureNoExtraKeys(allowed: ["path", "name", "mountTemplateID"])
-        return .init(path: path, name: name, mountTemplateID: mountTemplateID)
+        let primary = try a.optionalBool("primary")
+        let runner = try a.optionalString("runner")
+        try a.ensureNoExtraKeys(allowed: ["path", "name", "mountTemplateID", "primary", "runner"])
+        return .init(path: path, name: name, mountTemplateID: mountTemplateID, primary: primary, runner: runner)
       }
     }
 
@@ -475,6 +479,8 @@ extension WuhuService {
         "path": .object(["type": .string("string"), "description": .string("Absolute path to the directory to mount. If omitted or empty, creates a scratch directory for this session.")]),
         "name": .object(["type": .string("string"), "description": .string("Optional label for the mount")]),
         "mountTemplateID": .object(["type": .string("string"), "description": .string("Mount template UUID or unique name. If provided, instantiates a fresh workspace from the template and mounts it. Mutually exclusive with path.")]),
+        "primary": .object(["type": .string("boolean"), "description": .string("Whether this mount is the primary mount (determines cwd). If omitted, the first mount becomes primary.")]),
+        "runner": .object(["type": .string("string"), "description": .string("Runner name for this mount. Omit for local execution. Use a configured runner name for remote execution.")]),
       ]),
       "additionalProperties": .bool(false),
     ])
@@ -490,9 +496,23 @@ extension WuhuService {
       let params = try Params.parse(toolName: tool.name, args: args)
       let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let rawRunner = (params.runner ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
       if !rawPath.isEmpty, !rawTemplateID.isEmpty {
         throw WuhuToolExecutionError(message: "path and mountTemplateID are mutually exclusive — provide one or the other")
+      }
+
+      // Resolve runner
+      let runnerID: RunnerID = if rawRunner.isEmpty || rawRunner == "local" {
+        .local
+      } else {
+        .remote(name: rawRunner)
+      }
+
+      // Validate runner is available
+      let runnerAvailable = await runnerRegistry.isAvailable(runnerID)
+      guard runnerAvailable else {
+        throw await WuhuToolExecutionError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(runnerRegistry.listRunnerNames().joined(separator: ", "))")
       }
 
       let mountPath: String
@@ -510,19 +530,29 @@ extension WuhuService {
         mountPath = rawPath
       }
 
-      var isDir: ObjCBool = false
-      guard FileManager.default.fileExists(atPath: mountPath, isDirectory: &isDir), isDir.boolValue else {
-        throw WuhuToolExecutionError(message: "Directory not found: \(mountPath)")
+      // For local mounts, verify directory exists
+      if runnerID == .local {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: mountPath, isDirectory: &isDir), isDir.boolValue else {
+          throw WuhuToolExecutionError(message: "Directory not found: \(mountPath)")
+        }
       }
 
       let mountName = (params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let effectiveName: String = if !mountName.isEmpty {
         mountName
       } else if !rawTemplateID.isEmpty {
-        // Use the template name for a nicer label
         rawTemplateID
       } else {
         URL(fileURLWithPath: mountPath).lastPathComponent
+      }
+
+      // Determine primary: explicit > first-mount-is-primary
+      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
+      let isPrimary: Bool = if let explicit = params.primary {
+        explicit
+      } else {
+        existingMounts.isEmpty
       }
 
       let mount = try await store.createMount(
@@ -530,22 +560,28 @@ extension WuhuService {
         name: effectiveName,
         path: mountPath,
         mountTemplateID: mountTemplateID,
-        isPrimary: true,
+        isPrimary: isPrimary,
+        runnerID: runnerID,
       )
 
-      // Always update cwd to the mounted directory
-      try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
+      // Update cwd if this is the primary mount
+      if isPrimary {
+        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
+      }
 
-      // Emit context entries
-      try await emitMountContext(sessionID: currentSessionID, mount: mount)
+      // Emit context entries (only for local mounts ��� remote mounts may not have AGENTS.md locally)
+      if runnerID == .local {
+        try await emitMountContext(sessionID: currentSessionID, mount: mount)
+      }
 
       return AgentToolResult(
-        content: [.text("Mounted '\(effectiveName)' at \(mountPath)")],
+        content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
         details: .object([
           "mountID": .string(mount.id),
           "name": .string(effectiveName),
           "path": .string(mountPath),
           "isPrimary": .bool(mount.isPrimary),
+          "runner": .string(runnerID.wireValue),
         ]),
       )
     }
