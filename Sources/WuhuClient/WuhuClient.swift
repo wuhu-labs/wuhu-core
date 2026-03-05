@@ -316,4 +316,12 @@ public struct WuhuClient: Sendable {
     struct BlobResponse: Decodable { let blobURI: String }
     return try WuhuJSON.decoder.decode(BlobResponse.self, from: responseData).blobURI
   }
+
+  /// List all registered runners with status.
+  public func listRunners() async throws -> [WuhuRunnerInfo] {
+    let url = baseURL.appending(path: "v1").appending(path: "runners")
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([WuhuRunnerInfo].self, from: data)
+  }
 }

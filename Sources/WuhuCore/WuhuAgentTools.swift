@@ -16,6 +16,7 @@ enum WuhuAgentToolNames {
   static let createSession = "create_session"
   static let joinSessions = "join_sessions"
   static let mount = "mount"
+  static let listRunners = "list_runners"
 }
 
 extension WuhuService {
@@ -39,6 +40,7 @@ extension WuhuService {
       mountTemplateListTool(),
       mountTemplateGetTool(),
       mountTool(currentSessionID: currentSessionID),
+      listRunnersTool(),
     ]
   }
 
@@ -659,5 +661,43 @@ extension WuhuService {
     _ = try await enqueue(sessionID: .init(rawValue: childSessionID), message: message, lane: .followUp)
 
     return try await store.getSession(id: childSessionID)
+  }
+
+  // MARK: - list_runners tool
+
+  private func listRunnersTool() -> AnyAgentTool {
+    let schema: JSONValue = .object([
+      "type": .string("object"),
+      "properties": .object([:]),
+      "additionalProperties": .bool(false),
+    ])
+
+    let tool = Tool(
+      name: WuhuAgentToolNames.listRunners,
+      description: "List all registered runners with their connection status. Shows built-in, declared (from server config), and incoming (connected to server) runners.",
+      parameters: schema,
+    )
+
+    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.listRunners) { [weak self] _, _ in
+      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+
+      let runners = await runnerRegistry.listAll()
+      var lines: [String] = []
+      for r in runners {
+        let status = r.isConnected ? "connected" : "disconnected"
+        lines.append("\(r.name)\t\(status)\t(\(r.source.rawValue))")
+      }
+
+      let output = lines.isEmpty ? "(no runners)" : lines.joined(separator: "\n")
+      let details: JSONValue = .array(runners.map { r in
+        .object([
+          "name": .string(r.name),
+          "source": .string(r.source.rawValue),
+          "isConnected": .bool(r.isConnected),
+        ])
+      })
+
+      return AgentToolResult(content: [.text(output)], details: details)
+    }
   }
 }
