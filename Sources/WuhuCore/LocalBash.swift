@@ -86,7 +86,32 @@ public enum LocalBash {
 
       let data = (try? Data(contentsOf: outputURL)) ?? Data()
       let output = String(decoding: data, as: UTF8.self)
-      return BashResult(exitCode: process.terminationStatus, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
+
+      // On Linux, Process.terminationStatus traps (SIGILL) if Foundation's
+      // internal dispatch source hasn't noticed the process exit yet
+      // (isRunning still returns true). This happens when the dispatch source
+      // misses fast exits or after we kill the process ourselves. Fall back
+      // to waitpid(2) to get the real exit status from the kernel.
+      let exitCode: Int32
+      if process.isRunning {
+        var status: Int32 = 0
+        let reaped = waitpid(pid, &status, WNOHANG)
+        if reaped > 0 {
+          if (status & 0x7F) == 0 {
+            // Normal exit: extract exit code.
+            exitCode = (status >> 8) & 0xFF
+          } else {
+            // Killed by signal: return negated signal number.
+            exitCode = -Int32(status & 0x7F)
+          }
+        } else {
+          // Already reaped or no child; use a conventional failure code.
+          exitCode = terminated ? -1 : (timedOut ? -1 : 0)
+        }
+      } else {
+        exitCode = process.terminationStatus
+      }
+      return BashResult(exitCode: exitCode, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
     #else
       throw PiAIError.unsupported("bash is not supported on this platform")
     #endif
