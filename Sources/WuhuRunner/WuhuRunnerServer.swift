@@ -2,6 +2,7 @@ import Foundation
 import Hummingbird
 import HummingbirdWebSocket
 import Logging
+import NIOWebSocket
 import WuhuCore
 import Yams
 
@@ -114,9 +115,13 @@ public struct WuhuRunnerServer: Sendable {
 
           // This should be a binary write
           if let writeInfo = await pendingWrites.remove(id) {
-            let response = await handler.handleBinaryWrite(id: id, path: writeInfo.path, data: payload, createDirs: writeInfo.createDirs)
-            let responseData = try JSONEncoder().encode(response)
-            try await outbound.write(.text(String(decoding: responseData, as: UTF8.self)))
+            do {
+              let response = await handler.handleBinaryWrite(id: id, path: writeInfo.path, data: payload, createDirs: writeInfo.createDirs)
+              let responseData = try JSONEncoder().encode(response)
+              try await outbound.write(.text(String(decoding: responseData, as: UTF8.self)))
+            } catch {
+              logger.error("Failed to process binary write for \(id): \(error)")
+            }
           } else {
             logger.debug("Binary frame for unknown id \(id)")
           }
@@ -124,9 +129,12 @@ public struct WuhuRunnerServer: Sendable {
       }
     }
 
+    let wsConfig = WebSocketServerConfiguration(
+      maxFrameSize: 1 << 24, // 16 MB — must match the client (server connector) setting
+    )
     let app = Application(
       router: Router(),
-      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
+      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
       logger: logger,
     )

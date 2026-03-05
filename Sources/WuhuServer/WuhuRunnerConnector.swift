@@ -2,6 +2,7 @@ import Foundation
 import HummingbirdWSClient
 import Logging
 import NIOCore
+import WSClient
 import WuhuCore
 
 /// Manages server-side connections to remote runners.
@@ -21,8 +22,12 @@ enum WuhuRunnerConnector {
     logger.info("Connecting to runner '\(name)' at \(wsURL)")
     nonisolated(unsafe) var didConnect = false
 
+    let wsConfig = WebSocketClientConfiguration(
+      maxFrameSize: 1 << 24, // 16 MB — must match the runner server setting
+    )
+
     do {
-      try await WebSocketClient.connect(url: wsURL, logger: logger) { inbound, outbound, _ in
+      try await WebSocketClient.connect(url: wsURL, configuration: wsConfig, logger: logger) { inbound, outbound, _ in
         // Wait for hello from runner
         var iter = inbound.messages(maxSize: 256 * 1024 * 1024).makeAsyncIterator()
         guard let helloMsg = try await iter.next() else {
