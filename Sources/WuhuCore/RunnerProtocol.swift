@@ -173,7 +173,9 @@ public struct MkdirResponse: Sendable, Hashable, Codable {
 public struct MaterializeResponse: Sendable, Hashable, Codable {
   /// The absolute path of the materialized workspace on the runner.
   public var workspacePath: String
-  public init(workspacePath: String) { self.workspacePath = workspacePath }
+  public init(workspacePath: String) {
+    self.workspacePath = workspacePath
+  }
 }
 
 // FindResult and GrepResult are defined in Runner.swift.

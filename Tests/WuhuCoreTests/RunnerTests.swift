@@ -200,7 +200,7 @@ actor InMemoryRunner: Runner {
         files[newPath] = data
         // Ensure parent dirs
         var dir = (newPath as NSString).deletingLastPathComponent
-        while dir != "/" && !dir.isEmpty {
+        while dir != "/", !dir.isEmpty {
           directories.insert(dir)
           dir = (dir as NSString).deletingLastPathComponent
         }
@@ -606,7 +606,7 @@ struct RunnerServerHandlerTests {
     #expect(main == "print(\"hello\")")
   }
 
-  @Test func handlerMaterializeReturnsErrorForMissingTemplate() async throws {
+  @Test func handlerMaterializeReturnsErrorForMissingTemplate() async {
     let mem = InMemoryRunner()
     let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 

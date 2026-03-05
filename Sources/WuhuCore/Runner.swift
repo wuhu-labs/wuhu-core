@@ -184,7 +184,7 @@ public protocol Runner: Actor, Sendable {
   func find(params: FindParams) async throws -> FindResult
   func grep(params: GrepParams) async throws -> GrepResult
 
-  // -- Workspace materialization --
+  /// -- Workspace materialization --
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
 }
 
