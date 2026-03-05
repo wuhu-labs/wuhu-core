@@ -180,6 +180,44 @@ actor InMemoryRunner: Runner {
     return FindResult(entries: limited.map { FindEntry(relativePath: $0) }, totalBeforeLimit: matching.count)
   }
 
+  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
+    // In-memory materialization: copy all files/dirs under templatePath to destinationPath.
+    let srcPrefix = params.templatePath.hasSuffix("/") ? params.templatePath : params.templatePath + "/"
+    let dstPrefix = params.destinationPath.hasSuffix("/") ? params.destinationPath : params.destinationPath + "/"
+
+    guard directories.contains(params.templatePath) else {
+      throw RunnerError.fileNotFound(path: params.templatePath)
+    }
+
+    // Copy destination directory
+    directories.insert(params.destinationPath)
+
+    // Copy files
+    for (path, data) in files {
+      if path.hasPrefix(srcPrefix) {
+        let rel = String(path.dropFirst(srcPrefix.count))
+        let newPath = dstPrefix + rel
+        files[newPath] = data
+        // Ensure parent dirs
+        var dir = (newPath as NSString).deletingLastPathComponent
+        while dir != "/", !dir.isEmpty {
+          directories.insert(dir)
+          dir = (dir as NSString).deletingLastPathComponent
+        }
+      }
+    }
+
+    // Copy subdirectories
+    for dir in Array(directories) {
+      if dir.hasPrefix(srcPrefix) {
+        let rel = String(dir.dropFirst(srcPrefix.count))
+        directories.insert(dstPrefix + rel)
+      }
+    }
+
+    return MaterializeResponse(workspacePath: params.destinationPath)
+  }
+
   func grep(params: GrepParams) async throws -> GrepResult {
     // Simple in-memory grep: search through in-memory files.
     let root = params.root.hasSuffix("/") ? params.root : params.root + "/"
@@ -291,6 +329,64 @@ struct LocalRunnerTests {
     #expect(!result.timedOut)
     // Clean up output file
     if let path = result.fullOutputPath { try? FileManager.default.removeItem(atPath: path) }
+  }
+
+  @Test func localRunnerMaterializeCopiesTemplate() async throws {
+    let fm = FileManager.default
+    let runner = LocalRunner()
+    let base = NSTemporaryDirectory() + "wuhu-runner-materialize-\(UUID().uuidString)"
+    let templateDir = base + "/template"
+    let workspacesDir = base + "/workspaces"
+    try fm.createDirectory(atPath: templateDir, withIntermediateDirectories: true)
+    try "# README".write(toFile: templateDir + "/README.md", atomically: true, encoding: .utf8)
+
+    defer { try? fm.removeItem(atPath: base) }
+
+    let result = try await runner.materialize(params: MaterializeRequest(
+      templatePath: templateDir,
+      destinationPath: workspacesDir + "/sess-1",
+    ))
+    #expect(result.workspacePath == workspacesDir + "/sess-1")
+    #expect(fm.fileExists(atPath: result.workspacePath + "/README.md"))
+    let content = try String(contentsOfFile: result.workspacePath + "/README.md", encoding: .utf8)
+    #expect(content == "# README")
+  }
+
+  @Test func localRunnerMaterializeRunsStartupScript() async throws {
+    let fm = FileManager.default
+    let runner = LocalRunner()
+    let base = NSTemporaryDirectory() + "wuhu-runner-materialize-script-\(UUID().uuidString)"
+    let templateDir = base + "/template"
+    let workspacesDir = base + "/workspaces"
+    try fm.createDirectory(atPath: templateDir, withIntermediateDirectories: true)
+    try "echo done > marker.txt".write(toFile: templateDir + "/setup.sh", atomically: true, encoding: .utf8)
+
+    defer { try? fm.removeItem(atPath: base) }
+
+    let result = try await runner.materialize(params: MaterializeRequest(
+      templatePath: templateDir,
+      destinationPath: workspacesDir + "/sess-2",
+      startupScript: "setup.sh",
+    ))
+
+    let markerPath = result.workspacePath + "/marker.txt"
+    #expect(fm.fileExists(atPath: markerPath))
+    let content = try String(contentsOfFile: markerPath, encoding: .utf8)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    #expect(content == "done")
+  }
+
+  @Test func localRunnerMaterializeFailsForMissingTemplate() async throws {
+    let runner = LocalRunner()
+    do {
+      _ = try await runner.materialize(params: MaterializeRequest(
+        templatePath: "/nonexistent-\(UUID().uuidString)",
+        destinationPath: "/tmp/should-not-exist",
+      ))
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("not found") || String(describing: error).contains("File not found"))
+    }
   }
 }
 
@@ -483,6 +579,49 @@ struct RunnerServerHandlerTests {
     let readBack = try await mem.readData(path: "/workspace/image.png")
     #expect(readBack == data)
   }
+
+  @Test func handlerDispatchesMaterialize() async throws {
+    let mem = InMemoryRunner()
+    await mem.seedDirectory(path: "/templates/myapp")
+    await mem.seedFile(path: "/templates/myapp/README.md", content: "# My App")
+    await mem.seedFile(path: "/templates/myapp/src/main.swift", content: "print(\"hello\")")
+    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
+
+    let (response, binaryData) = await handler.handle(request: .materialize(
+      id: "m1",
+      MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-1"),
+    ))
+    guard case let .materialize(id, result) = response else {
+      Issue.record("Expected materialize response"); return
+    }
+    #expect(id == "m1")
+    #expect(binaryData == nil)
+    let r = try result.get()
+    #expect(r.workspacePath == "/workspaces/sess-1")
+
+    // Verify files were copied
+    let readme = try await mem.readString(path: "/workspaces/sess-1/README.md", encoding: .utf8)
+    #expect(readme == "# My App")
+    let main = try await mem.readString(path: "/workspaces/sess-1/src/main.swift", encoding: .utf8)
+    #expect(main == "print(\"hello\")")
+  }
+
+  @Test func handlerMaterializeReturnsErrorForMissingTemplate() async {
+    let mem = InMemoryRunner()
+    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
+
+    let (response, _) = await handler.handle(request: .materialize(
+      id: "m2",
+      MaterializeRequest(templatePath: "/nonexistent", destinationPath: "/workspaces/sess-2"),
+    ))
+    guard case let .materialize(_, result) = response else {
+      Issue.record("Expected materialize response"); return
+    }
+    switch result {
+    case .success: Issue.record("Expected error")
+    case let .failure(err): #expect(err.message.contains("not found") || err.message.contains("File not found"))
+    }
+  }
 }
 
 // MARK: - Wire Protocol Serialization Tests
@@ -490,7 +629,7 @@ struct RunnerServerHandlerTests {
 struct RunnerWireProtocolTests {
   @Test func requestRoundTrip() throws {
     let requests: [RunnerRequest] = [
-      .hello(HelloRequest(serverName: "test-server", version: 5)),
+      .hello(HelloRequest(serverName: "test-server", version: 6)),
       .bash(id: "b1", BashRequest(command: "echo hi", cwd: "/tmp", timeout: 30.0)),
       .bash(id: "b2", BashRequest(command: "ls", cwd: "/")),
       .read(id: "r1", ReadRequest(path: "/workspace/file.txt")),
@@ -503,6 +642,8 @@ struct RunnerWireProtocolTests {
       .mkdir(id: "m1", MkdirRequest(path: "/workspace/new", recursive: true)),
       .find(id: "f1", FindParams(root: "/workspace", pattern: "*.swift", limit: 100)),
       .grep(id: "g1", GrepParams(root: "/workspace", pattern: "TODO", glob: "*.swift", ignoreCase: true, literal: true, contextLines: 2, limit: 50)),
+      .materialize(id: "mat1", MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-1", startupScript: "setup.sh")),
+      .materialize(id: "mat2", MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-2")),
     ]
 
     let encoder = JSONEncoder()
@@ -519,7 +660,7 @@ struct RunnerWireProtocolTests {
     let request = RunnerRequest.bash(id: "test-123", BashRequest(command: "ls", cwd: "/tmp"))
     let data = try JSONEncoder().encode(request)
     let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    #expect(json["v"] as? Int == 5)
+    #expect(json["v"] as? Int == 6)
     #expect(json["id"] as? String == "test-123")
     #expect(json["op"] as? String == "bash")
     #expect(json["p"] != nil)
@@ -532,7 +673,7 @@ struct RunnerWireProtocolTests {
 
     // Test success responses
     let successResponses: [(RunnerResponse, String)] = [
-      (.hello(HelloResponse(runnerName: "test-runner", version: 5)), "hello"),
+      (.hello(HelloResponse(runnerName: "test-runner", version: 6)), "hello"),
       (.bash(id: "b1", .success(BashResult(exitCode: 0, output: "hello\n", timedOut: false, terminated: false, fullOutputPath: "/tmp/out.log"))), "bash"),
       (.read(id: "r1", .success(ReadResponse(content: "hello world", size: 11))), "read"),
       (.read(id: "r2", .success(ReadResponse(size: 1024))), "read-binary"),
@@ -545,6 +686,7 @@ struct RunnerWireProtocolTests {
       (.mkdir(id: "m1", .success(MkdirResponse())), "mkdir"),
       (.find(id: "f1", .success(FindResult(entries: [FindEntry(relativePath: "main.swift")], totalBeforeLimit: 1))), "find"),
       (.grep(id: "g1", .success(GrepResult(matches: [GrepMatch(file: "main.swift", lineNumber: 5, line: "// TODO: fix", isContext: false)], matchCount: 1, limitReached: false, linesTruncated: false))), "grep"),
+      (.materialize(id: "mat1", .success(MaterializeResponse(workspacePath: "/workspaces/sess-1"))), "materialize"),
     ]
 
     for (response, label) in successResponses {
@@ -561,6 +703,7 @@ struct RunnerWireProtocolTests {
       (.write(id: "w2", .failure(RunnerWireError("Permission denied"))), "write-err"),
       (.find(id: "f2", .failure(RunnerWireError("Path not found"))), "find-err"),
       (.grep(id: "g2", .failure(RunnerWireError("Path not found"))), "grep-err"),
+      (.materialize(id: "mat2", .failure(RunnerWireError("Template not found"))), "materialize-err"),
     ]
 
     for (response, label) in errorResponses {
@@ -576,7 +719,7 @@ struct RunnerWireProtocolTests {
     let success = RunnerResponse.bash(id: "x", .success(BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)))
     let sData = try JSONEncoder().encode(success)
     let sJson = try #require(JSONSerialization.jsonObject(with: sData) as? [String: Any])
-    #expect(sJson["v"] as? Int == 5)
+    #expect(sJson["v"] as? Int == 6)
     #expect(sJson["id"] as? String == "x")
     #expect(sJson["op"] as? String == "bash")
     #expect(sJson["ok"] != nil)
@@ -938,6 +1081,47 @@ struct RunnerIntegrationTests {
       Issue.record("Should have thrown")
     } catch {
       #expect(String(describing: error).contains("disconnected"))
+    }
+  }
+
+  @Test func inProcessRemoteMaterialize() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    await memRunner.seedDirectory(path: "/templates/myapp")
+    await memRunner.seedFile(path: "/templates/myapp/Package.swift", content: "// swift-tools-version: 5.9")
+    await memRunner.seedFile(path: "/templates/myapp/Sources/main.swift", content: "print(\"hello\")")
+    await memRunner.seedDirectory(path: "/templates/myapp/Sources")
+
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-materialize")
+
+    let result = try await remote.materialize(params: MaterializeRequest(
+      templatePath: "/templates/myapp",
+      destinationPath: "/workspaces/sess-42",
+    ))
+    #expect(result.workspacePath == "/workspaces/sess-42")
+
+    // Verify files exist on the runner via the remote client
+    let pkg = try await remote.readString(path: "/workspaces/sess-42/Package.swift", encoding: .utf8)
+    #expect(pkg == "// swift-tools-version: 5.9")
+
+    let main = try await remote.readString(path: "/workspaces/sess-42/Sources/main.swift", encoding: .utf8)
+    #expect(main == "print(\"hello\")")
+
+    let srcExists = try await remote.exists(path: "/workspaces/sess-42/Sources")
+    #expect(srcExists == .directory)
+  }
+
+  @Test func inProcessRemoteMaterializeErrorPropagates() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-materialize-err")
+
+    do {
+      _ = try await remote.materialize(params: MaterializeRequest(
+        templatePath: "/nonexistent",
+        destinationPath: "/workspaces/sess-99",
+      ))
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("not found") || String(describing: error).contains("File not found"))
     }
   }
 }

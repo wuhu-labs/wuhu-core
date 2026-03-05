@@ -109,6 +109,14 @@ public actor RunnerServerHandler {
       } catch {
         return (.grep(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
       }
+
+    case let .materialize(id, p):
+      do {
+        let result = try await runner.materialize(params: p)
+        return (.materialize(id: id, .success(result)), nil)
+      } catch {
+        return (.materialize(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
     }
   }
 

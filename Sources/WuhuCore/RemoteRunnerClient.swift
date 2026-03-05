@@ -164,6 +164,18 @@ public actor RemoteRunnerClient: Runner {
     }
   }
 
+  public func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
+    let rid = Self.makeID()
+    let (response, _) = try await connection.request(.materialize(id: rid, params), requestID: rid)
+    guard case let .materialize(_, result) = response else {
+      throw RunnerError.requestFailed(message: "Unexpected response type")
+    }
+    switch result {
+    case let .success(r): return r
+    case let .failure(e): throw RunnerError.requestFailed(message: e.message)
+    }
+  }
+
   private static func makeID() -> String {
     UUID().uuidString.lowercased()
   }

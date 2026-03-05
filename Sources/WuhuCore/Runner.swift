@@ -183,6 +183,9 @@ public protocol Runner: Actor, Sendable {
   // -- Search --
   func find(params: FindParams) async throws -> FindResult
   func grep(params: GrepParams) async throws -> GrepResult
+
+  /// -- Workspace materialization --
+  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
 }
 
 // MARK: - Runner errors
