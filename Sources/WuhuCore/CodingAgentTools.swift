@@ -9,22 +9,26 @@ public typealias CwdProvider = @Sendable () async throws -> String?
 public extension WuhuTools {
   static func codingAgentTools(
     cwdProvider: @escaping CwdProvider,
+    mountResolver: MountResolver? = nil,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
-      readTool(cwdProvider: cwdProvider),
-      writeTool(cwdProvider: cwdProvider),
-      editTool(cwdProvider: cwdProvider),
-      lsTool(cwdProvider: cwdProvider),
-      findTool(cwdProvider: cwdProvider),
-      grepTool(cwdProvider: cwdProvider),
-      bashTool(cwdProvider: cwdProvider),
+      readTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      writeTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      editTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      lsTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      findTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      grepTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      bashTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
     if let braveSearchAPIKey, !braveSearchAPIKey.isEmpty {
       tools.append(webSearchTool(apiKey: braveSearchAPIKey))
+    }
+    if let mountResolver {
+      tools.append(copyTool(mountResolver: mountResolver))
     }
     return tools
   }
@@ -59,9 +63,35 @@ private func resolvePathOrRequireCwd(_ path: String?, defaultPath: String = ".",
   return (cwd: cwd, resolvedPath: resolved)
 }
 
+/// Resolve a path to an absolute path through the mount resolver (if available) or cwdProvider.
+/// Returns the resolved mount (with runner) and absolute path.
+private func resolvePathViaMountOrCwd(
+  _ rawPath: String?,
+  defaultPath: String = ".",
+  cwdProvider: CwdProvider,
+  mountResolver: MountResolver?,
+) async throws -> (resolved: ResolvedMount?, absolutePath: String) {
+  let raw = (rawPath ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
+  let expanded = ToolPath.expand(raw)
+
+  if let mountResolver {
+    let resolved = try await mountResolver(nil)
+    let absPath: String = if expanded.hasPrefix("/") {
+      expanded
+    } else {
+      ToolPath.resolveToCwd(raw, cwd: resolved.cwd)
+    }
+    return (resolved: resolved, absolutePath: absPath)
+  }
+
+  // No mount resolver — use cwdProvider for local-only path resolution
+  let (_, resolvedPath) = try await resolvePathOrRequireCwd(rawPath, defaultPath: defaultPath, provider: cwdProvider)
+  return (resolved: nil, absolutePath: resolvedPath)
+}
+
 // MARK: - read
 
-private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
   // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
   // See https://github.com/wuhu-labs/wuhu/issues/12
@@ -124,11 +154,27 @@ private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   let tool = Tool(name: "read", description: description, parameters: schema)
 
   return AnyAgentTool(tool: tool, label: "read") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
 
-    let (cwd, _) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
-    let resolved = ToolPath.resolveReadPath(params.path, cwd: cwd, fileIO: fileIO)
+    let (mount, resolved) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+    let runner = mount?.runner
+
+    // Helper to read string via runner or fileIO
+    func readStringContent(path: String) async throws -> String {
+      if let runner {
+        return try await runner.readString(path: path, encoding: .utf8)
+      }
+      @Dependency(\.fileIO) var fileIO
+      return try fileIO.readString(path: path, encoding: .utf8)
+    }
+
+    func readDataContent(path: String) async throws -> Data {
+      if let runner {
+        return try await runner.readData(path: path)
+      }
+      @Dependency(\.fileIO) var fileIO
+      return try fileIO.readData(path: path)
+    }
 
     // Check if the file is an image — return as image content block.
     let ext = (resolved as NSString).pathExtension.lowercased()
@@ -136,7 +182,7 @@ private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
       guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
         throw ToolError.message("Unsupported image format: \(ext)")
       }
-      let fileData = try fileIO.readData(path: resolved)
+      let fileData = try await readDataContent(path: resolved)
       guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
         throw ToolError.message(
           "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
@@ -149,7 +195,7 @@ private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
       )
     }
 
-    let raw = try fileIO.readString(path: resolved, encoding: .utf8)
+    let raw = try await readStringContent(path: resolved)
     let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     let totalLines = allLines.count
@@ -217,7 +263,7 @@ private func readTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - write
 
-private func writeTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func writeTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var content: String
@@ -247,12 +293,18 @@ private func writeTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (_, abs) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
-    let dir = (abs as NSString).deletingLastPathComponent
-    try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+
+    if let runner = mount?.runner {
+      try await runner.writeString(path: abs, content: params.content, createIntermediateDirectories: true, encoding: .utf8)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let dir = (abs as NSString).deletingLastPathComponent
+      try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
+      try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
+    }
+
     let bytes = params.content.utf8.count
     return AgentToolResult(content: [.text("Successfully wrote \(bytes) bytes to \(params.path)")], details: .object([:]))
   }
@@ -260,7 +312,7 @@ private func writeTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - edit
 
-private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var oldText: String
@@ -293,15 +345,21 @@ private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (_, abs) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
-    guard fileIO.exists(path: abs) else {
-      throw ToolError.message("File not found: \(params.path)")
-    }
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+    let runner = mount?.runner
 
     // Read via Data to preserve UTF-8 BOM (String(contentsOf:) may strip it).
-    let rawData = try fileIO.readData(path: abs)
+    let rawData: Data
+    if let runner {
+      rawData = try await runner.readData(path: abs)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      guard fileIO.exists(path: abs) else {
+        throw ToolError.message("File not found: \(params.path)")
+      }
+      rawData = try fileIO.readData(path: abs)
+    }
     let raw = String(decoding: rawData, as: UTF8.self)
     let (bom, contentNoBom) = stripBom(raw)
     let originalEnding = detectLineEnding(contentNoBom)
@@ -338,7 +396,12 @@ private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
     let firstChangedLine = 1 + baseContent[..<range.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).count - 1
     let final = bom + restoreLineEndings(newContent, ending: originalEnding)
-    try fileIO.writeString(path: abs, content: final, atomically: true, encoding: .utf8)
+    if let runner {
+      try await runner.writeString(path: abs, content: final, createIntermediateDirectories: false, encoding: .utf8)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      try fileIO.writeString(path: abs, content: final, atomically: true, encoding: .utf8)
+    }
 
     let diff = formatSimpleDiff(oldText: normalizedOldText, newText: normalizedNewText, line: firstChangedLine)
     return AgentToolResult(
@@ -353,7 +416,7 @@ private func editTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - ls
 
-private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func lsTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String?
     var limit: Int?
@@ -383,21 +446,31 @@ private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
-    let (_, dirPath) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
+    let (mount, dirPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
 
-    let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
-    guard dirExists else {
-      throw ToolError.message("Path not found: \(dirPath)")
-    }
-    guard isDir else {
-      throw ToolError.message("Not a directory: \(dirPath)")
+    let dirEntries: [DirectoryEntry]
+    if let runner = mount?.runner {
+      dirEntries = try await runner.listDirectory(path: dirPath)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
+      guard dirExists else {
+        throw ToolError.message("Path not found: \(dirPath)")
+      }
+      guard isDir else {
+        throw ToolError.message("Not a directory: \(dirPath)")
+      }
+      let entries = try fileIO.contentsOfDirectory(atPath: dirPath)
+      dirEntries = entries.map { name in
+        let full = (dirPath as NSString).appendingPathComponent(name)
+        let (_, isEntryDir) = fileIO.existsAndIsDirectory(path: full)
+        return DirectoryEntry(name: name, isDirectory: isEntryDir)
+      }
     }
 
-    let entries = try fileIO.contentsOfDirectory(atPath: dirPath)
-    let sorted = entries.sorted { $0.lowercased() < $1.lowercased() }
+    let sorted = dirEntries.sorted { $0.name.lowercased() < $1.name.lowercased() }
 
     var results: [String] = []
     results.reserveCapacity(min(sorted.count, effectiveLimit))
@@ -408,10 +481,7 @@ private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
         entryLimitReached = true
         break
       }
-      let full = (dirPath as NSString).appendingPathComponent(entry)
-      let (entryExists, isEntryDir) = fileIO.existsAndIsDirectory(path: full)
-      guard entryExists else { continue }
-      results.append(isEntryDir ? "\(entry)/" : entry)
+      results.append(entry.isDirectory ? "\(entry.name)/" : entry.name)
     }
 
     if results.isEmpty {
@@ -447,7 +517,7 @@ private func lsTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - find
 
-private func findTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func findTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -480,44 +550,53 @@ private func findTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "find") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (_, searchRoot) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
-    let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
-    guard dirExists else {
-      throw ToolError.message("Path not found: \(searchRoot)")
-    }
-    guard isDir else {
-      throw ToolError.message("Not a directory: \(searchRoot)")
-    }
-
-    let ignore = GitIgnore(searchRoot: searchRoot, fileIO: fileIO)
     let effectiveLimit = max(1, params.limit ?? 1000)
+    let (mount, searchRoot) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
 
-    let matches = try walkFiles(
-      root: searchRoot,
-      fileIO: fileIO,
-      shouldSkipDescendants: { rel, abs, isDir in
-        guard isDir else { return false }
-        if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
-        return ignore.isIgnored(absolutePath: abs, isDirectory: true)
-      },
-      include: { rel, abs, isDir in
-        if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
-        if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
-        if isDir { return false }
-        return ToolGlob.matches(pattern: params.pattern, path: rel, anchored: true)
-      },
-    )
+    let findResult: FindResult
+    if let runner = mount?.runner {
+      findResult = try await runner.find(params: FindParams(root: searchRoot, pattern: params.pattern, limit: effectiveLimit))
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
+      guard dirExists else {
+        throw ToolError.message("Path not found: \(searchRoot)")
+      }
+      guard isDir else {
+        throw ToolError.message("Not a directory: \(searchRoot)")
+      }
 
-    let sorted = matches.sorted { $0.lowercased() < $1.lowercased() }
-    let limited = Array(sorted.prefix(effectiveLimit))
+      let ignore = GitIgnore(searchRoot: searchRoot, fileIO: fileIO)
+
+      let matches = try walkFiles(
+        root: searchRoot,
+        fileIO: fileIO,
+        shouldSkipDescendants: { rel, abs, isDir in
+          guard isDir else { return false }
+          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
+          return ignore.isIgnored(absolutePath: abs, isDirectory: true)
+        },
+        include: { rel, abs, isDir in
+          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
+          if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
+          if isDir { return false }
+          return ToolGlob.matches(pattern: params.pattern, path: rel, anchored: true)
+        },
+      )
+
+      let sorted = matches.sorted { $0.lowercased() < $1.lowercased() }
+      let limited = Array(sorted.prefix(effectiveLimit))
+      findResult = FindResult(entries: limited.map { FindEntry(relativePath: $0) }, totalBeforeLimit: sorted.count)
+    }
+
+    let limited = findResult.entries.map(\.relativePath)
 
     if limited.isEmpty {
       return AgentToolResult(content: [.text("No files found matching pattern")], details: .object([:]))
     }
 
-    let resultLimitReached = sorted.count > effectiveLimit
+    let resultLimitReached = findResult.totalBeforeLimit > effectiveLimit
     let rawOutput = limited.joined(separator: "\n")
     let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
     var output = truncation.content
@@ -543,7 +622,7 @@ private func findTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - grep
 
-private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -596,113 +675,132 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "grep") { _, args in
-    @Dependency(\.fileIO) var fileIO
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (_, searchPath) = try await resolvePathOrRequireCwd(params.path, provider: cwdProvider)
-
-    let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
-    guard pathExists else {
-      throw ToolError.message("Path not found: \(searchPath)")
-    }
-
     let contextLines = max(0, params.context ?? 0)
     let effectiveLimit = max(1, params.limit ?? 100)
     let ignoreCase = params.ignoreCase ?? false
     let literal = params.literal ?? false
 
-    let rootForRelPaths = isDir ? searchPath : (searchPath as NSString).deletingLastPathComponent
-    let ignore = GitIgnore(searchRoot: rootForRelPaths, fileIO: fileIO)
+    let (mount, searchPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
 
-    let files: [String] = if isDir {
-      try walkFiles(
+    let grepResult: GrepResult
+    if let runner = mount?.runner {
+      grepResult = try await runner.grep(params: GrepParams(
         root: searchPath,
-        fileIO: fileIO,
-        shouldSkipDescendants: { rel, abs, isDir in
-          guard isDir else { return false }
-          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
-          return ignore.isIgnored(absolutePath: abs, isDirectory: true)
-        },
-        include: { rel, abs, isDir in
-          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
-          if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
-          if isDir { return false }
-          if let glob = params.glob {
-            return ToolGlob.matches(pattern: glob, path: rel, anchored: true)
-          }
-          return true
-        },
-      )
-      .map { URL(fileURLWithPath: searchPath).appendingPathComponent($0).path }
+        pattern: params.pattern,
+        glob: params.glob,
+        ignoreCase: ignoreCase,
+        literal: literal,
+        contextLines: contextLines,
+        limit: effectiveLimit,
+      ))
     } else {
-      [searchPath]
-    }
-
-    var outputLines: [String] = []
-    outputLines.reserveCapacity(min(effectiveLimit * (contextLines * 2 + 1), 4096))
-
-    var matchCount = 0
-    var matchLimitReached = false
-    var linesTruncated = false
-
-    let regex: NSRegularExpression? = {
-      if literal { return nil }
-      let opts: NSRegularExpression.Options = ignoreCase ? [.caseInsensitive] : []
-      return try? NSRegularExpression(pattern: params.pattern, options: opts)
-    }()
-
-    for file in files {
-      if matchCount >= effectiveLimit { break }
-
-      let content: String
-      do {
-        content = try fileIO.readString(path: file, encoding: .utf8)
-      } catch {
-        continue
+      @Dependency(\.fileIO) var fileIO
+      let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
+      guard pathExists else {
+        throw ToolError.message("Path not found: \(searchPath)")
       }
 
-      let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-      let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+      let rootForRelPaths = isDir ? searchPath : (searchPath as NSString).deletingLastPathComponent
+      let ignore = GitIgnore(searchRoot: rootForRelPaths, fileIO: fileIO)
 
-      func matchesLine(_ line: String) -> Bool {
-        if literal {
-          if ignoreCase { return line.lowercased().contains(params.pattern.lowercased()) }
-          return line.contains(params.pattern)
-        }
-        guard let regex else { return false }
-        let ns = line as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        return regex.firstMatch(in: line, options: [], range: range) != nil
+      let files: [String] = if isDir {
+        try walkFiles(
+          root: searchPath,
+          fileIO: fileIO,
+          shouldSkipDescendants: { rel, abs, isDir in
+            guard isDir else { return false }
+            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
+            return ignore.isIgnored(absolutePath: abs, isDirectory: true)
+          },
+          include: { rel, abs, isDir in
+            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
+            if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
+            if isDir { return false }
+            if let glob = params.glob {
+              return ToolGlob.matches(pattern: glob, path: rel, anchored: true)
+            }
+            return true
+          },
+        )
+        .map { URL(fileURLWithPath: searchPath).appendingPathComponent($0).path }
+      } else {
+        [searchPath]
       }
 
-      for (idx, line) in lines.enumerated() {
-        if matchCount >= effectiveLimit {
-          matchLimitReached = true
-          break
+      var allMatches: [GrepMatch] = []
+      var matchCount = 0
+      var matchLimitReached = false
+      var linesTruncated = false
+
+      let regex: NSRegularExpression? = {
+        if literal { return nil }
+        let opts: NSRegularExpression.Options = ignoreCase ? [.caseInsensitive] : []
+        return try? NSRegularExpression(pattern: params.pattern, options: opts)
+      }()
+
+      for file in files {
+        if matchCount >= effectiveLimit { break }
+
+        let content: String
+        do {
+          content = try fileIO.readString(path: file, encoding: .utf8)
+        } catch {
+          continue
         }
-        if !matchesLine(line) { continue }
-        matchCount += 1
 
-        let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir))
-        let lineNumber = idx + 1
+        let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
-        let start = max(1, lineNumber - contextLines)
-        let end = min(lines.count, lineNumber + contextLines)
+        func matchesLine(_ line: String) -> Bool {
+          if literal {
+            if ignoreCase { return line.lowercased().contains(params.pattern.lowercased()) }
+            return line.contains(params.pattern)
+          }
+          guard let regex else { return false }
+          let ns = line as NSString
+          let range = NSRange(location: 0, length: ns.length)
+          return regex.firstMatch(in: line, options: [], range: range) != nil
+        }
 
-        for current in start ... end {
-          let rawLine = lines[current - 1]
-          let (trunc, wasTruncated) = ToolTruncation.truncateLine(rawLine)
-          if wasTruncated { linesTruncated = true }
-          if current == lineNumber {
-            outputLines.append("\(rel):\(current): \(trunc)")
-          } else {
-            outputLines.append("\(rel)-\(current)- \(trunc)")
+        for (idx, line) in lines.enumerated() {
+          if matchCount >= effectiveLimit {
+            matchLimitReached = true
+            break
+          }
+          if !matchesLine(line) { continue }
+          matchCount += 1
+
+          let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir))
+          let lineNumber = idx + 1
+
+          let start = max(1, lineNumber - contextLines)
+          let end = min(lines.count, lineNumber + contextLines)
+
+          for current in start ... end {
+            let rawLine = lines[current - 1]
+            let (trunc, wasTruncated) = ToolTruncation.truncateLine(rawLine)
+            if wasTruncated { linesTruncated = true }
+            allMatches.append(GrepMatch(file: rel, lineNumber: current, line: trunc, isContext: current != lineNumber))
           }
         }
       }
+
+      grepResult = GrepResult(matches: allMatches, matchCount: matchCount, limitReached: matchLimitReached, linesTruncated: linesTruncated)
     }
 
-    if matchCount == 0 {
+    if grepResult.matchCount == 0 {
       return AgentToolResult(content: [.text("No matches found")], details: .object([:]))
+    }
+
+    // Format output from GrepMatch entries
+    var outputLines: [String] = []
+    for m in grepResult.matches {
+      if m.isContext {
+        outputLines.append("\(m.file)-\(m.lineNumber)- \(m.line)")
+      } else {
+        outputLines.append("\(m.file):\(m.lineNumber): \(m.line)")
+      }
     }
 
     let rawOutput = outputLines.joined(separator: "\n")
@@ -712,7 +810,7 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
     var notices: [String] = []
     var details: [String: JSONValue] = [:]
 
-    if matchLimitReached {
+    if grepResult.limitReached {
       notices.append("\(effectiveLimit) matches limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern")
       details["matchLimitReached"] = .number(Double(effectiveLimit))
     }
@@ -720,7 +818,7 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
       notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
       details["truncation"] = truncation.toJSON()
     }
-    if linesTruncated {
+    if grepResult.linesTruncated {
       notices.append("Some lines truncated to \(ToolTruncation.grepMaxLineLength) chars. Use read tool to see full lines")
       details["linesTruncated"] = .bool(true)
     }
@@ -735,25 +833,32 @@ private func grepTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
+private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
+    var mount: String?
 
     static func parse(toolName: String, args: JSONValue) throws -> Params {
       let a = try ToolArgs(toolName: toolName, args: args)
       let command = try a.requireString("command")
       let timeout = try a.optionalDouble("timeout")
-      return .init(command: command, timeout: timeout)
+      let mount = try a.optionalString("mount")
+      return .init(command: command, timeout: timeout, mount: mount)
     }
+  }
+
+  var properties: [String: JSONValue] = [
+    "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
+    "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
+  ]
+  if mountResolver != nil {
+    properties["mount"] = .object(["type": .string("string"), "description": .string("Mount name to execute on (optional, defaults to primary mount)")])
   }
 
   let schema: JSONValue = .object([
     "type": .string("object"),
-    "properties": .object([
-      "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
-      "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
-    ]),
+    "properties": .object(properties),
     "required": .array([.string("command")]),
     "additionalProperties": .bool(false),
   ])
@@ -765,65 +870,99 @@ private func bashTool(cwdProvider: @escaping CwdProvider) -> AnyAgentTool {
   )
 
   return AnyAgentTool(tool: tool, label: "bash") { _, args in
-    let cwd = try await requireCwd(cwdProvider)
     let params = try Params.parse(toolName: tool.name, args: args)
+
+    // If a mount is specified and we have a mount resolver, use it
+    if let mountResolver, params.mount != nil {
+      let resolved = try await mountResolver(params.mount)
+      let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+      return try formatBashResult(run)
+    }
+
+    // If no mount specified but we have a resolver, resolve primary mount (may be remote)
+    if let mountResolver {
+      do {
+        let resolved = try await mountResolver(nil)
+        if resolved.mount?.runnerID != .local {
+          // Remote primary mount — execute through runner
+          let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+          return try formatBashResult(run)
+        }
+      } catch {
+        // Fall through to local execution if mount resolution fails
+      }
+    }
+
+    // Local execution path (original behavior)
+    let cwd = try await requireCwd(cwdProvider)
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
       throw ToolError.message("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
     }
 
-    let run = try await runBash(
+    let run = try await LocalBash.run(
       command: params.command,
       cwd: cwd,
       timeoutSeconds: params.timeout,
     )
-    let exitCode = run.exitCode
-    let output = run.output
-    let timedOut = run.timedOut
-    let terminated = run.terminated
-    let fullOutputPath = run.fullOutputPath
-
-    let truncation = ToolTruncation.truncateTail(output)
-    var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
-
-    var details: [String: JSONValue] = [:]
-    if truncation.truncated {
-      details["truncation"] = truncation.toJSON()
-      details["fullOutputPath"] = .string(fullOutputPath)
-
-      let startLine = truncation.totalLines - truncation.outputLines + 1
-      let endLine = truncation.totalLines
-      if truncation.lastLinePartial {
-        let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
-        let lastSize = ToolTruncation.formatSize(last.utf8.count)
-        if !outputText.isEmpty { outputText += "\n\n" }
-        outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize)). Full output: \(fullOutputPath)]"
-      } else if truncation.truncatedBy == "lines" {
-        outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines). Full output: \(fullOutputPath)]"
-      } else {
-        outputText +=
-          "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit). Full output: \(fullOutputPath)]"
-      }
-    }
-
-    if timedOut {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(outputText + "\n\nCommand timed out")
-    }
-    if terminated {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-      throw ToolError.message(outputText + "\n\nCommand aborted")
-    }
-    if exitCode != 0 {
-      // Keep full output around for debugging.
-      throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
-    }
-
-    if !truncation.truncated {
-      try? FileManager.default.removeItem(atPath: fullOutputPath)
-    }
-    return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
+    return try formatBashResult(run)
   }
+}
+
+/// Format a BashResult into an AgentToolResult with truncation handling.
+private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
+  let exitCode = run.exitCode
+  let output = run.output
+  let timedOut = run.timedOut
+  let terminated = run.terminated
+  let fullOutputPath = run.fullOutputPath ?? ""
+
+  let truncation = ToolTruncation.truncateTail(output)
+  var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
+
+  var details: [String: JSONValue] = [:]
+  if truncation.truncated {
+    details["truncation"] = truncation.toJSON()
+    if !fullOutputPath.isEmpty {
+      details["fullOutputPath"] = .string(fullOutputPath)
+    }
+
+    let startLine = truncation.totalLines - truncation.outputLines + 1
+    let endLine = truncation.totalLines
+    if truncation.lastLinePartial {
+      let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+      let lastSize = ToolTruncation.formatSize(last.utf8.count)
+      if !outputText.isEmpty { outputText += "\n\n" }
+      outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize))."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else if truncation.truncatedBy == "lines" {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    }
+  }
+
+  if timedOut {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand timed out")
+  }
+  if terminated {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand aborted")
+  }
+  if exitCode != 0 {
+    throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
+  }
+
+  if !truncation.truncated, !fullOutputPath.isEmpty {
+    try? FileManager.default.removeItem(atPath: fullOutputPath)
+  }
+  return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
 }
 
 // MARK: - async_bash
@@ -961,50 +1100,9 @@ private enum ToolError: Error, Sendable, CustomStringConvertible {
   }
 }
 
-private func walkFiles(
-  root: String,
-  fileIO: any FileIO,
-  shouldSkipDescendants: ((_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool)? = nil,
-  include: (_ relativePath: String, _ absolutePath: String, _ isDirectory: Bool) -> Bool,
-) throws -> [String] {
-  let allEntries = try fileIO.enumerateDirectory(atPath: root)
+// walkFiles is defined in WalkFiles.swift (module-internal).
 
-  // Build a set of skipped directory prefixes for shouldSkipDescendants.
-  var skippedPrefixes: [String] = []
-  var results: [String] = []
-
-  for (rel, abs, isDir) in allEntries {
-    // Check if this entry is under a skipped prefix.
-    let isUnderSkipped = skippedPrefixes.contains { prefix in
-      rel.hasPrefix(prefix)
-    }
-    if isUnderSkipped { continue }
-
-    if isDir, shouldSkipDescendants?(rel, abs, isDir) == true {
-      let prefix = rel.hasSuffix("/") ? rel : rel + "/"
-      skippedPrefixes.append(prefix)
-      continue
-    }
-
-    if include(rel, abs, isDir) {
-      results.append(rel)
-    }
-  }
-  return results
-}
-
-private func relativePathForGrep(file: String, root: String, isDirectoryRoot: Bool) -> String {
-  if isDirectoryRoot {
-    let rootPath = URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL.path
-    let filePath = URL(fileURLWithPath: file).resolvingSymlinksInPath().standardizedFileURL.path
-    let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-    if let rel = filePath.replacingOccurrences(of: prefix, with: "").nilIfEqual(filePath) {
-      return rel
-    }
-    return (filePath as NSString).lastPathComponent
-  }
-  return (file as NSString).lastPathComponent
-}
+// relativePathForGrep is defined in WalkFiles.swift (module-internal).
 
 private func stripBom(_ content: String) -> (bom: String, text: String) {
   if content.hasPrefix("\u{FEFF}") {
@@ -1094,110 +1192,81 @@ private func shellEscape(_ s: String) -> String {
   return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-private struct BashRunResult: Sendable {
-  var exitCode: Int32
-  var output: String
-  var timedOut: Bool
-  var terminated: Bool
-  var fullOutputPath: String
-}
+// Bash execution is provided by LocalBash (Sources/WuhuCore/LocalBash.swift).
+// The bash tool calls LocalBash.run() for local execution and Runner.runBash()
+// for remote execution via the mount resolver.
 
-private func runBash(command: String, cwd: String, timeoutSeconds: Double?) async throws -> BashRunResult {
-  #if os(macOS) || os(Linux)
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = ["-lc", command]
-    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-    process.standardInput = FileHandle.nullDevice
+// MARK: - copy tool
 
-    // Run tools in a non-interactive environment. Some CLIs (notably `gh`) will attempt to prompt
-    // via the controlling TTY, which can hang an agent loop indefinitely.
-    var env = ProcessInfo.processInfo.environment
-    env["CI"] = "1"
-    env["TERM"] = env["TERM"]?.nilIfEqual("") ?? "dumb"
-    env["PAGER"] = "cat"
-    env["GIT_PAGER"] = "cat"
-    env["GH_PAGER"] = "cat"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GH_PROMPT_DISABLED"] = "1"
-    process.environment = env
+private func copyTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
+  struct Params: Sendable {
+    var source: String
+    var destination: String
+    var sourceMount: String?
+    var destMount: String?
 
-    let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
-    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-    let outputHandle = try FileHandle(forWritingTo: outputURL)
-    process.standardOutput = outputHandle
-    process.standardError = outputHandle
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let source = try a.requireString("source")
+      let destination = try a.requireString("destination")
+      let sourceMount = try a.optionalString("sourceMount")
+      let destMount = try a.optionalString("destMount")
+      return .init(source: source, destination: destination, sourceMount: sourceMount, destMount: destMount)
+    }
+  }
 
-    try process.run()
-    let pid = process.processIdentifier
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "source": .object(["type": .string("string"), "description": .string("Source file path (absolute, or relative to source mount)")]),
+      "destination": .object(["type": .string("string"), "description": .string("Destination file path (absolute, or relative to destination mount)")]),
+      "sourceMount": .object(["type": .string("string"), "description": .string("Source mount name (optional, defaults to primary mount)")]),
+      "destMount": .object(["type": .string("string"), "description": .string("Destination mount name (optional, defaults to primary mount)")]),
+    ]),
+    "required": .array([.string("source"), .string("destination")]),
+    "additionalProperties": .bool(false),
+  ])
 
-    let start = Date()
-    var timedOut = false
-    var terminated = false
-    do {
-      while process.isRunning {
-        if Task.isCancelled {
-          terminated = true
-          process.terminate()
-          break
-        }
-        if let timeoutSeconds, timeoutSeconds > 0, Date().timeIntervalSince(start) > timeoutSeconds {
-          timedOut = true
-          process.terminate()
-          break
-        }
-        try await Task.sleep(nanoseconds: 50_000_000)
+  let tool = Tool(
+    name: "copy",
+    description: "Copy a file between mounts (potentially on different runners/machines). For same-runner copies, this is efficient. For cross-runner copies, the file is streamed through the server.",
+    parameters: schema,
+  )
 
-        // Fallback: Foundation's Process.isRunning relies on a dispatch source
-        // that can miss fast exits in rare cases. If the process no longer exists
-        // at the OS level, break out instead of polling forever.
-        if process.isRunning, !processExistsAtOSLevel(pid) {
-          break
-        }
-      }
-    } catch is CancellationError {
-      terminated = true
-      process.terminate()
+  return AnyAgentTool(tool: tool, label: "copy") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+
+    let srcResolved = try await mountResolver(params.sourceMount)
+    let dstResolved = try await mountResolver(params.destMount)
+
+    // Resolve paths
+    let srcPath: String = if params.source.hasPrefix("/") {
+      params.source
+    } else {
+      URL(fileURLWithPath: srcResolved.cwd).appendingPathComponent(params.source).standardizedFileURL.path
     }
 
-    // Async-safe wait: avoid process.waitUntilExit() which is a synchronous
-    // blocking call that can hang when Foundation's dispatch source misses
-    // the process exit notification.
-    if terminated || timedOut {
-      // Give the process up to 3s to exit after SIGTERM.
-      let sigtermDeadline = Date().addingTimeInterval(3)
-      while process.isRunning, Date() < sigtermDeadline {
-        try? await Task.sleep(nanoseconds: 100_000_000)
-      }
-
-      // Escalate to SIGKILL if the process is still alive.
-      if process.isRunning {
-        kill(pid, SIGKILL)
-        let sigkillDeadline = Date().addingTimeInterval(2)
-        while process.isRunning, Date() < sigkillDeadline {
-          try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-      }
+    let dstPath: String = if params.destination.hasPrefix("/") {
+      params.destination
+    } else {
+      URL(fileURLWithPath: dstResolved.cwd).appendingPathComponent(params.destination).standardizedFileURL.path
     }
 
-    try? outputHandle.close()
+    // Read from source runner, write to destination runner
+    let data = try await srcResolved.runner.readData(path: srcPath)
+    try await dstResolved.runner.writeData(path: dstPath, data: data, createIntermediateDirectories: true)
 
-    let data = (try? Data(contentsOf: outputURL)) ?? Data()
-    let output = String(decoding: data, as: UTF8.self)
-    return .init(exitCode: process.terminationStatus, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
-  #else
-    throw PiAIError.unsupported("bash is not supported on this platform")
-  #endif
-}
-
-/// Check whether a process still exists at the OS level, bypassing Foundation's
-/// internal bookkeeping. Returns false when the PID no longer refers to a live
-/// process (ESRCH). This catches the rare case where Foundation's dispatch-source
-/// based termination detection misses a fast exit.
-private func processExistsAtOSLevel(_ pid: Int32) -> Bool {
-  // kill(pid, 0) sends no signal but checks for process existence.
-  // Returns 0 if the process exists (or is a zombie); -1/ESRCH if gone.
-  kill(pid, 0) != -1 || errno != ESRCH
+    let size = data.count
+    let sizeStr = ToolTruncation.formatSize(size)
+    return AgentToolResult(
+      content: [.text("Copied \(sizeStr) from \(params.source) to \(params.destination)")],
+      details: .object([
+        "sourcePath": .string(srcPath),
+        "destinationPath": .string(dstPath),
+        "bytes": .number(Double(size)),
+      ]),
+    )
+  }
 }
 
 private extension String {
