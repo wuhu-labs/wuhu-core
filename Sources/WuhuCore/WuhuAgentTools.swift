@@ -509,9 +509,9 @@ extension WuhuService {
         .remote(name: rawRunner)
       }
 
-      // Validate runner is available
-      let runnerAvailable = await runnerRegistry.isAvailable(runnerID)
-      guard runnerAvailable else {
+      // Look up and validate runner
+      let runner = await runnerRegistry.get(runnerID)
+      guard let runner else {
         throw await WuhuToolExecutionError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(runnerRegistry.listRunnerNames().joined(separator: ", "))")
       }
 
@@ -519,8 +519,8 @@ extension WuhuService {
       var mountTemplateID: String?
 
       if !rawTemplateID.isEmpty {
-        // Instantiate a fresh workspace from the mount template
-        let resolved = try await materializeMountTemplate(identifier: rawTemplateID, sessionID: currentSessionID)
+        // Instantiate a fresh workspace from the mount template (via runner for remote)
+        let resolved = try await materializeMountTemplate(identifier: rawTemplateID, sessionID: currentSessionID, runner: runner)
         mountPath = resolved.workspacePath
         mountTemplateID = resolved.templateID
       } else if rawPath.isEmpty {
@@ -569,10 +569,8 @@ extension WuhuService {
         try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
       }
 
-      // Emit context entries (only for local mounts ��� remote mounts may not have AGENTS.md locally)
-      if runnerID == .local {
-        try await emitMountContext(sessionID: currentSessionID, mount: mount)
-      }
+      // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
+      try await emitMountContext(sessionID: currentSessionID, mount: mount, runner: runner)
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
@@ -594,8 +592,25 @@ extension WuhuService {
     var workspacePath: String
   }
 
-  private func materializeMountTemplate(identifier: String, sessionID: String) async throws -> MaterializedTemplate {
+  private func materializeMountTemplate(identifier: String, sessionID: String, runner: (any Runner)? = nil) async throws -> MaterializedTemplate {
     let mt = try await store.getMountTemplate(identifier: identifier)
+
+    // When a non-local runner is provided, materialize on the runner's filesystem.
+    // The template's paths (templatePath, workspacesPath) are interpreted on the runner.
+    if let runner, runner.id != .local {
+      let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath, cwd: "")
+      let destinationPath = URL(fileURLWithPath: workspacesRoot)
+        .appendingPathComponent(sessionID, isDirectory: true)
+        .path
+      let response = try await runner.materialize(params: MaterializeRequest(
+        templatePath: mt.templatePath,
+        destinationPath: destinationPath,
+        startupScript: mt.startupScript,
+      ))
+      return MaterializedTemplate(templateID: mt.id, workspacePath: response.workspacePath)
+    }
+
+    // Local materialization (existing behavior)
     let serverCwd = FileManager.default.currentDirectoryPath
     let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
     let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)

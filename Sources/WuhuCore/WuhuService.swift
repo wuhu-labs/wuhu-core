@@ -190,6 +190,14 @@ public actor WuhuService {
 
   /// Emit context entries for a mount (AGENTS.md, skills).
   public func emitMountContext(sessionID: String, mount: WuhuMount) async throws {
+    try await emitMountContext(sessionID: sessionID, mount: mount, runner: nil)
+  }
+
+  /// Emit mount-level context entries (announcement, AGENTS.md, skills).
+  ///
+  /// When `runner` is provided, files are read via the runner's FileIO ops (works for both local and remote).
+  /// When `runner` is nil, files are read from the local filesystem.
+  public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any Runner)?) async throws {
     // Mount announcement
     let announcementPayload: WuhuEntryPayload = .custom(
       customType: WuhuCustomMessageTypes.mountContext,
@@ -203,7 +211,11 @@ public actor WuhuService {
     _ = try await store.appendEntry(sessionID: sessionID, payload: announcementPayload)
 
     // Mount-level AGENTS.md
-    let agentsFiles = loadAgentsFiles(at: mount.path)
+    let agentsFiles: [WuhuContextFile] = if let runner {
+      await loadAgentsFilesViaRunner(runner: runner, root: mount.path)
+    } else {
+      loadAgentsFiles(at: mount.path)
+    }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
       let agentsPayload: WuhuEntryPayload = .custom(
@@ -218,11 +230,16 @@ public actor WuhuService {
     }
 
     // Mount-level skills
-    let mountSkillsDir = URL(fileURLWithPath: mount.path, isDirectory: true)
-      .appendingPathComponent(".wuhu")
-      .appendingPathComponent("skills")
-      .path
-    let mountSkills = WuhuSkillsLoader.load(userSkillsDir: "/dev/null", projectSkillsDir: mountSkillsDir)
+    let mountSkills: [WuhuSkill]
+    if let runner {
+      mountSkills = await loadSkillsViaRunner(runner: runner, root: mount.path)
+    } else {
+      let mountSkillsDir = URL(fileURLWithPath: mount.path, isDirectory: true)
+        .appendingPathComponent(".wuhu")
+        .appendingPathComponent("skills")
+        .path
+      mountSkills = WuhuSkillsLoader.load(userSkillsDir: "/dev/null", projectSkillsDir: mountSkillsDir)
+    }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
       let skillsPayload: WuhuEntryPayload = .custom(
@@ -455,6 +472,68 @@ private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
     files.append(.init(path: path, content: content))
   }
   return files
+}
+
+/// Load AGENTS.md files via a runner's FileIO ops (works for both local and remote runners).
+private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async -> [WuhuContextFile] {
+  let candidates = [
+    URL(fileURLWithPath: root).appendingPathComponent("AGENTS.md").path,
+    URL(fileURLWithPath: root).appendingPathComponent("AGENTS.local.md").path,
+  ]
+
+  var files: [WuhuContextFile] = []
+  for path in candidates {
+    do {
+      let existence = try await runner.exists(path: path)
+      guard existence == .file else { continue }
+      let content = try await runner.readString(path: path, encoding: .utf8)
+      files.append(.init(path: path, content: content))
+    } catch {
+      // Skip files that fail to read (same behavior as local loadAgentsFiles)
+      continue
+    }
+  }
+  return files
+}
+
+/// Load skills from `.wuhu/skills/` via a runner's FileIO ops.
+/// Uses `runner.find` to locate SKILL.md files, then reads each one.
+private func loadSkillsViaRunner(runner: any Runner, root: String) async -> [WuhuSkill] {
+  let skillsDir = URL(fileURLWithPath: root, isDirectory: true)
+    .appendingPathComponent(".wuhu")
+    .appendingPathComponent("skills")
+    .path
+
+  // Check if skills directory exists
+  do {
+    let existence = try await runner.exists(path: skillsDir)
+    guard existence == .directory else { return [] }
+  } catch {
+    return []
+  }
+
+  // Find all SKILL.md files
+  let findResult: FindResult
+  do {
+    findResult = try await runner.find(params: FindParams(root: skillsDir, pattern: "**/SKILL.md", limit: 200))
+  } catch {
+    return []
+  }
+
+  var byName: [String: WuhuSkill] = [:]
+  for entry in findResult.entries {
+    let absolutePath = URL(fileURLWithPath: skillsDir).appendingPathComponent(entry.relativePath).path
+    do {
+      let content = try await runner.readString(path: absolutePath, encoding: .utf8)
+      if let skill = WuhuSkillsLoader.loadSkillFromContent(content, filePath: absolutePath, source: "project") {
+        byName[skill.name] = skill
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return byName.values.sorted { $0.name < $1.name }
 }
 
 struct WuhuContextFile: Sendable, Hashable {
