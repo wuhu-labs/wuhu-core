@@ -2,7 +2,7 @@ import Foundation
 import PiAI
 import Testing
 import WuhuAPI
-import WuhuCore
+@testable import WuhuCore
 
 struct SkillsIntegrationTests {
   @Test func mountContextLoadsSkillsFromMountPath() async throws {
@@ -200,5 +200,191 @@ struct SkillsIntegrationTests {
       #expect(skillsText.contains("shared-skill"))
       #expect(skillsText.contains("Mount version."))
     }
+  }
+
+  @Test func emitMountContextViaRunnerLoadsAgentsAndSkills() async throws {
+    // Set up an InMemoryRunner with AGENTS.md and a skill
+    let runner = InMemoryRunner(id: .remote(name: "test-remote"))
+    await runner.seedFile(
+      path: "/remote-ws/AGENTS.md",
+      content: "# Remote Project\n\nAlways use tabs.",
+    )
+    await runner.seedFile(
+      path: "/remote-ws/AGENTS.local.md",
+      content: "# Local Overrides\n\nDebug port: 9999",
+    )
+    await runner.seedDirectory(path: "/remote-ws/.wuhu/skills/deploy-skill")
+    await runner.seedFile(
+      path: "/remote-ws/.wuhu/skills/deploy-skill/SKILL.md",
+      content: """
+      ---
+      name: deploy-skill
+      description: Handles deployment to production.
+      ---
+
+      # Deploy Skill
+      Run `make deploy` in the project root.
+      """,
+    )
+
+    let store = try SQLiteSessionStore(path: ":memory:")
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
+
+    let sessionID = UUID().uuidString.lowercased()
+    _ = try await service.createSession(
+      sessionID: sessionID,
+      provider: .openai,
+      model: "mock",
+      systemPrompt: "You are helpful.",
+      cwd: "/remote-ws",
+    )
+
+    let mount = try await store.createMount(
+      sessionID: sessionID,
+      name: "remote-ws",
+      path: "/remote-ws",
+      isPrimary: true,
+      runnerID: .remote(name: "test-remote"),
+    )
+
+    // Emit context via the runner
+    try await service.emitMountContext(sessionID: sessionID, mount: mount, runner: runner)
+
+    let entries = try await store.getEntries(sessionID: sessionID)
+
+    // Check mount announcement
+    let mountEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.mountContext
+      }
+      return false
+    }
+    #expect(mountEntry != nil, "Expected mount announcement")
+
+    // Check AGENTS.md was loaded via runner
+    let agentsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.agentsContext
+      }
+      return false
+    }
+    #expect(agentsEntry != nil, "Expected AGENTS.md context entry")
+    if case let .custom(_, data) = agentsEntry?.payload {
+      let text = data?.object?["text"]?.stringValue ?? ""
+      #expect(text.contains("Always use tabs"))
+      #expect(text.contains("Debug port: 9999"))
+    }
+
+    // Check skills loaded via runner
+    let skillsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.skillsContext
+      }
+      return false
+    }
+    #expect(skillsEntry != nil, "Expected skills context entry")
+    if case let .custom(_, data) = skillsEntry?.payload {
+      let text = data?.object?["text"]?.stringValue ?? ""
+      #expect(text.contains("deploy-skill"))
+      #expect(text.contains("Handles deployment to production"))
+    }
+  }
+
+  @Test func emitMountContextViaRunnerHandlesMissingFiles() async throws {
+    // Runner with no AGENTS.md and no skills
+    let runner = InMemoryRunner(id: .remote(name: "empty-runner"))
+    await runner.seedDirectory(path: "/empty-ws")
+
+    let store = try SQLiteSessionStore(path: ":memory:")
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
+
+    let sessionID = UUID().uuidString.lowercased()
+    _ = try await service.createSession(
+      sessionID: sessionID,
+      provider: .openai,
+      model: "mock",
+      systemPrompt: "You are helpful.",
+      cwd: "/empty-ws",
+    )
+
+    let mount = try await store.createMount(
+      sessionID: sessionID,
+      name: "empty-ws",
+      path: "/empty-ws",
+      isPrimary: true,
+      runnerID: .remote(name: "empty-runner"),
+    )
+
+    // Should not throw even though AGENTS.md and skills don't exist
+    try await service.emitMountContext(sessionID: sessionID, mount: mount, runner: runner)
+
+    let entries = try await store.getEntries(sessionID: sessionID)
+
+    // Should have mount announcement but no AGENTS.md or skills entries
+    let mountEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.mountContext
+      }
+      return false
+    }
+    #expect(mountEntry != nil, "Expected mount announcement")
+
+    let agentsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.agentsContext
+      }
+      return false
+    }
+    #expect(agentsEntry == nil, "Should not have AGENTS.md entry when file doesn't exist")
+
+    let skillsEntry = entries.first { entry in
+      if case let .custom(customType, _) = entry.payload {
+        return customType == WuhuCustomMessageTypes.skillsContext
+      }
+      return false
+    }
+    #expect(skillsEntry == nil, "Should not have skills entry when no skills exist")
+  }
+
+  @Test func loadSkillFromContentParsesCorrectly() {
+    let content = """
+    ---
+    name: test-skill
+    description: Does something useful.
+    ---
+
+    # Test Skill Instructions
+    """
+
+    let skill = WuhuSkillsLoader.loadSkillFromContent(
+      content,
+      filePath: "/project/.wuhu/skills/test-skill/SKILL.md",
+      source: "project",
+    )
+    #expect(skill != nil)
+    #expect(skill?.name == "test-skill")
+    #expect(skill?.description == "Does something useful.")
+    #expect(skill?.source == "project")
+    #expect(skill?.baseDir == "/project/.wuhu/skills/test-skill")
+    #expect(skill?.filePath == "/project/.wuhu/skills/test-skill/SKILL.md")
+  }
+
+  @Test func loadSkillFromContentReturnsNilForNoDescription() {
+    let content = """
+    ---
+    name: bad-skill
+    ---
+
+    # No description
+    """
+
+    let skill = WuhuSkillsLoader.loadSkillFromContent(
+      content,
+      filePath: "/project/.wuhu/skills/bad-skill/SKILL.md",
+      source: "project",
+    )
+    #expect(skill == nil, "Skill without description should be nil")
   }
 }

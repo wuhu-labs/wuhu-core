@@ -91,8 +91,18 @@ enum WuhuSkillsLoader {
     var disableModelInvocation: Bool
   }
 
+  /// Parse a skill from already-read file content. Used by remote context loading
+  /// where the content has been fetched over the runner wire protocol.
+  static func loadSkillFromContent(_ content: String, filePath: String, source: String) -> WuhuSkill? {
+    loadSkillFromRaw(content, filePath: filePath, source: source)
+  }
+
   private static func loadSkillFromFile(_ filePath: String, source: String) -> WuhuSkill? {
     guard let raw = try? String(contentsOfFile: filePath, encoding: .utf8) else { return nil }
+    return loadSkillFromRaw(raw, filePath: filePath, source: source)
+  }
+
+  private static func loadSkillFromRaw(_ raw: String, filePath: String, source: String) -> WuhuSkill? {
     let frontmatter = parseFrontmatter(raw)
 
     let description = (frontmatter.description ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
