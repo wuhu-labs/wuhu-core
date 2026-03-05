@@ -1124,4 +1124,37 @@ struct RunnerIntegrationTests {
       #expect(String(describing: error).contains("not found") || String(describing: error).contains("File not found"))
     }
   }
+
+  /// Verify large bash output (> 16KB) round-trips through the protocol.
+  ///
+  /// This reproduces a real-world failure where `cat` of a ~690-line Swift file
+  /// (22KB raw, ~26KB JSON-encoded) caused the WebSocket connection to drop.
+  /// The root cause was `maxFrameSize` defaulting to 16KB in the NIO WebSocket
+  /// decoder — any single frame exceeding that limit triggered a protocol error
+  /// and connection close.
+  @Test func inProcessLargeBashOutputRoundTrip() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+
+    // Generate a ~25KB output string (similar to `cat` of a 690-line Swift file)
+    var lines: [String] = ["import Foundation", "import SwiftUI", ""]
+    for i in 1 ... 687 {
+      lines.append("  let property\(i): String = \"value\(i)\" // padding to simulate real code")
+    }
+    lines.append("")
+    let largeOutput = lines.joined(separator: "\n")
+
+    // Verify the output exceeds the old default maxFrameSize when JSON-encoded
+    let bashResult = BashResult(exitCode: 0, output: largeOutput, timedOut: false, terminated: false)
+    let response = RunnerResponse.bash(id: "size-check", .success(bashResult))
+    let jsonSize = try JSONEncoder().encode(response).count
+    #expect(jsonSize > (1 << 14), "Test output must exceed 16KB to exercise the bug (got \(jsonSize) bytes)")
+
+    await memRunner.stubBash(pattern: "cat bigfile", result: bashResult)
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-large-output")
+
+    let result = try await remote.runBash(command: "cat bigfile", cwd: "/", timeout: nil)
+    #expect(result.exitCode == 0)
+    #expect(result.output == largeOutput)
+    #expect(result.output.count == largeOutput.count)
+  }
 }
