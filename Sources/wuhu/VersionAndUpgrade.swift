@@ -163,7 +163,11 @@ enum ExecutablePath {
     guard _NSGetExecutablePath(&buf, &size) == 0 else {
       throw UpgradeError.cannotResolveExePath
     }
-    return URL(fileURLWithPath: String(cString: buf)).resolvingSymlinksInPath().path
+    let pathString = buf.withUnsafeBytes { raw -> String in
+      let bytes = raw.prefix(while: { $0 != 0 })
+      return String(decoding: bytes, as: UTF8.self)
+    }
+    return URL(fileURLWithPath: pathString).resolvingSymlinksInPath().path
     #else
     throw UpgradeError.unsupportedPlatform
     #endif
