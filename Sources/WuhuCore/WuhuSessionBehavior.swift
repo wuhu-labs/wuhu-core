@@ -572,7 +572,7 @@ private func makeRequestOptions(model: Model, settings: SessionSettingsSnapshot,
     requestOptions.reasoningEffort = .low
   }
   if model.provider == .anthropic {
-    requestOptions.anthropicPromptCaching = .init(mode: .automatic)
+    requestOptions.anthropicPromptCaching = .init(mode: .explicitBreakpoints)
     requestOptions.maxTokens = requestOptions.maxTokens ?? 4096
   }
   return requestOptions
