@@ -60,7 +60,7 @@ jobs:
             release-${{ runner.os }}-spm-
 
       - name: Build release
-        run: swift build -c release --product wuhu
+        run: swift build -c release --product wuhu --static-swift-stdlib
 
       - name: Strip & package
         run: |
