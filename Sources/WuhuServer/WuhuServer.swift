@@ -1,8 +1,10 @@
 import Foundation
 import Hummingbird
 import HummingbirdCore
+import HummingbirdWebSocket
 import Logging
 import NIOCore
+import NIOWebSocket
 import WuhuAPI
 import WuhuCore
 
@@ -57,6 +59,12 @@ public struct WuhuServer: Sendable {
     // Runner registry — connect to configured remote runners
     let runnerRegistry = RunnerRegistry()
     let logger = Logger(label: "WuhuServer")
+
+    // Declare configured runner names so they always appear in list_runners
+    if let runners = config.runners, !runners.isEmpty {
+      await runnerRegistry.declareConfigured(runners.map(\.name))
+    }
+
     // Runner tasks are retained to keep the connections alive for the server lifetime.
     // They auto-cancel when the process exits.
     var _runnerTasks: [Task<Void, Never>] = []
@@ -532,12 +540,27 @@ public struct WuhuServer: Sendable {
       )
     }
 
+    // MARK: - Runners
+
+    router.get("v1/runners") { _, _ async throws -> [WuhuRunnerInfo] in
+      let runners = await runnerRegistry.listAll()
+      return runners.map { WuhuRunnerInfo(name: $0.name, source: $0.source.rawValue, isConnected: $0.isConnected) }
+    }
+
+    // Build WebSocket router for incoming runner connections
+    let wsRouter = WuhuRunnerAcceptor.wsRouter(registry: runnerRegistry, logger: logger)
+    let wsConfig = WebSocketServerConfiguration(
+      maxFrameSize: 1 << 24, // 16 MB — must match the runner setting
+    )
+
     let port = config.port ?? 5530
     let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
 
     let app = Application(
       router: router,
+      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
+      logger: logger,
     )
     try await app.runService()
 

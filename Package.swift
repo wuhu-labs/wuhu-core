@@ -94,6 +94,7 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "Hummingbird", package: "hummingbird"),
+        .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "HummingbirdWSClient", package: "hummingbird-websocket"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
