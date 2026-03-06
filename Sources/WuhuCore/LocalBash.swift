@@ -88,29 +88,58 @@ public enum LocalBash {
       let output = String(decoding: data, as: UTF8.self)
 
       // On Linux, Process.terminationStatus traps (SIGILL) if Foundation's
-      // internal dispatch source hasn't noticed the process exit yet
-      // (isRunning still returns true). This happens when the dispatch source
-      // misses fast exits or after we kill the process ourselves. Fall back
-      // to waitpid(2) to get the real exit status from the kernel.
+      // internal dispatch source hasn't fully processed the exit. This is a
+      // TOCTOU race: even checking isRunning first is not safe — isRunning
+      // can return false while the internal state needed by terminationStatus
+      // is still inconsistent.
+      //
+      // Strategy: try waitpid(WNOHANG) first. If the child hasn't been reaped
+      // yet by Foundation's dispatch source, we get the status directly. If
+      // Foundation already reaped it (waitpid returns -1/ECHILD or 0), we
+      // know the dispatch source has processed the exit, so terminationStatus
+      // is safe to read.
       let exitCode: Int32
-      if process.isRunning {
+      #if os(Linux)
         var status: Int32 = 0
         let reaped = waitpid(pid, &status, WNOHANG)
         if reaped > 0 {
+          // We reaped it ourselves — extract the exit code.
           if (status & 0x7F) == 0 {
-            // Normal exit: extract exit code.
             exitCode = (status >> 8) & 0xFF
           } else {
-            // Killed by signal: return negated signal number.
             exitCode = -Int32(status & 0x7F)
           }
+        } else if reaped == -1 {
+          // ECHILD: Foundation already reaped this child. Its dispatch source
+          // has processed the termination, so terminationStatus is safe.
+          // But guard with process.isRunning just in case — if still true,
+          // use a fallback code rather than risk SIGILL.
+          if !process.isRunning {
+            exitCode = process.terminationStatus
+          } else {
+            exitCode = terminated ? -1 : (timedOut ? -1 : 0)
+          }
         } else {
-          // Already reaped or no child; use a conventional failure code.
-          exitCode = terminated ? -1 : (timedOut ? -1 : 0)
+          // reaped == 0: child still running (shouldn't happen since our
+          // polling loop exited). Wait briefly then retry.
+          try? await Task.sleep(nanoseconds: 50_000_000)
+          var status2: Int32 = 0
+          let reaped2 = waitpid(pid, &status2, WNOHANG)
+          if reaped2 > 0 {
+            if (status2 & 0x7F) == 0 {
+              exitCode = (status2 >> 8) & 0xFF
+            } else {
+              exitCode = -Int32(status2 & 0x7F)
+            }
+          } else if !process.isRunning {
+            exitCode = process.terminationStatus
+          } else {
+            exitCode = terminated ? -1 : (timedOut ? -1 : 0)
+          }
         }
-      } else {
+      #else
         exitCode = process.terminationStatus
-      }
+      #endif
       return BashResult(exitCode: exitCode, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
     #else
       throw PiAIError.unsupported("bash is not supported on this platform")
