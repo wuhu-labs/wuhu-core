@@ -18,15 +18,15 @@ enum WuhuVersion {
   /// Platform triple for asset matching, e.g. "linux-x86_64", "macos-arm64".
   static var platform: String {
     #if os(Linux) && arch(x86_64)
-    return "linux-x86_64"
+      return "linux-x86_64"
     #elseif os(Linux) && arch(arm64)
-    return "linux-arm64"
+      return "linux-arm64"
     #elseif os(macOS) && arch(arm64)
-    return "macos-arm64"
+      return "macos-arm64"
     #elseif os(macOS) && arch(x86_64)
-    return "macos-x86_64"
+      return "macos-x86_64"
     #else
-    return "unknown"
+      return "unknown"
     #endif
   }
 }

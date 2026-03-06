@@ -54,11 +54,10 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     // Resolve latest version from GitHub Releases
     let http = AsyncHTTPClientTransport()
-    let release: GitHubRelease
-    if let requestedVersion = target {
-      release = try await fetchGitHubRelease(http: http, tag: requestedVersion)
+    let release: GitHubRelease = if let requestedVersion = target {
+      try await fetchGitHubRelease(http: http, tag: requestedVersion)
     } else {
-      release = try await fetchLatestGitHubRelease(http: http)
+      try await fetchLatestGitHubRelease(http: http)
     }
 
     let targetVersion = release.tagName
@@ -72,7 +71,7 @@ struct UpgradeCommand: AsyncParsableCommand {
       return
     }
 
-    if current == targetVersion && target == nil {
+    if current == targetVersion, target == nil {
       print("Already up to date: wuhu \(current)")
       return
     }
@@ -81,8 +80,11 @@ struct UpgradeCommand: AsyncParsableCommand {
     let platform = WuhuVersion.platform
     let assetName = "wuhu-\(platform).tar.gz"
     guard let asset = release.assets.first(where: { $0.name == assetName }) else {
-      throw UpgradeError.noAsset(platform: platform, version: targetVersion,
-        available: release.assets.map(\.name))
+      throw UpgradeError.noAsset(
+        platform: platform,
+        version: targetVersion,
+        available: release.assets.map(\.name),
+      )
     }
 
     // Download
@@ -156,20 +158,20 @@ enum WuhuPaths {
 enum ExecutablePath {
   static func resolve() throws -> String {
     #if os(Linux)
-    return try FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe")
+      return try FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe")
     #elseif os(macOS)
-    var buf = [CChar](repeating: 0, count: 4096)
-    var size = UInt32(buf.count)
-    guard _NSGetExecutablePath(&buf, &size) == 0 else {
-      throw UpgradeError.cannotResolveExePath
-    }
-    let pathString = buf.withUnsafeBytes { raw -> String in
-      let bytes = raw.prefix(while: { $0 != 0 })
-      return String(decoding: bytes, as: UTF8.self)
-    }
-    return URL(fileURLWithPath: pathString).resolvingSymlinksInPath().path
+      var buf = [CChar](repeating: 0, count: 4096)
+      var size = UInt32(buf.count)
+      guard _NSGetExecutablePath(&buf, &size) == 0 else {
+        throw UpgradeError.cannotResolveExePath
+      }
+      let pathString = buf.withUnsafeBytes { raw -> String in
+        let bytes = raw.prefix(while: { $0 != 0 })
+        return String(decoding: bytes, as: UTF8.self)
+      }
+      return URL(fileURLWithPath: pathString).resolvingSymlinksInPath().path
     #else
-    throw UpgradeError.unsupportedPlatform
+      throw UpgradeError.unsupportedPlatform
     #endif
   }
 }
@@ -216,16 +218,16 @@ private func fetchRelease(http: some HTTPClient, url: URL) async throws -> GitHu
 
 private func parseReleaseJSON(_ data: Data) throws -> GitHubRelease {
   guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-    let tagName = json["tag_name"] as? String,
-    let assets = json["assets"] as? [[String: Any]]
+        let tagName = json["tag_name"] as? String,
+        let assets = json["assets"] as? [[String: Any]]
   else {
     throw UpgradeError.badResponse("Could not parse GitHub release JSON")
   }
 
   let parsed = assets.compactMap { a -> GitHubRelease.Asset? in
     guard let name = a["name"] as? String,
-      let url = a["browser_download_url"] as? String,
-      let size = a["size"] as? Int
+          let url = a["browser_download_url"] as? String,
+          let size = a["size"] as? Int
     else { return nil }
     return .init(name: name, browserDownloadUrl: url, size: size)
   }
