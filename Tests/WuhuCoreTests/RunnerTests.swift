@@ -646,8 +646,14 @@ struct RunnerIDWireEncodingTests {
 // MARK: - RunnerRegistry Tests
 
 struct RunnerRegistryTests {
-  @Test func registryAlwaysHasLocal() async {
+  @Test func registryLocalNotPresentByDefault() async {
     let registry = RunnerRegistry()
+    let local = await registry.get(.local)
+    #expect(local == nil)
+  }
+
+  @Test func registryLocalAvailableWhenRegistered() async {
+    let registry = RunnerRegistry(runners: [LocalRunner()])
     let local = await registry.get(.local)
     #expect(local != nil)
     #expect(local?.id == .local)
@@ -674,10 +680,12 @@ struct RunnerRegistryTests {
     #expect(!stillAvailable)
   }
 
-  @Test func registryCannotRemoveLocal() async {
-    let registry = RunnerRegistry()
-    await registry.remove(.local)
+  @Test func registryCanRemoveLocal() async {
+    let registry = RunnerRegistry(runners: [LocalRunner()])
     #expect(await registry.isAvailable(.local))
+    await registry.remove(.local)
+    let stillAvailable = await registry.isAvailable(.local)
+    #expect(!stillAvailable)
   }
 
   @Test func registryListNames() async {
@@ -688,8 +696,18 @@ struct RunnerRegistryTests {
     await registry.register(mem2)
 
     let names = await registry.listRunnerNames()
-    #expect(names.contains("local"))
+    #expect(!names.contains("local")) // local not registered
     #expect(names.contains("alpha"))
     #expect(names.contains("beta"))
+  }
+
+  @Test func registryListNamesWithLocal() async {
+    let registry = RunnerRegistry(runners: [LocalRunner()])
+    let mem1 = InMemoryRunner(id: .remote(name: "alpha"))
+    await registry.register(mem1)
+
+    let names = await registry.listRunnerNames()
+    #expect(names.contains("local"))
+    #expect(names.contains("alpha"))
   }
 }

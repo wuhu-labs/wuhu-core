@@ -1,161 +1,152 @@
 import Foundation
 import PiAI
+import Subprocess
 
-/// Shared bash execution logic used by `LocalRunner` and tool implementations.
-/// Extracted to avoid duplication between runner and tool layers.
+#if canImport(System)
+  @preconcurrency import System
+#else
+  @preconcurrency import SystemPackage
+#endif
+
+/// Shared bash execution logic used by the runner process.
+/// Uses swift-subprocess for reliable process management:
+/// - Process groups for clean tree cleanup (`processGroupID = 0`)
+/// - pidfd/kqueue-based exit monitoring (no polling)
+/// - Structured teardown sequences on cancellation
 public enum LocalBash {
   public static func run(command: String, cwd: String, timeoutSeconds: TimeInterval?) async throws -> BashResult {
-    #if os(macOS) || os(Linux)
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/bin/bash")
-      process.arguments = ["-lc", command]
-      process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-      process.standardInput = FileHandle.nullDevice
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
+    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
 
-      // Run tools in a non-interactive environment. Some CLIs (notably `gh`) will attempt to prompt
-      // via the controlling TTY, which can hang an agent loop indefinitely.
-      var env = ProcessInfo.processInfo.environment
-      env["CI"] = "1"
-      env["TERM"] = env["TERM"]?.nilIfEmpty() ?? "dumb"
-      env["PAGER"] = "cat"
-      env["GIT_PAGER"] = "cat"
-      env["GH_PAGER"] = "cat"
-      env["GIT_TERMINAL_PROMPT"] = "0"
-      env["GH_PROMPT_DISABLED"] = "1"
-      process.environment = env
+    let outputFD = try FileDescriptor.open(
+      FilePath(outputURL.path),
+      .writeOnly,
+      options: [.create, .truncate],
+      permissions: [.ownerReadWrite, .groupRead, .otherRead],
+    )
 
-      let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
-      FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-      let outputHandle = try FileHandle(forWritingTo: outputURL)
-      process.standardOutput = outputHandle
-      process.standardError = outputHandle
+    var _platformOptions = PlatformOptions()
+    // Put child in its own process group so we can kill the entire tree
+    _platformOptions.processGroupID = 0
+    // Structured teardown on task cancellation: SIGTERM → 3s → SIGKILL
+    _platformOptions.teardownSequence = [
+      .send(signal: .terminate, allowedDurationToNextStep: .seconds(3)),
+    ]
+    let platformOptions = _platformOptions
 
-      try process.run()
-      let pid = process.processIdentifier
+    // Build environment: inherit parent env with overrides for non-interactive operation
+    let currentTERM = ProcessInfo.processInfo.environment["TERM"] ?? "dumb"
+    let env: Environment = .inherit.updating([
+      "CI": "1",
+      "TERM": currentTERM,
+      "PAGER": "cat",
+      "GIT_PAGER": "cat",
+      "GH_PAGER": "cat",
+      "GIT_TERMINAL_PROMPT": "0",
+      "GH_PROMPT_DISABLED": "1",
+    ])
 
-      let start = Date()
-      var timedOut = false
-      var terminated = false
-      do {
-        while process.isRunning {
-          if Task.isCancelled {
-            terminated = true
-            process.terminate()
-            break
-          }
-          if let timeoutSeconds, timeoutSeconds > 0, Date().timeIntervalSince(start) > timeoutSeconds {
-            timedOut = true
-            process.terminate()
-            break
-          }
-          try await Task.sleep(nanoseconds: 50_000_000)
-
-          // Fallback: Foundation's Process.isRunning relies on a dispatch source
-          // that can miss fast exits in rare cases. If the process no longer exists
-          // at the OS level, break out instead of polling forever.
-          if process.isRunning, !processExistsAtOSLevel(pid) {
-            break
-          }
-        }
-      } catch is CancellationError {
-        terminated = true
-        process.terminate()
-      }
-
-      // Async-safe wait: avoid process.waitUntilExit() which is a synchronous
-      // blocking call that can hang when Foundation's dispatch source misses
-      // the process exit notification.
-      if terminated || timedOut {
-        // Give the process up to 3s to exit after SIGTERM.
-        let sigtermDeadline = Date().addingTimeInterval(3)
-        while process.isRunning, Date() < sigtermDeadline {
-          try? await Task.sleep(nanoseconds: 100_000_000)
+    // When there's a timeout, we race the subprocess against a timer.
+    // When the parent task is cancelled, the teardownSequence handles cleanup.
+    if let timeoutSeconds, timeoutSeconds > 0 {
+      return try await withThrowingTaskGroup(of: BashRunOutcome.self, returning: BashResult.self) { group in
+        // Task 1: Run the subprocess
+        group.addTask {
+          let result = try await Subprocess.run(
+            .path("/bin/bash"),
+            arguments: ["-lc", command],
+            environment: env,
+            workingDirectory: FilePath(cwd),
+            platformOptions: platformOptions,
+            input: .none,
+            output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
+            error: .discarded,
+          )
+          return .completed(result.terminationStatus)
         }
 
-        // Escalate to SIGKILL if the process is still alive.
-        if process.isRunning {
-          kill(pid, SIGKILL)
-          let sigkillDeadline = Date().addingTimeInterval(2)
-          while process.isRunning, Date() < sigkillDeadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-          }
+        // Task 2: Timeout timer
+        group.addTask {
+          let ns = UInt64(timeoutSeconds * 1_000_000_000)
+          try await Task.sleep(nanoseconds: ns)
+          return .timedOut
+        }
+
+        // Take the first result
+        let first = try await group.next()!
+        // Cancel the other task
+        group.cancelAll()
+
+        switch first {
+        case let .completed(status):
+          return makeResult(terminationStatus: status, outputURL: outputURL, timedOut: false, terminated: false)
+        case .timedOut:
+          // The subprocess task gets cancelled → teardownSequence runs
+          // Wait for the subprocess task to finish cleanup
+          _ = try? await group.next()
+          return makeResult(terminationStatus: .exited(-1), outputURL: outputURL, timedOut: true, terminated: false)
         }
       }
-
-      try? outputHandle.close()
-
-      let data = (try? Data(contentsOf: outputURL)) ?? Data()
-      let output = String(decoding: data, as: UTF8.self)
-
-      // On Linux, Process.terminationStatus traps (SIGILL) if Foundation's
-      // internal dispatch source hasn't fully processed the exit. This is a
-      // TOCTOU race: even checking isRunning first is not safe — isRunning
-      // can return false while the internal state needed by terminationStatus
-      // is still inconsistent.
-      //
-      // Strategy: try waitpid(WNOHANG) first. If the child hasn't been reaped
-      // yet by Foundation's dispatch source, we get the status directly. If
-      // Foundation already reaped it (waitpid returns -1/ECHILD or 0), we
-      // know the dispatch source has processed the exit, so terminationStatus
-      // is safe to read.
-      let exitCode: Int32
-      #if os(Linux)
-        var status: Int32 = 0
-        let reaped = waitpid(pid, &status, WNOHANG)
-        if reaped > 0 {
-          // We reaped it ourselves — extract the exit code.
-          if (status & 0x7F) == 0 {
-            exitCode = (status >> 8) & 0xFF
-          } else {
-            exitCode = -Int32(status & 0x7F)
-          }
-        } else if reaped == -1 {
-          // ECHILD: Foundation already reaped this child. Its dispatch source
-          // has processed the termination, so terminationStatus is safe.
-          // But guard with process.isRunning just in case — if still true,
-          // use a fallback code rather than risk SIGILL.
-          if !process.isRunning {
-            exitCode = process.terminationStatus
-          } else {
-            exitCode = terminated ? -1 : (timedOut ? -1 : 0)
-          }
-        } else {
-          // reaped == 0: child still running (shouldn't happen since our
-          // polling loop exited). Wait briefly then retry.
-          try? await Task.sleep(nanoseconds: 50_000_000)
-          var status2: Int32 = 0
-          let reaped2 = waitpid(pid, &status2, WNOHANG)
-          if reaped2 > 0 {
-            if (status2 & 0x7F) == 0 {
-              exitCode = (status2 >> 8) & 0xFF
-            } else {
-              exitCode = -Int32(status2 & 0x7F)
-            }
-          } else if !process.isRunning {
-            exitCode = process.terminationStatus
-          } else {
-            exitCode = terminated ? -1 : (timedOut ? -1 : 0)
-          }
-        }
-      #else
-        exitCode = process.terminationStatus
-      #endif
-      return BashResult(exitCode: exitCode, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
-    #else
-      throw PiAIError.unsupported("bash is not supported on this platform")
-    #endif
+    } else {
+      // No timeout: simple collected run. Task cancellation triggers teardownSequence.
+      let result = try await Subprocess.run(
+        .path("/bin/bash"),
+        arguments: ["-lc", command],
+        environment: env,
+        workingDirectory: FilePath(cwd),
+        platformOptions: platformOptions,
+        input: .none,
+        output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
+        error: .discarded,
+      )
+      return makeResult(
+        terminationStatus: result.terminationStatus,
+        outputURL: outputURL,
+        timedOut: false,
+        terminated: false,
+      )
+    }
   }
-}
 
-/// Check whether a process still exists at the OS level, bypassing Foundation's
-/// internal bookkeeping. Returns false when the PID no longer refers to a live
-/// process (ESRCH).
-private func processExistsAtOSLevel(_ pid: Int32) -> Bool {
-  kill(pid, 0) != -1 || errno != ESRCH
-}
+  /// Kill a process group by PID. Used by the reaper service for remote cancel dispatch.
+  public static func killProcessGroup(pgid: Int32) {
+    // Send SIGTERM to the process group
+    kill(-pgid, SIGTERM)
+    // Schedule SIGKILL as fallback after a short delay
+    Task {
+      try? await Task.sleep(nanoseconds: 3_000_000_000)
+      kill(-pgid, SIGKILL)
+    }
+  }
 
-private extension String {
-  func nilIfEmpty() -> String? {
-    isEmpty ? nil : self
+  // MARK: - Private
+
+  private enum BashRunOutcome: Sendable {
+    case completed(TerminationStatus)
+    case timedOut
+  }
+
+  private static func makeResult(
+    terminationStatus: TerminationStatus,
+    outputURL: URL,
+    timedOut: Bool,
+    terminated: Bool,
+  ) -> BashResult {
+    let data = (try? Data(contentsOf: outputURL)) ?? Data()
+    let output = String(decoding: data, as: UTF8.self)
+
+    let exitCode: Int32 = switch terminationStatus {
+    case let .exited(code): code
+    case let .unhandledException(sig): -sig
+    }
+
+    return BashResult(
+      exitCode: exitCode,
+      output: output,
+      timedOut: timedOut,
+      terminated: terminated,
+      fullOutputPath: outputURL.path,
+    )
   }
 }

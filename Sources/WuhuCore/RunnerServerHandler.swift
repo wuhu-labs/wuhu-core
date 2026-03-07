@@ -117,6 +117,11 @@ public actor RunnerServerHandler {
       } catch {
         return (.materialize(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
       }
+
+    case let .cancel(id, p):
+      // Kill the process group on this runner
+      LocalBash.killProcessGroup(pgid: p.processGroupID)
+      return (.cancel(id: id, .success(CancelResponse(cancelled: true))), nil)
     }
   }
 

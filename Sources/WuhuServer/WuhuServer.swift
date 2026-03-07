@@ -3,6 +3,8 @@ import Hummingbird
 import HummingbirdCore
 import HummingbirdWebSocket
 import Logging
+import Mux
+import MuxSocket
 import NIOCore
 import WuhuAPI
 import WuhuCore
@@ -78,6 +80,14 @@ public struct WuhuServer: Sendable {
         logger: logger,
       )
     }
+
+    // Spawn local runner as a child process over UDS
+    let localRunnerSpawner = WuhuLocalRunnerSpawner(
+      socketPath: config.localRunnerSocket,
+      registry: runnerRegistry,
+      logger: logger,
+    )
+    try await localRunnerSpawner.start()
 
     // Start runner connection tasks for configured outbound runners
     let port = config.port ?? 5530
@@ -572,7 +582,8 @@ public struct WuhuServer: Sendable {
     )
     try await app.runService()
 
-    // Cancel runner connection tasks on shutdown
+    // Shutdown: stop local runner and cancel remote runner connections
+    await localRunnerSpawner.stop()
     for task in _runnerTasks {
       task.cancel()
     }

@@ -17,6 +17,7 @@ public enum MuxRunnerOp: UInt8, Sendable {
   case find = 8
   case grep = 9
   case materialize = 10
+  case cancel = 11
 }
 
 // MARK: - Buffered Stream Reader

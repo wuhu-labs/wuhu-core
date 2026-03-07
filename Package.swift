@@ -32,7 +32,8 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.3.2"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
-    .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.2.0"),
+    .package(url: "https://github.com/swiftlang/swift-subprocess.git", exact: "0.1.0"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     .package(url: "https://github.com/swiftlang/swift-testing.git", revision: "48a471ab313e858258ab0b9b0bf2cea55a50cefb"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
@@ -79,6 +80,7 @@ let package = Package(
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "Subprocess", package: "swift-subprocess"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "GRDB", package: "GRDB.swift"),
         .product(name: "Crypto", package: "swift-crypto"),
@@ -100,6 +102,7 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxSocket", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
@@ -115,6 +118,7 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxSocket", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
@@ -148,6 +152,7 @@ let package = Package(
         "WuhuCore",
         "WuhuCoreClient",
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxSocket", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),

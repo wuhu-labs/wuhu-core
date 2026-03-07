@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 
@@ -9,28 +8,32 @@ public typealias CwdProvider = @Sendable () async throws -> String?
 public extension WuhuTools {
   static func codingAgentTools(
     cwdProvider: @escaping CwdProvider,
-    mountResolver: MountResolver? = nil,
+    mountResolver: @escaping MountResolver,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
-      readTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      writeTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      editTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      lsTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      findTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      grepTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
-      bashTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      readTool(mountResolver: mountResolver),
+      writeTool(mountResolver: mountResolver),
+      editTool(mountResolver: mountResolver),
+      lsTool(mountResolver: mountResolver),
+      findTool(mountResolver: mountResolver),
+      grepTool(mountResolver: mountResolver),
+      bashTool(mountResolver: mountResolver),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
     if let braveSearchAPIKey, !braveSearchAPIKey.isEmpty {
       tools.append(webSearchTool(apiKey: braveSearchAPIKey))
     }
-    if let mountResolver {
-      tools.append(copyTool(mountResolver: mountResolver))
-    }
+    tools.append(copyTool(mountResolver: mountResolver))
     return tools
+  }
+
+  /// Create a simple mount resolver for tests.
+  /// Wraps a runner + cwd — all tool calls resolve to this runner.
+  static func testMountResolver(cwd: String, runner: any Runner = LocalRunner()) -> MountResolver {
+    { _ in ResolvedMount(runner: runner, cwd: cwd) }
   }
 }
 
@@ -42,56 +45,28 @@ private func requireCwd(_ provider: CwdProvider) async throws -> String {
   return cwd
 }
 
-/// Resolve cwd for a filesystem tool that accepts a path argument.
-///
-/// - If the path is absolute (starts with `/` or `~`), it is expanded and returned directly
-///   without requiring a cwd.
-/// - If the path is relative, the cwd is required and the path is resolved against it.
-private func resolvePathOrRequireCwd(_ path: String?, defaultPath: String = ".", provider: CwdProvider) async throws -> (cwd: String, resolvedPath: String) {
-  let raw = (path ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
-  let expanded = ToolPath.expand(raw)
-
-  if expanded.hasPrefix("/") {
-    // Absolute path — cwd not required. Use "/" as a dummy cwd for ToolPath.resolveToCwd compatibility.
-    let cwdOrFallback = await (try? provider()) ?? "/"
-    return (cwd: cwdOrFallback, resolvedPath: expanded)
-  }
-
-  // Relative path — cwd is required.
-  guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
-  let resolved = ToolPath.resolveToCwd(raw, cwd: cwd)
-  return (cwd: cwd, resolvedPath: resolved)
-}
-
-/// Resolve a path to an absolute path through the mount resolver (if available) or cwdProvider.
+/// Resolve a path to an absolute path through the mount resolver.
 /// Returns the resolved mount (with runner) and absolute path.
 private func resolvePathViaMountOrCwd(
   _ rawPath: String?,
   defaultPath: String = ".",
-  cwdProvider: CwdProvider,
-  mountResolver: MountResolver?,
-) async throws -> (resolved: ResolvedMount?, absolutePath: String) {
+  mountResolver: MountResolver,
+) async throws -> (resolved: ResolvedMount, absolutePath: String) {
   let raw = (rawPath ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
   let expanded = ToolPath.expand(raw)
 
-  if let mountResolver {
-    let resolved = try await mountResolver(nil)
-    let absPath: String = if expanded.hasPrefix("/") {
-      expanded
-    } else {
-      ToolPath.resolveToCwd(raw, cwd: resolved.cwd)
-    }
-    return (resolved: resolved, absolutePath: absPath)
+  let resolved = try await mountResolver(nil)
+  let absPath: String = if expanded.hasPrefix("/") {
+    expanded
+  } else {
+    ToolPath.resolveToCwd(raw, cwd: resolved.cwd)
   }
-
-  // No mount resolver — use cwdProvider for local-only path resolution
-  let (_, resolvedPath) = try await resolvePathOrRequireCwd(rawPath, defaultPath: defaultPath, provider: cwdProvider)
-  return (resolved: nil, absolutePath: resolvedPath)
+  return (resolved: resolved, absolutePath: absPath)
 }
 
 // MARK: - read
 
-private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func readTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
   // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
   // See https://github.com/wuhu-labs/wuhu/issues/12
@@ -156,25 +131,8 @@ private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
   return AnyAgentTool(tool: tool, label: "read") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
 
-    let (mount, resolved) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-    let runner = mount?.runner
-
-    /// Helper to read string via runner or fileIO
-    func readStringContent(path: String) async throws -> String {
-      if let runner {
-        return try await runner.readString(path: path, encoding: .utf8)
-      }
-      @Dependency(\.fileIO) var fileIO
-      return try fileIO.readString(path: path, encoding: .utf8)
-    }
-
-    func readDataContent(path: String) async throws -> Data {
-      if let runner {
-        return try await runner.readData(path: path)
-      }
-      @Dependency(\.fileIO) var fileIO
-      return try fileIO.readData(path: path)
-    }
+    let (mount, resolved) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    let runner = mount.runner
 
     // Check if the file is an image — return as image content block.
     let ext = (resolved as NSString).pathExtension.lowercased()
@@ -182,7 +140,7 @@ private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
       guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
         throw ToolError.message("Unsupported image format: \(ext)")
       }
-      let fileData = try await readDataContent(path: resolved)
+      let fileData = try await runner.readData(path: resolved)
       guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
         throw ToolError.message(
           "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
@@ -195,7 +153,7 @@ private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
       )
     }
 
-    let raw = try await readStringContent(path: resolved)
+    let raw = try await runner.readString(path: resolved, encoding: .utf8)
     let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     let totalLines = allLines.count
@@ -263,7 +221,7 @@ private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
 // MARK: - write
 
-private func writeTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func writeTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var content: String
@@ -294,16 +252,8 @@ private func writeTool(cwdProvider: @escaping CwdProvider, mountResolver: MountR
 
   return AnyAgentTool(tool: tool, label: "write") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-
-    if let runner = mount?.runner {
-      try await runner.writeString(path: abs, content: params.content, createIntermediateDirectories: true, encoding: .utf8)
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      let dir = (abs as NSString).deletingLastPathComponent
-      try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
-      try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
-    }
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    try await mount.runner.writeString(path: abs, content: params.content, createIntermediateDirectories: true, encoding: .utf8)
 
     let bytes = params.content.utf8.count
     return AgentToolResult(content: [.text("Successfully wrote \(bytes) bytes to \(params.path)")], details: .object([:]))
@@ -312,7 +262,7 @@ private func writeTool(cwdProvider: @escaping CwdProvider, mountResolver: MountR
 
 // MARK: - edit
 
-private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func editTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String
     var oldText: String
@@ -346,20 +296,11 @@ private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
   return AnyAgentTool(tool: tool, label: "edit") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
-    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-    let runner = mount?.runner
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    let runner = mount.runner
 
     // Read via Data to preserve UTF-8 BOM (String(contentsOf:) may strip it).
-    let rawData: Data
-    if let runner {
-      rawData = try await runner.readData(path: abs)
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      guard fileIO.exists(path: abs) else {
-        throw ToolError.message("File not found: \(params.path)")
-      }
-      rawData = try fileIO.readData(path: abs)
-    }
+    let rawData = try await runner.readData(path: abs)
     let raw = String(decoding: rawData, as: UTF8.self)
     let (bom, contentNoBom) = stripBom(raw)
     let originalEnding = detectLineEnding(contentNoBom)
@@ -396,12 +337,7 @@ private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
     let firstChangedLine = 1 + baseContent[..<range.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).count - 1
     let final = bom + restoreLineEndings(newContent, ending: originalEnding)
-    if let runner {
-      try await runner.writeString(path: abs, content: final, createIntermediateDirectories: false, encoding: .utf8)
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      try fileIO.writeString(path: abs, content: final, atomically: true, encoding: .utf8)
-    }
+    try await runner.writeString(path: abs, content: final, createIntermediateDirectories: false, encoding: .utf8)
 
     let diff = formatSimpleDiff(oldText: normalizedOldText, newText: normalizedNewText, line: firstChangedLine)
     return AgentToolResult(
@@ -416,7 +352,7 @@ private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
 // MARK: - ls
 
-private func lsTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func lsTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var path: String?
     var limit: Int?
@@ -448,27 +384,8 @@ private func lsTool(cwdProvider: @escaping CwdProvider, mountResolver: MountReso
   return AnyAgentTool(tool: tool, label: "ls") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 500)
-    let (mount, dirPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-
-    let dirEntries: [DirectoryEntry]
-    if let runner = mount?.runner {
-      dirEntries = try await runner.listDirectory(path: dirPath)
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
-      guard dirExists else {
-        throw ToolError.message("Path not found: \(dirPath)")
-      }
-      guard isDir else {
-        throw ToolError.message("Not a directory: \(dirPath)")
-      }
-      let entries = try fileIO.contentsOfDirectory(atPath: dirPath)
-      dirEntries = entries.map { name in
-        let full = (dirPath as NSString).appendingPathComponent(name)
-        let (_, isEntryDir) = fileIO.existsAndIsDirectory(path: full)
-        return DirectoryEntry(name: name, isDirectory: isEntryDir)
-      }
-    }
+    let (mount, dirPath) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    let dirEntries = try await mount.runner.listDirectory(path: dirPath)
 
     let sorted = dirEntries.sorted { $0.name.lowercased() < $1.name.lowercased() }
 
@@ -517,7 +434,7 @@ private func lsTool(cwdProvider: @escaping CwdProvider, mountResolver: MountReso
 
 // MARK: - find
 
-private func findTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func findTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -552,43 +469,8 @@ private func findTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
   return AnyAgentTool(tool: tool, label: "find") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
     let effectiveLimit = max(1, params.limit ?? 1000)
-    let (mount, searchRoot) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-
-    let findResult: FindResult
-    if let runner = mount?.runner {
-      findResult = try await runner.find(params: FindParams(root: searchRoot, pattern: params.pattern, limit: effectiveLimit))
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
-      guard dirExists else {
-        throw ToolError.message("Path not found: \(searchRoot)")
-      }
-      guard isDir else {
-        throw ToolError.message("Not a directory: \(searchRoot)")
-      }
-
-      let ignore = GitIgnore(searchRoot: searchRoot, fileIO: fileIO)
-
-      let matches = try walkFiles(
-        root: searchRoot,
-        fileIO: fileIO,
-        shouldSkipDescendants: { rel, abs, isDir in
-          guard isDir else { return false }
-          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
-          return ignore.isIgnored(absolutePath: abs, isDirectory: true)
-        },
-        include: { rel, abs, isDir in
-          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
-          if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
-          if isDir { return false }
-          return ToolGlob.matches(pattern: params.pattern, path: rel, anchored: true)
-        },
-      )
-
-      let sorted = matches.sorted { $0.lowercased() < $1.lowercased() }
-      let limited = Array(sorted.prefix(effectiveLimit))
-      findResult = FindResult(entries: limited.map { FindEntry(relativePath: $0) }, totalBeforeLimit: sorted.count)
-    }
+    let (mount, searchRoot) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    let findResult = try await mount.runner.find(params: FindParams(root: searchRoot, pattern: params.pattern, limit: effectiveLimit))
 
     let limited = findResult.entries.map(\.relativePath)
 
@@ -622,7 +504,7 @@ private func findTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
 // MARK: - grep
 
-private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var pattern: String
     var path: String?
@@ -681,113 +563,16 @@ private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
     let ignoreCase = params.ignoreCase ?? false
     let literal = params.literal ?? false
 
-    let (mount, searchPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
-
-    let grepResult: GrepResult
-    if let runner = mount?.runner {
-      grepResult = try await runner.grep(params: GrepParams(
-        root: searchPath,
-        pattern: params.pattern,
-        glob: params.glob,
-        ignoreCase: ignoreCase,
-        literal: literal,
-        contextLines: contextLines,
-        limit: effectiveLimit,
-      ))
-    } else {
-      @Dependency(\.fileIO) var fileIO
-      let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
-      guard pathExists else {
-        throw ToolError.message("Path not found: \(searchPath)")
-      }
-
-      let rootForRelPaths = isDir ? searchPath : (searchPath as NSString).deletingLastPathComponent
-      let ignore = GitIgnore(searchRoot: rootForRelPaths, fileIO: fileIO)
-
-      let files: [String] = if isDir {
-        try walkFiles(
-          root: searchPath,
-          fileIO: fileIO,
-          shouldSkipDescendants: { rel, abs, isDir in
-            guard isDir else { return false }
-            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
-            return ignore.isIgnored(absolutePath: abs, isDirectory: true)
-          },
-          include: { rel, abs, isDir in
-            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
-            if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
-            if isDir { return false }
-            if let glob = params.glob {
-              return ToolGlob.matches(pattern: glob, path: rel, anchored: true)
-            }
-            return true
-          },
-        )
-        .map { URL(fileURLWithPath: searchPath).appendingPathComponent($0).path }
-      } else {
-        [searchPath]
-      }
-
-      var allMatches: [GrepMatch] = []
-      var matchCount = 0
-      var matchLimitReached = false
-      var linesTruncated = false
-
-      let regex: NSRegularExpression? = {
-        if literal { return nil }
-        let opts: NSRegularExpression.Options = ignoreCase ? [.caseInsensitive] : []
-        return try? NSRegularExpression(pattern: params.pattern, options: opts)
-      }()
-
-      for file in files {
-        if matchCount >= effectiveLimit { break }
-
-        let content: String
-        do {
-          content = try fileIO.readString(path: file, encoding: .utf8)
-        } catch {
-          continue
-        }
-
-        let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-
-        func matchesLine(_ line: String) -> Bool {
-          if literal {
-            if ignoreCase { return line.lowercased().contains(params.pattern.lowercased()) }
-            return line.contains(params.pattern)
-          }
-          guard let regex else { return false }
-          let ns = line as NSString
-          let range = NSRange(location: 0, length: ns.length)
-          return regex.firstMatch(in: line, options: [], range: range) != nil
-        }
-
-        for (idx, line) in lines.enumerated() {
-          if matchCount >= effectiveLimit {
-            matchLimitReached = true
-            break
-          }
-          if !matchesLine(line) { continue }
-          matchCount += 1
-
-          let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir))
-          let lineNumber = idx + 1
-
-          let start = max(1, lineNumber - contextLines)
-          let end = min(lines.count, lineNumber + contextLines)
-
-          for current in start ... end {
-            let rawLine = lines[current - 1]
-            let (trunc, wasTruncated) = ToolTruncation.truncateLine(rawLine)
-            if wasTruncated { linesTruncated = true }
-            allMatches.append(GrepMatch(file: rel, lineNumber: current, line: trunc, isContext: current != lineNumber))
-          }
-        }
-      }
-
-      grepResult = GrepResult(matches: allMatches, matchCount: matchCount, limitReached: matchLimitReached, linesTruncated: linesTruncated)
-    }
+    let (mount, searchPath) = try await resolvePathViaMountOrCwd(params.path, mountResolver: mountResolver)
+    let grepResult = try await mount.runner.grep(params: GrepParams(
+      root: searchPath,
+      pattern: params.pattern,
+      glob: params.glob,
+      ignoreCase: ignoreCase,
+      literal: literal,
+      contextLines: contextLines,
+      limit: effectiveLimit,
+    ))
 
     if grepResult.matchCount == 0 {
       return AgentToolResult(content: [.text("No matches found")], details: .object([:]))
@@ -833,7 +618,7 @@ private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 
 // MARK: - bash
 
-private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -848,13 +633,11 @@ private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
     }
   }
 
-  var properties: [String: JSONValue] = [
+  let properties: [String: JSONValue] = [
     "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
     "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
+    "mount": .object(["type": .string("string"), "description": .string("Mount name to execute on (optional, defaults to primary mount)")]),
   ]
-  if mountResolver != nil {
-    properties["mount"] = .object(["type": .string("string"), "description": .string("Mount name to execute on (optional, defaults to primary mount)")])
-  }
 
   let schema: JSONValue = .object([
     "type": .string("object"),
@@ -872,39 +655,9 @@ private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
   return AnyAgentTool(tool: tool, label: "bash") { _, args in
     let params = try Params.parse(toolName: tool.name, args: args)
 
-    // If a mount is specified and we have a mount resolver, use it
-    if let mountResolver, params.mount != nil {
-      let resolved = try await mountResolver(params.mount)
-      let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
-      return try formatBashResult(run)
-    }
-
-    // If no mount specified but we have a resolver, resolve primary mount (may be remote)
-    if let mountResolver {
-      do {
-        let resolved = try await mountResolver(nil)
-        if resolved.mount?.runnerID != .local {
-          // Remote primary mount — execute through runner
-          let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
-          return try formatBashResult(run)
-        }
-      } catch {
-        // Fall through to local execution if mount resolution fails
-      }
-    }
-
-    // Local execution path (original behavior)
-    let cwd = try await requireCwd(cwdProvider)
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
-      throw ToolError.message("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
-    }
-
-    let run = try await LocalBash.run(
-      command: params.command,
-      cwd: cwd,
-      timeoutSeconds: params.timeout,
-    )
+    // All bash execution goes through a runner (local or remote) via mount resolver.
+    let resolved = try await mountResolver(params.mount)
+    let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
     return try formatBashResult(run)
   }
 }

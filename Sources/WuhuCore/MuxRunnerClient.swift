@@ -94,6 +94,11 @@ public actor MuxRunnerClient: Runner {
     try await rpc(.materialize, request: params)
   }
 
+  /// Send a cancel request to kill a process group on the runner.
+  public func cancel(processGroupID: Int32) async throws -> CancelResponse {
+    try await rpc(.cancel, request: CancelRequest(processGroupID: processGroupID))
+  }
+
   // MARK: - Generic RPC helper
 
   /// Open a stream, send a request, read a typed response, close.

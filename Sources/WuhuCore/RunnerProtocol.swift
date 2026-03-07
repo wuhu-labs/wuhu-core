@@ -94,6 +94,27 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
 
 // FindParams and GrepParams are defined in Runner.swift.
 
+// MARK: - Cancel request
+
+/// Request to cancel a running bash process on the runner.
+public struct CancelRequest: Sendable, Hashable, Codable {
+  /// Identifies what to cancel. Currently this is the process group ID
+  /// of the bash process, sent by the server when dispatching cancel.
+  public var processGroupID: Int32
+
+  public init(processGroupID: Int32) {
+    self.processGroupID = processGroupID
+  }
+}
+
+/// Response to a cancel request (acknowledgement).
+public struct CancelResponse: Sendable, Hashable, Codable {
+  public var cancelled: Bool
+  public init(cancelled: Bool) {
+    self.cancelled = cancelled
+  }
+}
+
 // MARK: - Response payloads
 
 public struct HelloResponse: Sendable, Hashable, Codable {
@@ -194,6 +215,7 @@ public enum RunnerRequest: Sendable, Hashable {
   case find(id: String, FindParams)
   case grep(id: String, GrepParams)
   case materialize(id: String, MaterializeRequest)
+  case cancel(id: String, CancelRequest)
 }
 
 /// A runner response, used internally by `RunnerServerHandler` for dispatch.
@@ -209,6 +231,7 @@ public enum RunnerResponse: Sendable {
   case find(id: String, Result<FindResult, RunnerWireError>)
   case grep(id: String, Result<GrepResult, RunnerWireError>)
   case materialize(id: String, Result<MaterializeResponse, RunnerWireError>)
+  case cancel(id: String, Result<CancelResponse, RunnerWireError>)
 
   public var responseID: String? {
     switch self {
@@ -223,6 +246,7 @@ public enum RunnerResponse: Sendable {
     case let .find(id, _): id
     case let .grep(id, _): id
     case let .materialize(id, _): id
+    case let .cancel(id, _): id
     }
   }
 }

@@ -98,6 +98,11 @@ public enum MuxRunnerHandler {
         let req = try MuxRunnerCodec.decode(MaterializeRequest.self, from: payload)
         let (response, _) = await handler.handle(request: .materialize(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
+
+      case .cancel:
+        let req = try MuxRunnerCodec.decode(CancelRequest.self, from: payload)
+        let (response, _) = await handler.handle(request: .cancel(id: "", req))
+        try await writeRunnerResponse(stream, op: op, response: response)
       }
 
       try await stream.finish()
@@ -132,6 +137,8 @@ public enum MuxRunnerHandler {
     case let .grep(_, result):
       try await writeResult(stream, op: op, result: result)
     case let .materialize(_, result):
+      try await writeResult(stream, op: op, result: result)
+    case let .cancel(_, result):
       try await writeResult(stream, op: op, result: result)
     }
   }

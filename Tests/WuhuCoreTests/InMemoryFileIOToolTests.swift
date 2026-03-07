@@ -16,9 +16,10 @@ struct InMemoryFileIOToolTests {
   }
 
   private func tools() -> [String: AnyAgentTool] {
-    Dictionary(
+    let resolver = WuhuTools.testMountResolver(cwd: cwd)
+    return Dictionary(
       uniqueKeysWithValues:
-      WuhuTools.codingAgentTools(cwdProvider: { cwd })
+      WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver)
         .map { ($0.tool.name, $0) },
     )
   }
