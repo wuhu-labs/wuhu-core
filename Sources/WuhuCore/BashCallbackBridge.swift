@@ -12,6 +12,8 @@ import Foundation
 public actor BashCallbackBridge: RunnerCallbacks {
   private var pending: [String: CheckedContinuation<BashResult, any Error>] = [:]
   private var outputHandlers: [String: @Sendable (String) -> Void] = [:]
+  /// Results that arrived before `waitForResult` was called.
+  private var buffered: [String: BashResult] = [:]
 
   public init() {}
 
@@ -23,19 +25,27 @@ public actor BashCallbackBridge: RunnerCallbacks {
   }
 
   public func bashFinished(tag: String, result: BashResult) async throws -> Ack {
-    pending.removeValue(forKey: tag)?.resume(returning: result)
+    if let cont = pending.removeValue(forKey: tag) {
+      cont.resume(returning: result)
+    } else {
+      buffered[tag] = result
+    }
     outputHandlers.removeValue(forKey: tag)
     return Ack()
   }
 
   // MARK: - Server-side coordination
 
-  /// Wait for the result of a bash command. Suspends until `bashFinished` is called for this tag.
+  /// Wait for the result of a bash command. Returns immediately if the result has already arrived;
+  /// otherwise suspends until `bashFinished` is called for this tag.
   ///
   /// If the outer Swift task is cancelled, the wait is cancelled and `CancellationError` is thrown.
   /// The caller is responsible for calling `cancelBash(tag:)` on the runner to kill the process.
   public func waitForResult(tag: String) async throws -> BashResult {
-    try await withTaskCancellationHandler {
+    if let result = buffered.removeValue(forKey: tag) {
+      return result
+    }
+    return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { cont in
         pending[tag] = cont
       }

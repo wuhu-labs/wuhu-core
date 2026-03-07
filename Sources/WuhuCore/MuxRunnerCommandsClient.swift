@@ -60,6 +60,7 @@ public actor MuxRunnerCommandsClient: RunnerCommands {
           result: BashResult(exitCode: -1, output: String(describing: error), timedOut: false, terminated: false),
         )
       }
+      await self.bashTaskFinished(tag: tag)
     }
     activeTasks[tag] = task
     return BashStarted(tag: tag, alreadyRunning: false)
@@ -70,9 +71,14 @@ public actor MuxRunnerCommandsClient: RunnerCommands {
       return CancelResult(cancelled: false)
     }
     task.cancel()
-    // Also send cancel RPC to runner (belt-and-suspenders)
-    _ = try? await rpc(.cancel, request: CancelRequest(tag: tag)) as CancelResponse
+    // Send cancel RPC to the remote runner so the subprocess is actually killed.
+    // Propagate errors: if this throws, the caller knows the remote cancel failed.
+    let _: CancelResponse = try await rpc(.cancel, request: CancelRequest(tag: tag))
     return CancelResult(cancelled: true)
+  }
+
+  private func bashTaskFinished(tag: String) {
+    activeTasks.removeValue(forKey: tag)
   }
 
   public func waitForBashResult(tag: String) async throws -> BashResult {

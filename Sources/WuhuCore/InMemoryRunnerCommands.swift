@@ -85,6 +85,7 @@ public actor InMemoryRunnerCommands: RunnerCommands {
     let task = Task { [result] in
       _ = try? await bridge.bashFinished(tag: tag, result: result)
       _ = try? await extra?.bashFinished(tag: tag, result: result)
+      await self.bashTaskFinished(tag: tag)
     }
     activeBash[tag] = task
     return BashStarted(tag: tag, alreadyRunning: false)
@@ -100,6 +101,10 @@ public actor InMemoryRunnerCommands: RunnerCommands {
       result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true),
     )
     return CancelResult(cancelled: true)
+  }
+
+  private func bashTaskFinished(tag: String) {
+    activeBash.removeValue(forKey: tag)
   }
 
   public func waitForBashResult(tag: String) async throws -> BashResult {
@@ -288,6 +293,9 @@ public actor InMemoryRunnerCommands: RunnerCommands {
     return MaterializeResponse(workspacePath: params.destinationPath)
   }
 }
+
+/// Compatibility alias — tests written against the old name continue to compile.
+public typealias InMemoryRunner = InMemoryRunnerCommands
 
 // MARK: - InMemoryRunnerCallbacks
 

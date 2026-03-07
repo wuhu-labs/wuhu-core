@@ -44,6 +44,7 @@ public actor LocalRunner: RunnerCommands {
           result: BashResult(exitCode: -1, output: String(describing: error), timedOut: false, terminated: false),
         )
       }
+      await self.bashTaskFinished(tag: tag)
     }
     activeBash[tag] = task
     return BashStarted(tag: tag, alreadyRunning: false)
@@ -56,6 +57,11 @@ public actor LocalRunner: RunnerCommands {
     task.cancel()
     // The task's CancellationError handler will call bridge.bashFinished(terminated:true)
     return CancelResult(cancelled: true)
+  }
+
+  /// Called by the bash Task when it finishes normally, to remove the stale map entry.
+  private func bashTaskFinished(tag: String) {
+    activeBash.removeValue(forKey: tag)
   }
 
   public func waitForBashResult(tag: String) async throws -> BashResult {
