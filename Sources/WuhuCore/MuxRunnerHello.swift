@@ -10,25 +10,9 @@ public let muxRunnerProtocolVersion = 7
 /// and sends a hello. The responder reads it and sends back a hello.
 /// Both sides verify protocol version compatibility.
 public enum MuxRunnerHello {
-  /// Send hello as the runner side. Opens stream 1, writes hello, reads server hello.
-  public static func sendAsRunner(session: MuxSession, runnerName: String) async throws -> HelloResponse {
-    let stream = try await session.open()
-    let hello = HelloResponse(runnerName: runnerName, version: muxRunnerProtocolVersion)
-    try await MuxRunnerCodec.writeRequest(stream, op: .hello, payload: hello)
-    try await stream.finish()
-
-    let reader = MuxStreamReader(stream: stream)
-    let (ok, _, payload) = try await MuxRunnerCodec.readResponse(reader)
-    guard ok else {
-      let msg = String(decoding: Data(payload), as: UTF8.self)
-      throw MuxRunnerRPCError.serverError("Hello rejected: \(msg)")
-    }
-    return try MuxRunnerCodec.decode(HelloResponse.self, from: payload)
-  }
-
-  /// Receive hello from a runner on the first inbound stream.
-  /// Returns the runner's hello response after sending our own.
-  public static func receiveFromRunner(session: MuxSession, serverName: String) async throws -> HelloResponse {
+  /// Receive hello from the remote peer on the first inbound stream.
+  /// Verifies protocol version, sends our own hello back, and returns the peer's hello.
+  public static func receiveHello(session: MuxSession, localName: String) async throws -> HelloResponse {
     var iter = session.inbound.makeAsyncIterator()
     guard let stream = await iter.next() else {
       throw MuxRunnerRPCError.unexpectedEOF
@@ -36,18 +20,18 @@ public enum MuxRunnerHello {
 
     let reader = MuxStreamReader(stream: stream)
     let (_, payload) = try await MuxRunnerCodec.readRequest(reader)
-    let runnerHello = try MuxRunnerCodec.decode(HelloResponse.self, from: payload)
+    let peerHello = try MuxRunnerCodec.decode(HelloResponse.self, from: payload)
 
-    guard runnerHello.version == muxRunnerProtocolVersion else {
-      try await MuxRunnerCodec.writeError(stream, op: .hello, message: "Version mismatch: expected \(muxRunnerProtocolVersion), got \(runnerHello.version)")
+    guard peerHello.version == muxRunnerProtocolVersion else {
+      try await MuxRunnerCodec.writeError(stream, op: .hello, message: "Version mismatch: expected \(muxRunnerProtocolVersion), got \(peerHello.version)")
       try await stream.finish()
-      throw MuxRunnerRPCError.serverError("Runner '\(runnerHello.runnerName)' has protocol version \(runnerHello.version), expected \(muxRunnerProtocolVersion)")
+      throw MuxRunnerRPCError.serverError("Peer '\(peerHello.runnerName)' has protocol version \(peerHello.version), expected \(muxRunnerProtocolVersion)")
     }
 
-    let serverHello = HelloResponse(runnerName: serverName, version: muxRunnerProtocolVersion)
-    try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: serverHello)
+    let localHello = HelloResponse(runnerName: localName, version: muxRunnerProtocolVersion)
+    try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: localHello)
     try await stream.finish()
 
-    return runnerHello
+    return peerHello
   }
 }

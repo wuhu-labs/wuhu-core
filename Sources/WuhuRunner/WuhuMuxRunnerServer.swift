@@ -1,7 +1,9 @@
 import Foundation
+import Hummingbird
+import HummingbirdWebSocket
 import Logging
 import Mux
-import MuxTCP
+import MuxWebSocket
 import WuhuCore
 import Yams
 
@@ -38,11 +40,11 @@ public struct WuhuRunnerConfig: Sendable, Hashable, Codable {
   }
 }
 
-/// Runs a mux-based runner server that accepts TCP connections from a Wuhu server.
+/// Runs a WebSocket-based runner server that accepts connections from a Wuhu server.
 ///
-/// This is the runner-side counterpart to `WuhuMuxRunnerConnector`.
-/// The runner listens on a TCP port, accepts mux sessions, performs hello
-/// exchange, and then serves RPC requests.
+/// The runner listens on an HTTP port with a WebSocket upgrade route at
+/// `/v1/runner/mux`. When a server connects and upgrades, the runner
+/// performs a hello exchange and then serves RPC requests over mux streams.
 public struct WuhuMuxRunnerServer: Sendable {
   public init() {}
 
@@ -60,43 +62,43 @@ public struct WuhuMuxRunnerServer: Sendable {
     let logger = Logger(label: "WuhuRunner")
     logger.info("Starting mux runner '\(config.name)' on \(host):\(port)")
 
-    let listener = try await TCPListener.bind(host: host, port: port)
+    let name = config.name
 
-    for await connection in listener.connections {
-      let runner = runner
-      let name = config.name
-      let logger = logger
-      Task {
-        await handleConnection(connection, runner: runner, name: name, logger: logger)
-      }
+    let httpRouter = Router()
+    httpRouter.get("healthz") { _, _ -> String in "ok" }
+
+    let wsRouter = Router(context: BasicWebSocketRequestContext.self)
+    wsRouter.ws("v1/runner/mux") { _, _ in
+      .upgrade([:])
+    } onUpgrade: { inbound, outbound, _ in
+      let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
+      await handleConnection(conn, runner: runner, name: name, logger: logger)
     }
+
+    let app = Application(
+      router: httpRouter,
+      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
+      configuration: .init(address: .hostname(host, port: port)),
+      logger: logger
+    )
+    try await app.runService()
   }
+}
 
-  private func handleConnection(
-    _ connection: TCPConnection,
-    runner: any Runner,
-    name: String,
-    logger: Logger,
-  ) async {
-    let session = MuxSession(connection: connection, role: .responder)
+private func handleConnection(
+  _ connection: WebSocketConnection,
+  runner: any Runner,
+  name: String,
+  logger: Logger
+) async {
+  let session = MuxSession(connection: connection, role: .responder)
 
-    await withTaskGroup(of: Void.self) { group in
-      group.addTask { try? await session.run() }
-      group.addTask {
-        // Wait for the first inbound stream (hello)
-        do {
-          let hello = try await MuxRunnerHello.receiveFromRunner(session: session, serverName: name)
-          _ = hello
-          logger.info("Mux server connected to runner '\(name)'")
-        } catch {
-          logger.error("Hello exchange failed: \(error)")
-          await session.close()
-          return
-        }
-
-        // Serve RPC requests
-        await MuxRunnerHandler.serve(session: session, runner: runner, name: name)
-      }
+  await withTaskGroup(of: Void.self) { group in
+    group.addTask { try? await session.run() }
+    group.addTask {
+      // Serve all RPC requests — hello is handled as the first stream
+      await MuxRunnerHandler.serve(session: session, runner: runner, name: name)
+      logger.info("Mux connection from server ended for runner '\(name)'")
     }
   }
 }

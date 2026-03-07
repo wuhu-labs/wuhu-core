@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import HummingbirdCore
+import HummingbirdWebSocket
 import Logging
 import NIOCore
 import WuhuAPI
@@ -78,16 +79,9 @@ public struct WuhuServer: Sendable {
       )
     }
 
-    // Start mux runner acceptor for incoming runner connections
+    // Start runner connection tasks for configured outbound runners
     let port = config.port ?? 5530
     let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
-    let muxAcceptorPort = port + 2 // e.g., 5532
-    let muxAcceptorTask = WuhuMuxRunnerAcceptor.start(
-      host: host,
-      port: muxAcceptorPort,
-      registry: runnerRegistry,
-      logger: logger,
-    )
 
     let service = WuhuService(
       store: store,
@@ -560,15 +554,25 @@ public struct WuhuServer: Sendable {
       return runners.map { WuhuRunnerInfo(name: $0.name, source: $0.source.rawValue, isConnected: $0.isConnected) }
     }
 
+    // WebSocket router for incoming runner connections
+    let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
+      registry: runnerRegistry,
+      logger: logger
+    )
+
+    // Configure WebSocket with larger max frame size (1MB) to handle large RPC payloads.
+    // TODO: Fix wuhu-yamux WebSocketConnection to chunk writes instead of requiring this.
+    let wsConfig = WebSocketServerConfiguration(maxFrameSize: 1 << 20)
+
     let app = Application(
       router: router,
+      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
-      logger: logger,
+      logger: logger
     )
     try await app.runService()
 
     // Cancel runner connection tasks on shutdown
-    muxAcceptorTask.cancel()
     for task in _runnerTasks {
       task.cancel()
     }

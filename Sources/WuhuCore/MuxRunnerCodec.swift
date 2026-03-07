@@ -23,14 +23,11 @@ public enum MuxRunnerOp: UInt8, Sendable {
 
 /// Wraps a `MuxStream`'s byte sequence with buffering, enabling exact-count reads.
 /// Each RPC uses one stream, so this reader is scoped to a single call.
-public final class MuxStreamReader: Sendable {
+public final class MuxStreamReader {
   private let stream: MuxStream
-  // Mutable state protected by being used from a single async context per RPC.
-  // The nonisolated(unsafe) is acceptable because each MuxStreamReader is
-  // used by exactly one async task (one RPC handler or one RPC caller).
-  private nonisolated(unsafe) var buffer: [UInt8] = []
-  private nonisolated(unsafe) var iterator: AsyncStream<[UInt8]>.AsyncIterator?
-  private nonisolated(unsafe) var iteratorInitialized = false
+  private var buffer: [UInt8] = []
+  private var iterator: AsyncStream<[UInt8]>.AsyncIterator?
+  private var iteratorInitialized = false
 
   public init(stream: MuxStream) {
     self.stream = stream

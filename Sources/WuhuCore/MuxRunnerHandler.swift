@@ -28,8 +28,13 @@ public enum MuxRunnerHandler {
 
       switch op {
       case .hello:
-        let _: HelloRequest? = payload.isEmpty ? nil : try? MuxRunnerCodec.decode(HelloRequest.self, from: payload)
-        let resp = await HelloResponse(runnerName: handler.runnerName, version: muxRunnerProtocolVersion)
+        let peerHello: HelloResponse? = payload.isEmpty ? nil : try? MuxRunnerCodec.decode(HelloResponse.self, from: payload)
+        if let peerHello, peerHello.version != muxRunnerProtocolVersion {
+          try await MuxRunnerCodec.writeError(stream, op: .hello, message: "Version mismatch: expected \(muxRunnerProtocolVersion), got \(peerHello.version)")
+          try await stream.finish()
+          return
+        }
+        let resp = HelloResponse(runnerName: handler.runnerName, version: muxRunnerProtocolVersion)
         try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: resp)
 
       case .bash:
