@@ -39,8 +39,21 @@ public enum MuxRunnerHandler {
 
       case .bash:
         let req = try MuxRunnerCodec.decode(BashRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .bash(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        let tag = req.tag
+        if let tag, !tag.isEmpty {
+          // Tracked bash: spawn a task, register it for cancellation, await result.
+          let bashTask = Task {
+            await handler.runBash(id: "", request: req)
+          }
+          await handler.registerBashTask(tag, task: bashTask)
+          let (response, _) = await bashTask.value
+          await handler.unregisterBashTask(tag)
+          try await writeRunnerResponse(stream, op: op, response: response)
+        } else {
+          // Untagged bash (legacy/test): run inline.
+          let (response, _) = await handler.handle(request: .bash(id: "", req))
+          try await writeRunnerResponse(stream, op: op, response: response)
+        }
 
       case .read:
         let req = try MuxRunnerCodec.decode(ReadRequest.self, from: payload)
@@ -98,6 +111,11 @@ public enum MuxRunnerHandler {
         let req = try MuxRunnerCodec.decode(MaterializeRequest.self, from: payload)
         let (response, _) = await handler.handle(request: .materialize(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
+
+      case .cancel:
+        let req = try MuxRunnerCodec.decode(CancelRequest.self, from: payload)
+        let (response, _) = await handler.handle(request: .cancel(id: "", req))
+        try await writeRunnerResponse(stream, op: op, response: response)
       }
 
       try await stream.finish()
@@ -132,6 +150,8 @@ public enum MuxRunnerHandler {
     case let .grep(_, result):
       try await writeResult(stream, op: op, result: result)
     case let .materialize(_, result):
+      try await writeResult(stream, op: op, result: result)
+    case let .cancel(_, result):
       try await writeResult(stream, op: op, result: result)
     }
   }

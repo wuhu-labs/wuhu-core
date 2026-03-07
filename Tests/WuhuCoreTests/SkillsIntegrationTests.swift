@@ -26,7 +26,7 @@ struct SkillsIntegrationTests {
 
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore)
+    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
@@ -89,7 +89,7 @@ struct SkillsIntegrationTests {
 
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path)
+    let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
@@ -154,7 +154,7 @@ struct SkillsIntegrationTests {
 
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path)
+    let service = WuhuService(store: store, blobStore: blobStore, workspaceRoot: workspaceRoot.path, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
@@ -229,7 +229,7 @@ struct SkillsIntegrationTests {
 
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore)
+    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(
@@ -298,7 +298,7 @@ struct SkillsIntegrationTests {
 
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore)
+    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let sessionID = UUID().uuidString.lowercased()
     _ = try await service.createSession(

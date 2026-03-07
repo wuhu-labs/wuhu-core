@@ -16,11 +16,16 @@ public struct BashRequest: Sendable, Hashable, Codable {
   public var command: String
   public var cwd: String
   public var timeout: Double?
+  /// Opaque tag for cancellation. The runner tracks active bash executions
+  /// by this tag so the server can cancel them via `MuxRunnerOp.cancel`.
+  /// Typically the tool call ID from the agent loop.
+  public var tag: String?
 
-  public init(command: String, cwd: String, timeout: Double? = nil) {
+  public init(command: String, cwd: String, timeout: Double? = nil, tag: String? = nil) {
     self.command = command
     self.cwd = cwd
     self.timeout = timeout
+    self.tag = tag
   }
 }
 
@@ -93,6 +98,27 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
 }
 
 // FindParams and GrepParams are defined in Runner.swift.
+
+// MARK: - Cancel request
+
+/// Request to cancel a running bash process on the runner.
+public struct CancelRequest: Sendable, Hashable, Codable {
+  /// Tag identifying the bash execution to cancel.
+  /// Matches the `tag` field from the originating `BashRequest`.
+  public var tag: String
+
+  public init(tag: String) {
+    self.tag = tag
+  }
+}
+
+/// Response to a cancel request (acknowledgement).
+public struct CancelResponse: Sendable, Hashable, Codable {
+  public var cancelled: Bool
+  public init(cancelled: Bool) {
+    self.cancelled = cancelled
+  }
+}
 
 // MARK: - Response payloads
 
@@ -194,6 +220,7 @@ public enum RunnerRequest: Sendable, Hashable {
   case find(id: String, FindParams)
   case grep(id: String, GrepParams)
   case materialize(id: String, MaterializeRequest)
+  case cancel(id: String, CancelRequest)
 }
 
 /// A runner response, used internally by `RunnerServerHandler` for dispatch.
@@ -209,6 +236,7 @@ public enum RunnerResponse: Sendable {
   case find(id: String, Result<FindResult, RunnerWireError>)
   case grep(id: String, Result<GrepResult, RunnerWireError>)
   case materialize(id: String, Result<MaterializeResponse, RunnerWireError>)
+  case cancel(id: String, Result<CancelResponse, RunnerWireError>)
 
   public var responseID: String? {
     switch self {
@@ -223,6 +251,7 @@ public enum RunnerResponse: Sendable {
     case let .find(id, _): id
     case let .grep(id, _): id
     case let .materialize(id, _): id
+    case let .cancel(id, _): id
     }
   }
 }

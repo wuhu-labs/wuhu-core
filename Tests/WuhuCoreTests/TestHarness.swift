@@ -39,6 +39,7 @@ struct TestHarness {
       blobStore: blobStore,
       baseStreamFn: mockLLM.streamFn,
       workspaceRoot: workspaceRoot,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     )
   }
 
@@ -59,6 +60,7 @@ struct TestHarness {
       blobStore: blobStore,
       baseStreamFn: streamFn,
       workspaceRoot: workspaceRoot,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     )
   }
 
@@ -68,6 +70,7 @@ struct TestHarness {
       store: store,
       blobStore: blobStore,
       baseStreamFn: newMock.streamFn,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     )
   }
 

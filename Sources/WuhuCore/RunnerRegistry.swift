@@ -24,8 +24,10 @@ public struct RunnerInfo: Sendable, Hashable {
 }
 
 /// Server-side registry of live runners.
-/// Always contains a local runner. Remote runners are registered/removed
-/// as WebSocket connections come and go.
+///
+/// Starts empty. The local runner is registered externally by
+/// `WuhuLocalRunnerSpawner` after spawning the child process.
+/// Remote runners are registered/removed as connections come and go.
 ///
 /// Tracks two categories of remote runners:
 /// - **Declared** runners from server config (server connects out to them).
@@ -41,9 +43,17 @@ public actor RunnerRegistry {
   /// Names of runners that connected in (not declared in config).
   private var incomingNames: Set<String> = []
 
-  public init() {
-    let local = LocalRunner()
-    runners["local"] = local
+  public init() {}
+
+  /// Initialize with pre-registered runners (used by tests).
+  public init(runners: [any Runner]) {
+    for runner in runners {
+      let key: String = switch runner.id {
+      case .local: "local"
+      case let .remote(name: n): n
+      }
+      self.runners[key] = runner
+    }
   }
 
   /// Record the set of runner names declared in server config.
@@ -80,8 +90,6 @@ public actor RunnerRegistry {
   /// Remove a runner by its ID.
   public func remove(_ id: RunnerID) {
     let key = runnerKey(id)
-    // Never remove the local runner
-    guard key != "local" else { return }
     runners.removeValue(forKey: key)
     incomingNames.remove(key)
   }
@@ -108,8 +116,10 @@ public actor RunnerRegistry {
   public func listAll() -> [RunnerInfo] {
     var result: [RunnerInfo] = []
 
-    // Local runner — always present
-    result.append(RunnerInfo(name: "local", source: .builtIn, isConnected: true))
+    // Local runner — present if registered
+    if runners["local"] != nil {
+      result.append(RunnerInfo(name: "local", source: .builtIn, isConnected: true))
+    }
 
     // Declared runners — always listed, with connection status
     for name in declaredNames.sorted() {

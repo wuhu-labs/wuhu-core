@@ -25,6 +25,10 @@ public actor MuxRunnerClient: Runner {
     try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout))
   }
 
+  public func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult {
+    try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout, tag: tag))
+  }
+
   public func readData(path: String) async throws -> Data {
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: .read, payload: ReadRequest(path: path, binary: true))
@@ -92,6 +96,11 @@ public actor MuxRunnerClient: Runner {
 
   public func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
     try await rpc(.materialize, request: params)
+  }
+
+  /// Send a cancel request to kill a bash process on the runner.
+  public func cancel(tag: String) async throws -> CancelResponse {
+    try await rpc(.cancel, request: CancelRequest(tag: tag))
   }
 
   // MARK: - Generic RPC helper
