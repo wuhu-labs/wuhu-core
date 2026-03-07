@@ -58,9 +58,11 @@ public actor RunnerServerHandler {
 
   /// Cancel a bash task by tag. Cancels the Swift task, which triggers
   /// the swift-subprocess teardownSequence (SIGTERM → 3s → SIGKILL).
-  /// If the tag hasn't been registered yet (race with concurrent mux
-  /// streams), it is added to `pendingCancels` so registration will
-  /// cancel it on arrival.
+  ///
+  /// Returns `true` if the tag was found and cancelled immediately.
+  /// If the tag isn't registered yet (race with concurrent mux streams),
+  /// it is added to `pendingCancels` so ``registerBashTask`` will cancel
+  /// it on arrival, and this method returns `false`.
   public func cancelBash(tag: String) -> Bool {
     if let task = activeBashTasks.removeValue(forKey: tag) {
       task.cancel()
@@ -68,7 +70,7 @@ public actor RunnerServerHandler {
     }
     // Tag not yet registered — remember the cancel for when it arrives.
     pendingCancels.insert(tag)
-    return true
+    return false
   }
 
   /// Dispatch a text-frame request. Returns a text-frame response.
