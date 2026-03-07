@@ -53,7 +53,7 @@ enum WuhuMuxRunnerConnector {
 
         logger.info("Mux runner '\(runnerHello.runnerName)' connected (v\(runnerHello.version))")
 
-        let client = MuxRunnerClient(name: runnerHello.runnerName, session: session)
+        let client = MuxRunnerCommandsClient(name: runnerHello.runnerName, session: session)
         await registry.register(client)
 
         // Block until session ends

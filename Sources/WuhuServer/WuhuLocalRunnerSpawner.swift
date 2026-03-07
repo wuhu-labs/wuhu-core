@@ -112,7 +112,7 @@ public actor WuhuLocalRunnerSpawner {
 
           logger.info("Local runner connected via UDS (v\(runnerHello.version))")
 
-          let client = MuxRunnerClient(name: "local", session: session)
+          let client = MuxRunnerCommandsClient(name: "local", session: session)
           await registry.register(client)
 
           // Block until session ends

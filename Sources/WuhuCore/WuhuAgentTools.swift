@@ -594,7 +594,7 @@ extension WuhuService {
     var workspacePath: String
   }
 
-  private func materializeMountTemplate(identifier: String, sessionID: String, runner: (any Runner)? = nil) async throws -> MaterializedTemplate {
+  private func materializeMountTemplate(identifier: String, sessionID: String, runner: (any RunnerCommands)? = nil) async throws -> MaterializedTemplate {
     let mt = try await store.getMountTemplate(identifier: identifier)
 
     // When a non-local runner is provided, materialize on the runner's filesystem.

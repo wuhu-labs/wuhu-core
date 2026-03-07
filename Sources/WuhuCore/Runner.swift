@@ -157,50 +157,6 @@ public struct GrepResult: Sendable, Hashable, Codable {
   }
 }
 
-// MARK: - Runner protocol
-
-/// Minimal execution proxy for filesystem operations and process execution.
-///
-/// `LocalRunner` implements this in the runner process.
-/// `MuxRunnerClient` implements this by forwarding calls over a
-/// mux session to a remote runner process. The server uses
-/// `MuxRunnerClient` for all runners, including the local one.
-public protocol Runner: Actor, Sendable {
-  nonisolated var id: RunnerID { get }
-
-  /// -- Process execution --
-  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
-  /// Run a bash command with a cancellation tag. The tag allows the server
-  /// to cancel the command via the cancel RPC. Default implementation
-  /// ignores the tag and delegates to `runBash(command:cwd:timeout:)`.
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult
-
-  // -- File I/O --
-  func readData(path: String) async throws -> Data
-  func readString(path: String, encoding: String.Encoding) async throws -> String
-  func writeData(path: String, data: Data, createIntermediateDirectories: Bool) async throws
-  func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding: String.Encoding) async throws
-  func exists(path: String) async throws -> FileExistence
-  func listDirectory(path: String) async throws -> [DirectoryEntry]
-  func enumerateDirectory(root: String) async throws -> [EnumeratedEntry]
-  func createDirectory(path: String, withIntermediateDirectories: Bool) async throws
-
-  // -- Search --
-  func find(params: FindParams) async throws -> FindResult
-  func grep(params: GrepParams) async throws -> GrepResult
-
-  /// -- Workspace materialization --
-  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
-}
-
-// MARK: - Runner default implementations
-
-public extension Runner {
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag _: String?) async throws -> BashResult {
-    try await runBash(command: command, cwd: cwd, timeout: timeout)
-  }
-}
-
 // MARK: - Runner errors
 
 public enum RunnerError: Error, Sendable, CustomStringConvertible {

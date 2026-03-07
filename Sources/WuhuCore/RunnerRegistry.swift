@@ -36,7 +36,7 @@ public struct RunnerInfo: Sendable, Hashable {
 /// When a declared and incoming runner share the same name, the declared one
 /// takes priority for dispatch.
 public actor RunnerRegistry {
-  private var runners: [String: any Runner] = [:]
+  private var runners: [String: any RunnerCommands] = [:]
   /// Names declared in server config. These always appear in `listAll`,
   /// even when disconnected.
   private var declaredNames: Set<String> = []
@@ -46,7 +46,7 @@ public actor RunnerRegistry {
   public init() {}
 
   /// Initialize with pre-registered runners (used by tests).
-  public init(runners: [any Runner]) {
+  public init(runners: [any RunnerCommands]) {
     for runner in runners {
       let key: String = switch runner.id {
       case .local: "local"
@@ -66,7 +66,7 @@ public actor RunnerRegistry {
 
   /// Register a runner. For local, uses key "local".
   /// For remote, uses the runner name.
-  public func register(_ runner: any Runner) {
+  public func register(_ runner: any RunnerCommands) {
     let key = runnerKey(runner.id)
     runners[key] = runner
   }
@@ -75,7 +75,7 @@ public actor RunnerRegistry {
   /// If a declared runner with the same name is already connected, the
   /// incoming one is rejected (returns false).
   @discardableResult
-  public func registerIncoming(_ runner: any Runner, name: String) -> Bool {
+  public func registerIncoming(_ runner: any RunnerCommands, name: String) -> Bool {
     if declaredNames.contains(name), runners[name] != nil {
       // Declared runner already connected — reject incoming with same name.
       return false
@@ -95,12 +95,12 @@ public actor RunnerRegistry {
   }
 
   /// Get a runner by its RunnerID.
-  public func get(_ id: RunnerID) -> (any Runner)? {
+  public func get(_ id: RunnerID) -> (any RunnerCommands)? {
     runners[runnerKey(id)]
   }
 
   /// Get a runner by name. "local" returns the local runner.
-  public func get(name: String) -> (any Runner)? {
+  public func get(name: String) -> (any RunnerCommands)? {
     if name == "local" { return runners["local"] }
     return runners[name]
   }
