@@ -30,7 +30,7 @@ public enum MuxRunnerHandler {
       switch op {
       case .hello:
         let _: HelloRequest? = payload.isEmpty ? nil : try? MuxRunnerCodec.decode(HelloRequest.self, from: payload)
-        let resp = HelloResponse(runnerName: await handler.runnerName, version: runnerProtocolVersion)
+        let resp = HelloResponse(runnerName: await handler.runnerName, version: muxRunnerProtocolVersion)
         try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: resp)
 
       case .bash:

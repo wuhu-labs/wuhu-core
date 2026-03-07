@@ -1,10 +1,8 @@
 import Foundation
 import Hummingbird
 import HummingbirdCore
-import HummingbirdWebSocket
 import Logging
 import NIOCore
-import NIOWebSocket
 import WuhuAPI
 import WuhuCore
 
@@ -69,12 +67,27 @@ public struct WuhuServer: Sendable {
     // They auto-cancel when the process exits.
     var _runnerTasks: [Task<Void, Never>] = []
     if let runners = config.runners, !runners.isEmpty {
-      _runnerTasks = WuhuRunnerConnector.connectAll(
-        runners: runners,
+      let muxRunners = runners.map { r -> (name: String, host: String, port: Int) in
+        let (h, p) = Self.parseHostPort(r.address, defaultPort: 5532)
+        return (name: r.name, host: h, port: p)
+      }
+      _runnerTasks = WuhuMuxRunnerConnector.connectAll(
+        runners: muxRunners,
         registry: runnerRegistry,
         logger: logger,
       )
     }
+
+    // Start mux runner acceptor for incoming runner connections
+    let port = config.port ?? 5530
+    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
+    let muxAcceptorPort = port + 2 // e.g., 5532
+    let muxAcceptorTask = WuhuMuxRunnerAcceptor.start(
+      host: host,
+      port: muxAcceptorPort,
+      registry: runnerRegistry,
+      logger: logger,
+    )
 
     let service = WuhuService(
       store: store,
@@ -547,27 +560,41 @@ public struct WuhuServer: Sendable {
       return runners.map { WuhuRunnerInfo(name: $0.name, source: $0.source.rawValue, isConnected: $0.isConnected) }
     }
 
-    // Build WebSocket router for incoming runner connections
-    let wsRouter = WuhuRunnerAcceptor.wsRouter(registry: runnerRegistry, logger: logger)
-    let wsConfig = WebSocketServerConfiguration(
-      maxFrameSize: 1 << 24, // 16 MB — must match the runner setting
-    )
-
-    let port = config.port ?? 5530
-    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
-
     let app = Application(
       router: router,
-      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
       logger: logger,
     )
     try await app.runService()
 
     // Cancel runner connection tasks on shutdown
+    muxAcceptorTask.cancel()
     for task in _runnerTasks {
       task.cancel()
     }
+  }
+
+  /// Parse "host:port" from a runner address string.
+  static func parseHostPort(_ address: String, defaultPort: Int) -> (String, Int) {
+    // Strip protocol prefixes if present
+    var addr = address
+    for prefix in ["ws://", "wss://", "http://", "https://"] {
+      if addr.hasPrefix(prefix) {
+        addr = String(addr.dropFirst(prefix.count))
+        break
+      }
+    }
+    // Strip path
+    if let slashIdx = addr.firstIndex(of: "/") {
+      addr = String(addr[addr.startIndex ..< slashIdx])
+    }
+    // Split host:port
+    if let colonIdx = addr.lastIndex(of: ":"),
+       let port = Int(addr[addr.index(after: colonIdx)...])
+    {
+      return (String(addr[addr.startIndex ..< colonIdx]), port)
+    }
+    return (addr, defaultPort)
   }
 }
 

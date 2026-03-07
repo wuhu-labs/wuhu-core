@@ -21,7 +21,7 @@ public actor RunnerServerHandler {
     switch request {
     case let .hello(p):
       _ = p // acknowledge
-      return (.hello(HelloResponse(runnerName: runnerName, version: runnerProtocolVersion)), nil)
+      return (.hello(HelloResponse(runnerName: runnerName, version: muxRunnerProtocolVersion)), nil)
 
     case let .bash(id, p):
       do {
