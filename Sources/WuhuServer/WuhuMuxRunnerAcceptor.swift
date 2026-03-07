@@ -16,7 +16,7 @@ enum WuhuMuxRunnerAcceptor {
   /// The returned router should be passed to `.http1WebSocketUpgrade(webSocketRouter:)`.
   static func webSocketRouter(
     registry: RunnerRegistry,
-    logger: Logger
+    logger: Logger,
   ) -> Router<BasicWebSocketRequestContext> {
     let wsRouter = Router(context: BasicWebSocketRequestContext.self)
 
@@ -33,7 +33,7 @@ enum WuhuMuxRunnerAcceptor {
   private static func handleConnection(
     _ connection: WebSocketConnection,
     registry: RunnerRegistry,
-    logger: Logger
+    logger: Logger,
   ) async {
     let session = MuxSession(connection: connection, role: .responder)
     let runTask = Task { try await session.run() }

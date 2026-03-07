@@ -79,7 +79,7 @@ public struct WuhuMuxRunnerServer: Sendable {
       router: httpRouter,
       server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
       configuration: .init(address: .hostname(host, port: port)),
-      logger: logger
+      logger: logger,
     )
     try await app.runService()
   }
@@ -89,7 +89,7 @@ private func handleConnection(
   _ connection: WebSocketConnection,
   runner: any Runner,
   name: String,
-  logger: Logger
+  logger: Logger,
 ) async {
   let session = MuxSession(connection: connection, role: .responder)
 

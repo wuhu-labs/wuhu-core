@@ -557,7 +557,7 @@ public struct WuhuServer: Sendable {
     // WebSocket router for incoming runner connections
     let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
       registry: runnerRegistry,
-      logger: logger
+      logger: logger,
     )
 
     // Configure WebSocket with larger max frame size (1MB) to handle large RPC payloads.
@@ -568,7 +568,7 @@ public struct WuhuServer: Sendable {
       router: router,
       server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
-      logger: logger
+      logger: logger,
     )
     try await app.runService()
 

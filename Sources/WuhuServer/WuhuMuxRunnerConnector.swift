@@ -16,14 +16,14 @@ enum WuhuMuxRunnerConnector {
     host: String,
     port: Int,
     registry: RunnerRegistry,
-    logger: Logger
+    logger: Logger,
   ) async -> Bool {
     logger.info("Connecting to mux runner '\(name)' at \(host):\(port)")
 
     do {
       try await WebSocketClient.connect(
         url: .init("ws://\(host):\(port)/v1/runner/mux"),
-        logger: logger
+        logger: logger,
       ) { inbound, outbound, _ in
         let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
         let session = MuxSession(connection: conn, role: .initiator)
@@ -75,7 +75,7 @@ enum WuhuMuxRunnerConnector {
   static func connectAll(
     runners: [(name: String, host: String, port: Int)],
     registry: RunnerRegistry,
-    logger: Logger
+    logger: Logger,
   ) -> [Task<Void, Never>] {
     runners.map { runner in
       Task {
@@ -88,7 +88,7 @@ enum WuhuMuxRunnerConnector {
             host: runner.host,
             port: runner.port,
             registry: registry,
-            logger: logger
+            logger: logger,
           )
 
           if connected { backoff = 1_000_000_000 }

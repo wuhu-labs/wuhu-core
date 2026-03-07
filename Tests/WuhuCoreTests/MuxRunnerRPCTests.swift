@@ -14,7 +14,9 @@ enum TransportKind: String, CaseIterable, CustomTestStringConvertible, Sendable 
   case inMemory
   case webSocket
 
-  var testDescription: String { rawValue }
+  var testDescription: String {
+    rawValue
+  }
 }
 
 /// Provides a mux session pair over the specified transport.
@@ -23,7 +25,7 @@ enum MuxTransportFactory {
   /// The sessions are closed when the body returns.
   static func withPair(
     transport: TransportKind,
-    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void
+    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void,
   ) async throws {
     switch transport {
     case .inMemory:
@@ -34,7 +36,7 @@ enum MuxTransportFactory {
   }
 
   private static func withInMemoryPair(
-    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void
+    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void,
   ) async throws {
     let (connA, connB) = InMemoryConnection.makePair()
     let client = MuxSession(connection: connA, role: .initiator, config: MuxConfig(keepaliveInterval: nil))
@@ -51,17 +53,18 @@ enum MuxTransportFactory {
   }
 
   private static func withWebSocketPair(
-    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void
+    body: @Sendable @escaping (MuxSession, MuxSession) async throws -> Void,
   ) async throws {
-    let port = Int.random(in: 20000 ..< 30000)
     let serverSessionHolder = _SessionHolder()
 
+    // Use a continuation to get the actual port once the server is listening.
+    // Bind to port 0 so the OS picks a free ephemeral port — no collisions.
+    let portStream = AsyncStream<Int>.makeStream()
+
     let router = Router()
-    // Configure WebSocket with larger max frame size (1MB) to handle large payloads
-    let wsConfig = WebSocketServerConfiguration(maxFrameSize: 1 << 20)
     let app = Application(
       router: router,
-      server: .http1WebSocketUpgrade(configuration: wsConfig) { _, _, _ in
+      server: .http1WebSocketUpgrade { _, _, _ in
         .upgrade([:]) { inbound, outbound, _ in
           let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
           let session = MuxSession(connection: conn, role: .responder, config: MuxConfig(keepaliveInterval: nil))
@@ -69,19 +72,26 @@ enum MuxTransportFactory {
           try await session.run()
         }
       },
-      configuration: .init(address: .hostname("127.0.0.1", port: port)),
-      logger: Logger(label: "test-ws-server")
+      configuration: .init(address: .hostname("127.0.0.1", port: 0)),
+      onServerRunning: { channel in
+        portStream.continuation.yield(channel.localAddress!.port!)
+        portStream.continuation.finish()
+      },
+      logger: Logger(label: "test-ws-server"),
     )
 
     let serverTask = Task { try await app.run() }
     defer { serverTask.cancel() }
 
-    // Give server time to start
-    try await Task.sleep(for: .milliseconds(200))
+    // Wait for the server to be listening — no arbitrary sleep.
+    var portIter = portStream.stream.makeAsyncIterator()
+    guard let port = await portIter.next() else {
+      throw MuxTestError.serverSessionNotEstablished
+    }
 
     try await WebSocketClient.connect(
       url: .init("ws://127.0.0.1:\(port)"),
-      logger: Logger(label: "test-ws-client")
+      logger: Logger(label: "test-ws-client"),
     ) { inbound, outbound, _ in
       let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
       let clientSession = MuxSession(connection: conn, role: .initiator, config: MuxConfig(keepaliveInterval: nil))
@@ -118,8 +128,13 @@ enum MuxTransportFactory {
 
 private actor _SessionHolder {
   var session: MuxSession?
-  func set(_ s: MuxSession) { session = s }
-  func get() -> MuxSession? { session }
+  func set(_ s: MuxSession) {
+    session = s
+  }
+
+  func get() -> MuxSession? {
+    session
+  }
 }
 
 enum MuxTestError: Error {
@@ -433,14 +448,26 @@ actor SlowInMemoryRunner: Runner {
     return .notFound
   }
 
-  func listDirectory(path _: String) async throws -> [DirectoryEntry] { [] }
-  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] { [] }
+  func listDirectory(path _: String) async throws -> [DirectoryEntry] {
+    []
+  }
+
+  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] {
+    []
+  }
+
   func createDirectory(path: String, withIntermediateDirectories _: Bool) async throws {
     directories.insert(path)
   }
 
-  func find(params _: FindParams) async throws -> FindResult { FindResult(entries: [], totalBeforeLimit: 0) }
-  func grep(params _: GrepParams) async throws -> GrepResult { GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false) }
+  func find(params _: FindParams) async throws -> FindResult {
+    FindResult(entries: [], totalBeforeLimit: 0)
+  }
+
+  func grep(params _: GrepParams) async throws -> GrepResult {
+    GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false)
+  }
+
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
     MaterializeResponse(workspacePath: params.destinationPath)
   }
@@ -448,6 +475,11 @@ actor SlowInMemoryRunner: Runner {
 
 private actor ErrorHolder {
   var error: (any Error)?
-  func set(_ e: any Error) { error = e }
-  func get() -> (any Error)? { error }
+  func set(_ e: any Error) {
+    error = e
+  }
+
+  func get() -> (any Error)? {
+    error
+  }
 }
