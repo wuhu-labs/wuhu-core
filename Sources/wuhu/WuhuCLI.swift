@@ -56,7 +56,7 @@ struct WuhuCLI: AsyncParsableCommand {
     var config: String?
 
     func run() async throws {
-      try await WuhuRunnerServer().run(configPath: config)
+      try await WuhuMuxRunnerServer().run(configPath: config)
     }
   }
 
