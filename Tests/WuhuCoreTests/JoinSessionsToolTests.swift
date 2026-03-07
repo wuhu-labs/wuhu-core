@@ -14,7 +14,7 @@ struct JoinSessionsToolTests {
   private func makeStoreAndService() throws -> (SQLiteSessionStore, WuhuService) {
     let store = try SQLiteSessionStore(path: ":memory:")
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore)
+    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
     return (store, service)
   }
 

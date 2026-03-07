@@ -70,6 +70,7 @@ struct TestHarness {
       store: store,
       blobStore: blobStore,
       baseStreamFn: newMock.streamFn,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     )
   }
 

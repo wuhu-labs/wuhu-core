@@ -163,6 +163,13 @@ private func handleWSConnection(
 
 /// Monitor stdin for EOF. When the server (parent) dies, the pipe closes
 /// and this detects it, causing the runner to exit. Works cross-platform.
+///
+/// NOTE: `exit(0)` bypasses structured concurrency teardown, so in-flight
+/// bash processes won't get their `teardownSequence` (SIGTERM → SIGKILL).
+/// This is acceptable because the parent dying is an exceptional case —
+/// either the server crashed (in which case cleanup is best-effort anyway)
+/// or it's shutting down normally (in which case it closes the pipe *after*
+/// cancelling in-flight work). Orphaned bash processes will finish naturally.
 private func startParentWatchdog(logger: Logger) {
   Task.detached {
     let stdin = FileHandle.standardInput

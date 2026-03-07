@@ -53,7 +53,14 @@ public actor WuhuLocalRunnerSpawner {
     let pipe = Pipe()
     watchdogPipe = pipe
 
-    // Spawn the runner child process
+    // Spawn the runner child process.
+    //
+    // NOTE: We use Foundation.Process here rather than swift-subprocess because
+    // the runner is a long-lived child process (not a short-lived command).
+    // The Linux Foundation.Process bugs (isRunning TOCTOU races, terminationStatus
+    // SIGILL) primarily affect short-lived processes where you poll for completion.
+    // For this spawner, the child runs for the server's entire lifetime, and we
+    // only call terminate() during an orderly shutdown where the race is benign.
     let process = Process()
     process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
     process.arguments = ["runner", "--config", configPath]
@@ -131,6 +138,11 @@ public actor WuhuLocalRunnerSpawner {
   }
 
   /// Stop the local runner child process.
+  ///
+  /// There is a small race between cancelling `connectionTask` and unlinking the
+  /// socket — the reconnection logic might briefly try to reconnect to a deleted
+  /// socket. This is benign: the reconnection will fail and the task checks
+  /// `Task.isCancelled`.
   public func stop() {
     connectionTask?.cancel()
     connectionTask = nil

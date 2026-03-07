@@ -72,6 +72,7 @@ struct AsyncBashTests {
           }
         }
       },
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     )
 
     let session = try await service.createSession(

@@ -109,14 +109,19 @@ public enum LocalBash {
     }
   }
 
-  /// Kill a process group by PID. Used by the reaper service for remote cancel dispatch.
+  /// Kill a process group by PGID. Sends SIGTERM immediately, then SIGKILL
+  /// after 3 seconds if the group is still alive. Used by the cancel RPC handler.
   public static func killProcessGroup(pgid: Int32) {
     // Send SIGTERM to the process group
     kill(-pgid, SIGTERM)
     // Schedule SIGKILL as fallback after a short delay
     Task {
       try? await Task.sleep(nanoseconds: 3_000_000_000)
-      kill(-pgid, SIGKILL)
+      // Check if the process group still exists before sending SIGKILL
+      // to avoid hitting a recycled PGID.
+      if kill(-pgid, 0) == 0 {
+        kill(-pgid, SIGKILL)
+      }
     }
   }
 

@@ -45,8 +45,8 @@ swift run wuhu anthropic "Say hello"
 Formatting:
 
 ```bash
-swift package --allow-writing-to-package-directory swiftformat
-swift package --allow-writing-to-package-directory swiftformat --lint .
+swiftformat --config .swiftformat Sources/ Tests/
+swiftformat --config .swiftformat --lint Sources/ Tests/
 ```
 
 Environment variables:

@@ -28,7 +28,7 @@ public actor WuhuService {
     baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
-    runnerRegistry: RunnerRegistry? = nil,
+    runnerRegistry: RunnerRegistry,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -38,7 +38,7 @@ public actor WuhuService {
     self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
-    self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
+    self.runnerRegistry = runnerRegistry
     instanceID = UUID().uuidString.lowercased()
   }
 

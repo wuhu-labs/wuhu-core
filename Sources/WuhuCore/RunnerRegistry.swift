@@ -24,8 +24,10 @@ public struct RunnerInfo: Sendable, Hashable {
 }
 
 /// Server-side registry of live runners.
-/// Always contains a local runner. Remote runners are registered/removed
-/// as WebSocket connections come and go.
+///
+/// Starts empty. The local runner is registered externally by
+/// `WuhuLocalRunnerSpawner` after spawning the child process.
+/// Remote runners are registered/removed as connections come and go.
 ///
 /// Tracks two categories of remote runners:
 /// - **Declared** runners from server config (server connects out to them).
