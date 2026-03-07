@@ -6,7 +6,6 @@ import WuhuCore
 
 /// Connects the server OUT to remote runners over TCP mux.
 enum WuhuMuxRunnerConnector {
-
   /// Connect to a remote runner and register it in the registry.
   /// Runs until the mux session closes or is cancelled.
   /// Returns true if a connection was established.

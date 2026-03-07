@@ -28,9 +28,9 @@ public final class MuxStreamReader: Sendable {
   // Mutable state protected by being used from a single async context per RPC.
   // The nonisolated(unsafe) is acceptable because each MuxStreamReader is
   // used by exactly one async task (one RPC handler or one RPC caller).
-  nonisolated(unsafe) private var buffer: [UInt8] = []
-  nonisolated(unsafe) private var iterator: AsyncStream<[UInt8]>.AsyncIterator?
-  nonisolated(unsafe) private var iteratorInitialized = false
+  private nonisolated(unsafe) var buffer: [UInt8] = []
+  private nonisolated(unsafe) var iterator: AsyncStream<[UInt8]>.AsyncIterator?
+  private nonisolated(unsafe) var iteratorInitialized = false
 
   public init(stream: MuxStream) {
     self.stream = stream
@@ -91,7 +91,6 @@ public final class MuxStreamReader: Sendable {
 /// Binary payloads (read/write) are length-prefixed and follow the JSON frame
 /// on the same stream.
 public enum MuxRunnerCodec {
-
   // MARK: - Write
 
   /// Write a request frame to a stream.

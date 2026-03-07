@@ -7,7 +7,6 @@ import Mux
 /// Each inbound stream is one RPC call. The handler reads the request,
 /// dispatches it, writes the response, and closes the stream.
 public enum MuxRunnerHandler {
-
   /// Run the handler loop: accept inbound streams and dispatch them.
   /// Returns when the session closes or is cancelled.
   public static func serve(session: MuxSession, runner: any Runner, name: String) async {
@@ -30,7 +29,7 @@ public enum MuxRunnerHandler {
       switch op {
       case .hello:
         let _: HelloRequest? = payload.isEmpty ? nil : try? MuxRunnerCodec.decode(HelloRequest.self, from: payload)
-        let resp = HelloResponse(runnerName: await handler.runnerName, version: muxRunnerProtocolVersion)
+        let resp = await HelloResponse(runnerName: handler.runnerName, version: muxRunnerProtocolVersion)
         try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: resp)
 
       case .bash:
@@ -109,7 +108,6 @@ public enum MuxRunnerHandler {
     switch response {
     case let .hello(resp):
       try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
-
     case let .bash(_, result):
       try await writeResult(stream, op: op, result: result)
     case let .read(_, result):
@@ -133,7 +131,7 @@ public enum MuxRunnerHandler {
     }
   }
 
-  private static func writeResult<T: Encodable>(_ stream: MuxStream, op: MuxRunnerOp, result: Result<T, RunnerWireError>) async throws {
+  private static func writeResult(_ stream: MuxStream, op: MuxRunnerOp, result: Result<some Encodable, RunnerWireError>) async throws {
     switch result {
     case let .success(value):
       try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: value)

@@ -14,8 +14,8 @@ public actor MuxRunnerClient: Runner {
   private let session: MuxSession
 
   public init(name: String, session: MuxSession) {
-    self.id = .remote(name: name)
-    self.runnerName = name
+    id = .remote(name: name)
+    runnerName = name
     self.session = session
   }
 
@@ -35,9 +35,7 @@ public actor MuxRunnerClient: Runner {
     guard ok else {
       throw RunnerError.requestFailed(message: String(decoding: Data(payload), as: UTF8.self))
     }
-    // Binary data follows as a length-prefixed payload
-    let data = try await MuxRunnerCodec.readBinary(reader)
-    return data
+    return try await MuxRunnerCodec.readBinary(reader)
   }
 
   public func readString(path: String, encoding _: String.Encoding) async throws -> String {
@@ -100,7 +98,7 @@ public actor MuxRunnerClient: Runner {
 
   /// Open a stream, send a request, read a typed response, close.
   /// Used for simple request/response operations (no binary data).
-  private func rpc<Req: Encodable & Sendable, Resp: Decodable>(_ op: MuxRunnerOp, request: Req) async throws -> Resp {
+  private func rpc<Resp: Decodable>(_ op: MuxRunnerOp, request: some Encodable & Sendable) async throws -> Resp {
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: op, payload: request)
     try await stream.finish()

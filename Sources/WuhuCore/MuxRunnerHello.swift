@@ -10,7 +10,6 @@ public let muxRunnerProtocolVersion = 7
 /// and sends a hello. The responder reads it and sends back a hello.
 /// Both sides verify protocol version compatibility.
 public enum MuxRunnerHello {
-
   /// Send hello as the runner side. Opens stream 1, writes hello, reads server hello.
   public static func sendAsRunner(session: MuxSession, runnerName: String) async throws -> HelloResponse {
     let stream = try await session.open()

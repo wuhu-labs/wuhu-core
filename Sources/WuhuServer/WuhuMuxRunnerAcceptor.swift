@@ -10,7 +10,6 @@ import WuhuCore
 /// Runners connect to a TCP port, establish a mux session, perform a hello
 /// exchange, and then serve RPC requests over mux streams.
 enum WuhuMuxRunnerAcceptor {
-
   /// Start listening for incoming mux runner connections.
   /// Returns a task that runs the accept loop.
   static func start(

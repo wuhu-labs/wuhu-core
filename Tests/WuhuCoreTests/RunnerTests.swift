@@ -624,7 +624,6 @@ struct RunnerServerHandlerTests {
   }
 }
 
-
 // MARK: - RunnerID Wire Encoding Tests
 
 struct RunnerIDWireEncodingTests {
@@ -643,6 +642,7 @@ struct RunnerIDWireEncodingTests {
     #expect(String(decoding: remoteData, as: UTF8.self) == "\"remote:build-mac\"")
   }
 }
+
 // MARK: - RunnerRegistry Tests
 
 struct RunnerRegistryTests {
@@ -693,4 +693,3 @@ struct RunnerRegistryTests {
     #expect(names.contains("beta"))
   }
 }
-

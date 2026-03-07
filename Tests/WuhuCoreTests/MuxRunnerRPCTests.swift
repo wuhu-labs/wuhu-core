@@ -1,15 +1,13 @@
 import Foundation
 import Mux
 import Testing
-
 @testable import WuhuCore
 
 @Suite("Mux Runner RPC")
 struct MuxRunnerRPCTests {
-
   /// Helper: create an in-memory mux session pair, run both, and execute body.
   private func withMuxPair(
-    body: (MuxSession, MuxSession) async throws -> Void
+    body: (MuxSession, MuxSession) async throws -> Void,
   ) async throws {
     let (connA, connB) = InMemoryConnection.makePair()
     let client = MuxSession(connection: connA, role: .initiator, config: MuxConfig(keepaliveInterval: nil))
