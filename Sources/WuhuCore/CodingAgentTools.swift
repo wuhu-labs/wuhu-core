@@ -11,6 +11,7 @@ public extension WuhuTools {
     mountResolver: @escaping MountResolver,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
+    bashReaper: BashReaper? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
       readTool(mountResolver: mountResolver),
@@ -19,7 +20,7 @@ public extension WuhuTools {
       lsTool(mountResolver: mountResolver),
       findTool(mountResolver: mountResolver),
       grepTool(mountResolver: mountResolver),
-      bashTool(mountResolver: mountResolver),
+      bashTool(mountResolver: mountResolver, bashReaper: bashReaper),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
@@ -618,7 +619,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
+private func bashTool(mountResolver: @escaping MountResolver, bashReaper: BashReaper?) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -652,12 +653,23 @@ private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     parameters: schema,
   )
 
-  return AnyAgentTool(tool: tool, label: "bash") { _, args in
+  return AnyAgentTool(tool: tool, label: "bash") { toolCallId, args in
     let params = try Params.parse(toolName: tool.name, args: args)
 
     // All bash execution goes through a runner (local or remote) via mount resolver.
     let resolved = try await mountResolver(params.mount)
-    let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+    let runner = resolved.runner
+    let runnerID = runner.id
+
+    // Use the tool call ID as the cancellation tag so the reaper can
+    // tell the runner which bash process to kill.
+    let tag = toolCallId
+
+    let run = try await withTaskCancellationHandler {
+      try await runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout, tag: tag)
+    } onCancel: {
+      bashReaper?.enqueueKill(runnerID: runnerID, tag: tag)
+    }
     return try formatBashResult(run)
   }
 }

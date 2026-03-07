@@ -47,6 +47,22 @@ public enum LocalBash {
       "GH_PROMPT_DISABLED": "1",
     ])
 
+    // Wrap the command so that SIGTERM kills the entire process tree.
+    //
+    // swift-subprocess's teardownSequence sends SIGTERM to the bash process only
+    // (toProcessGroup: false), so child processes like `sleep` survive as orphans.
+    //
+    // The wrapper runs the user command in a background job, waits for it, and
+    // installs a trap that kills the entire process group on SIGTERM. Since the
+    // child uses processGroupID=0 (PGID == PID), `kill 0` in the trap sends
+    // SIGTERM to all processes in the group.
+    let wrappedCommand = """
+    _wuhu_cleanup() { kill 0; exit 143; }
+    trap _wuhu_cleanup TERM
+    { \(command); } &
+    wait $!
+    """
+
     // When there's a timeout, we race the subprocess against a timer.
     // When the parent task is cancelled, the teardownSequence handles cleanup.
     if let timeoutSeconds, timeoutSeconds > 0 {
@@ -55,7 +71,7 @@ public enum LocalBash {
         group.addTask {
           let result = try await Subprocess.run(
             .path("/bin/bash"),
-            arguments: ["-lc", command],
+            arguments: ["-lc", wrappedCommand],
             environment: env,
             workingDirectory: FilePath(cwd),
             platformOptions: platformOptions,
@@ -92,7 +108,7 @@ public enum LocalBash {
       // No timeout: simple collected run. Task cancellation triggers teardownSequence.
       let result = try await Subprocess.run(
         .path("/bin/bash"),
-        arguments: ["-lc", command],
+        arguments: ["-lc", wrappedCommand],
         environment: env,
         workingDirectory: FilePath(cwd),
         platformOptions: platformOptions,
@@ -106,22 +122,6 @@ public enum LocalBash {
         timedOut: false,
         terminated: false,
       )
-    }
-  }
-
-  /// Kill a process group by PGID. Sends SIGTERM immediately, then SIGKILL
-  /// after 3 seconds if the group is still alive. Used by the cancel RPC handler.
-  public static func killProcessGroup(pgid: Int32) {
-    // Send SIGTERM to the process group
-    kill(-pgid, SIGTERM)
-    // Schedule SIGKILL as fallback after a short delay
-    Task {
-      try? await Task.sleep(nanoseconds: 3_000_000_000)
-      // Check if the process group still exists before sending SIGKILL
-      // to avoid hitting a recycled PGID.
-      if kill(-pgid, 0) == 0 {
-        kill(-pgid, SIGKILL)
-      }
     }
   }
 

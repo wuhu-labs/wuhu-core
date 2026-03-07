@@ -16,6 +16,7 @@ public actor WuhuService {
   private let subscriptionHub = WuhuSessionSubscriptionHub()
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
+  public let bashReaper: BashReaper
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
@@ -39,6 +40,7 @@ public actor WuhuService {
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry
+    bashReaper = BashReaper(runnerRegistry: runnerRegistry)
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -575,6 +577,7 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       mountResolver: mountResolver,
       asyncBash: asyncBash,
       braveSearchAPIKey: braveSearchAPIKey,
+      bashReaper: bashReaper,
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 

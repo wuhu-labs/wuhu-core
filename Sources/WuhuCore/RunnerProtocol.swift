@@ -16,11 +16,16 @@ public struct BashRequest: Sendable, Hashable, Codable {
   public var command: String
   public var cwd: String
   public var timeout: Double?
+  /// Opaque tag for cancellation. The runner tracks active bash executions
+  /// by this tag so the server can cancel them via `MuxRunnerOp.cancel`.
+  /// Typically the tool call ID from the agent loop.
+  public var tag: String?
 
-  public init(command: String, cwd: String, timeout: Double? = nil) {
+  public init(command: String, cwd: String, timeout: Double? = nil, tag: String? = nil) {
     self.command = command
     self.cwd = cwd
     self.timeout = timeout
+    self.tag = tag
   }
 }
 
@@ -98,12 +103,12 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
 
 /// Request to cancel a running bash process on the runner.
 public struct CancelRequest: Sendable, Hashable, Codable {
-  /// Identifies what to cancel. Currently this is the process group ID
-  /// of the bash process, sent by the server when dispatching cancel.
-  public var processGroupID: Int32
+  /// Tag identifying the bash execution to cancel.
+  /// Matches the `tag` field from the originating `BashRequest`.
+  public var tag: String
 
-  public init(processGroupID: Int32) {
-    self.processGroupID = processGroupID
+  public init(tag: String) {
+    self.tag = tag
   }
 }
 

@@ -170,6 +170,10 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Process execution --
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
+  /// Run a bash command with a cancellation tag. The tag allows the server
+  /// to cancel the command via the cancel RPC. Default implementation
+  /// ignores the tag and delegates to `runBash(command:cwd:timeout:)`.
+  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult
 
   // -- File I/O --
   func readData(path: String) async throws -> Data
@@ -187,6 +191,14 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Workspace materialization --
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
+}
+
+// MARK: - Runner default implementations
+
+public extension Runner {
+  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag _: String?) async throws -> BashResult {
+    try await runBash(command: command, cwd: cwd, timeout: timeout)
+  }
 }
 
 // MARK: - Runner errors
