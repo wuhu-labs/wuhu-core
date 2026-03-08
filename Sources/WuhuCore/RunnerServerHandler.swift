@@ -15,13 +15,6 @@ public actor RunnerServerHandler {
   /// which triggers the swift-subprocess teardownSequence (SIGTERM → 3s → SIGKILL).
   private var activeBashTasks: [String: Task<(RunnerResponse, Data?), Never>] = [:]
 
-  /// Tags for which a cancel arrived before the bash task was registered.
-  /// When a bash task is registered with a pending-cancel tag, it is
-  /// cancelled immediately. This closes the race between concurrent mux
-  /// streams where the cancel RPC can be processed before the bash task
-  /// registration completes.
-  private var pendingCancels: Set<String> = []
-
   public init(runner: any Runner, name: String) {
     self.runner = runner
     runnerName = name
@@ -42,12 +35,7 @@ public actor RunnerServerHandler {
   }
 
   /// Register an active bash task for cancellation tracking.
-  /// If a cancel was already received for this tag (pending cancel),
-  /// the task is cancelled immediately.
   public func registerBashTask(_ tag: String, task: Task<(RunnerResponse, Data?), Never>) {
-    if pendingCancels.remove(tag) != nil {
-      task.cancel()
-    }
     activeBashTasks[tag] = task
   }
 
@@ -58,19 +46,12 @@ public actor RunnerServerHandler {
 
   /// Cancel a bash task by tag. Cancels the Swift task, which triggers
   /// the swift-subprocess teardownSequence (SIGTERM → 3s → SIGKILL).
-  ///
-  /// Returns `true` if the tag was found and cancelled immediately.
-  /// If the tag isn't registered yet (race with concurrent mux streams),
-  /// it is added to `pendingCancels` so ``registerBashTask`` will cancel
-  /// it on arrival, and this method returns `false`.
   public func cancelBash(tag: String) -> Bool {
-    if let task = activeBashTasks.removeValue(forKey: tag) {
-      task.cancel()
-      return true
+    guard let task = activeBashTasks.removeValue(forKey: tag) else {
+      return false
     }
-    // Tag not yet registered — remember the cancel for when it arrives.
-    pendingCancels.insert(tag)
-    return false
+    task.cancel()
+    return true
   }
 
   /// Dispatch a text-frame request. Returns a text-frame response.

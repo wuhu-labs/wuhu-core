@@ -103,14 +103,9 @@ struct BashCancelTests {
       // Give the runner time to receive and start processing the bash request
       try await Task.sleep(for: .milliseconds(200))
 
-      // Send cancel — may return cancelled=false if the cancel stream
-      // is processed before the bash task is registered (mux streams have
-      // no ordering guarantee). Either way, the pending-cancel mechanism
-      // ensures the bash task will be cancelled on registration.
+      // Send cancel
       let cancelResp = try await client.cancel(tag: tag)
-      // If the bash task was already registered, cancelled is true.
-      // If not, the pending cancel will fire on registration.
-      _ = cancelResp
+      #expect(cancelResp.cancelled == true)
 
       // Bash task should complete with terminated=true
       let result = try await bashTask.value
