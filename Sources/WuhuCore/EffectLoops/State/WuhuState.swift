@@ -10,4 +10,16 @@ struct WuhuState: Sendable, Equatable {
   var cost: CostState
   var settings: SettingsState
   var status: StatusState
+
+  static var empty: WuhuState {
+    .init(
+      transcript: .empty,
+      queue: .empty,
+      inference: .empty,
+      tools: .empty,
+      cost: .empty,
+      settings: .empty,
+      status: .empty,
+    )
+  }
 }

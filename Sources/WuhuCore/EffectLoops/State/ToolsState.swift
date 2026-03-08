@@ -11,6 +11,9 @@ struct ToolsState: Sendable, Equatable {
   /// Guard token: tool call IDs currently being recovered (stale recovery in flight).
   var recoveringIDs: Set<String> = []
 
+  /// Guard token: tool call IDs currently being executed (prevents false stale detection).
+  var executingIDs: Set<String> = []
+
   static var empty: ToolsState {
     .init(statuses: [:], repetitionTracker: ToolCallRepetitionTracker())
   }

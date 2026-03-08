@@ -85,9 +85,10 @@ struct WuhuBehavior: LoopBehavior {
     // 7. Tool execution — pending tool calls
     let pendingCalls = pendingToolCalls(in: state)
     if !pendingCalls.isEmpty {
-      // Mark all as started (guard token)
+      // Mark all as started (guard token) and track as executing
       for call in pendingCalls {
         state.tools.statuses[call.id] = .started
+        state.tools.executingIDs.insert(call.id)
       }
       return executeToolCalls(pendingCalls, state: state)
     }
@@ -117,6 +118,7 @@ struct WuhuBehavior: LoopBehavior {
       guard status == .started else { return nil }
       guard !finished.contains(id) else { return nil }
       guard !state.tools.recoveringIDs.contains(id) else { return nil }
+      guard !state.tools.executingIDs.contains(id) else { return nil }
       return id
     }.sorted()
   }
