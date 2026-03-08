@@ -18,13 +18,29 @@ private func makeState() -> WuhuState {
   )
 }
 
-private func makeEntry(id: Int64 = 1, sessionID: String = "test") -> WuhuSessionEntry {
+private func makeEntry(
+  id: Int64 = 1,
+  sessionID: String = "test",
+  payload: WuhuEntryPayload = .custom(customType: "test", data: nil),
+) -> WuhuSessionEntry {
   WuhuSessionEntry(
     id: id,
     sessionID: sessionID,
     parentEntryID: nil,
     createdAt: Date(),
-    payload: .custom(customType: "test", data: nil),
+    payload: payload,
+  )
+}
+
+private func makeBehavior() throws -> WuhuBehavior {
+  let store = try SQLiteSessionStore(path: ":memory:")
+  let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
+  let blobStore = WuhuBlobStore(rootDirectory: blobDir)
+  return WuhuBehavior(
+    sessionID: .init(rawValue: "test"),
+    store: store,
+    runtimeConfig: WuhuSessionRuntimeConfig(),
+    blobStore: blobStore,
   )
 }
 
@@ -97,40 +113,38 @@ struct InferenceReducerTests {
     #expect(state.inference.lastError == nil)
   }
 
-  @Test("failed increments retry count and records error")
-  func failed() {
-    var state = makeState()
-    state.inference.status = .running
-
-    let error1 = InferenceError(message: "timeout", httpStatusCode: nil, isTransient: true)
-    reduceInference(state: &state, action: .failed(error1))
-    #expect(state.inference.retryCount == 1)
-    #expect(state.inference.lastError == error1)
-
-    let error2 = InferenceError(message: "timeout again", httpStatusCode: nil, isTransient: true)
-    reduceInference(state: &state, action: .failed(error2))
-    #expect(state.inference.retryCount == 2)
-    #expect(state.inference.lastError == error2)
-  }
-
-  @Test("failed with transient HTTP error preserves status code")
+  @Test("failed with transient error sets waitingRetry and retryAfter")
   func failedTransient() {
     var state = makeState()
     state.inference.status = .running
 
     let error = InferenceError(message: "HTTP 429", httpStatusCode: 429, isTransient: true)
     reduceInference(state: &state, action: .failed(error))
+    #expect(state.inference.retryCount == 1)
+    #expect(state.inference.status == .waitingRetry)
+    #expect(state.inference.retryAfter != nil)
+    #expect(state.inference.lastError == error)
     #expect(state.inference.lastError?.httpStatusCode == 429)
-    #expect(state.inference.lastError?.isTransient == true)
+
+    // Second transient failure increments retry count
+    let error2 = InferenceError(message: "timeout again", httpStatusCode: nil, isTransient: true)
+    state.inference.status = .running
+    reduceInference(state: &state, action: .failed(error2))
+    #expect(state.inference.retryCount == 2)
+    #expect(state.inference.status == .waitingRetry)
+    #expect(state.inference.lastError == error2)
   }
 
-  @Test("failed with permanent error preserves non-transient flag")
+  @Test("failed with permanent error stays idle")
   func failedPermanent() {
     var state = makeState()
     state.inference.status = .running
 
     let error = InferenceError(message: "HTTP 401", httpStatusCode: 401, isTransient: false)
     reduceInference(state: &state, action: .failed(error))
+    #expect(state.inference.retryCount == 1)
+    #expect(state.inference.status == .idle)
+    #expect(state.inference.retryAfter == nil)
     #expect(state.inference.lastError?.httpStatusCode == 401)
     #expect(state.inference.lastError?.isTransient == false)
   }
@@ -347,38 +361,70 @@ struct StatusReducerTests {
   }
 }
 
-// MARK: - WuhuBehavior Integration Tests
+// MARK: - State Query Tests (needsInference, staleToolCallIDs)
 
-@Suite("WuhuBehavior")
-struct WuhuBehaviorTests {
-  @Test("reduce dispatches to correct sub-reducer")
-  func reduceDispatches() {
-    let behavior = WuhuBehavior()
+@Suite("WuhuBehavior state queries")
+struct WuhuBehaviorStateQueryTests {
+  @Test("needsInference returns true when last message is user")
+  func needsInferenceUser() throws {
+    let behavior = try makeBehavior()
     var state = makeState()
-
-    // Queue action
-    let backfill = SystemUrgentQueueBackfill(
-      cursor: .init(rawValue: "10"),
-      pending: [],
-      journal: [],
-    )
-    behavior.reduce(state: &state, action: .queue(.systemUpdated(backfill)))
-    #expect(state.queue.system.cursor.rawValue == "10")
-
-    // Cost action
-    behavior.reduce(state: &state, action: .cost(.pause))
-    #expect(state.cost.isPaused == true)
-
-    // Transcript action
-    behavior.reduce(state: &state, action: .transcript(.append(makeEntry())))
-    #expect(state.transcript.entries.count == 1)
+    state.transcript.entries.append(makeEntry(payload: .message(.user(.init(
+      content: [.text(text: "hello", signature: nil)], timestamp: Date(),
+    )))))
+    #expect(behavior.needsInference(state: state) == true)
   }
 
-  @Test("nextEffect returns nil (stub)")
-  func nextEffectStub() {
-    let behavior = WuhuBehavior()
+  @Test("needsInference returns true when last message is tool result")
+  func needsInferenceToolResult() throws {
+    let behavior = try makeBehavior()
     var state = makeState()
-    let effect = behavior.nextEffect(state: &state)
-    #expect(effect == nil)
+    state.transcript.entries.append(makeEntry(payload: .message(.toolResult(.init(
+      toolCallId: "tc-1", toolName: "bash", content: [], details: .object([:]), isError: false, timestamp: Date(),
+    )))))
+    #expect(behavior.needsInference(state: state) == true)
+  }
+
+  @Test("needsInference returns false when last message is assistant")
+  func needsInferenceAssistant() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.transcript.entries.append(makeEntry(payload: .message(.assistant(.init(
+      provider: .openai, model: "test", content: [], usage: nil, stopReason: "stop",
+      errorMessage: nil, timestamp: Date(),
+    )))))
+    #expect(behavior.needsInference(state: state) == false)
+  }
+
+  @Test("needsInference returns false for empty transcript")
+  func needsInferenceEmpty() throws {
+    let behavior = try makeBehavior()
+    let state = makeState()
+    #expect(behavior.needsInference(state: state) == false)
+  }
+
+  @Test("staleToolCallIDs finds orphaned tool calls")
+  func staleToolCallIDs() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.tools.statuses["tc-1"] = .started
+    state.tools.statuses["tc-2"] = .pending // pending is not stale — it hasn't been picked up yet
+    state.tools.statuses["tc-3"] = .completed
+
+    let stale = behavior.staleToolCallIDs(in: state)
+    #expect(stale == ["tc-1"]) // Only started (not pending) is stale
+  }
+
+  @Test("staleToolCallIDs excludes tool calls with results in transcript")
+  func staleExcludesWithResults() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.tools.statuses["tc-1"] = .started
+    state.transcript.entries.append(makeEntry(payload: .message(.toolResult(.init(
+      toolCallId: "tc-1", toolName: "bash", content: [], details: .object([:]), isError: false, timestamp: Date(),
+    )))))
+
+    let stale = behavior.staleToolCallIDs(in: state)
+    #expect(stale.isEmpty)
   }
 }

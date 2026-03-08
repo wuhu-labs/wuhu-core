@@ -556,7 +556,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 }
 
-private func makeRequestOptions(model: Model, settings: SessionSettingsSnapshot, userModelID: String? = nil) -> RequestOptions {
+func makeRequestOptions(model: Model, settings: SessionSettingsSnapshot, userModelID: String? = nil) -> RequestOptions {
   var requestOptions = RequestOptions()
 
   // Max tokens: use model spec (maxOutput / 3) or a generous fallback.
@@ -578,7 +578,7 @@ private func makeRequestOptions(model: Model, settings: SessionSettingsSnapshot,
   return requestOptions
 }
 
-private func mergeBetaFeatures(_ features: [String], into options: inout RequestOptions) {
+func mergeBetaFeatures(_ features: [String], into options: inout RequestOptions) {
   guard !features.isEmpty else { return }
   let existing = options.headers["anthropic-beta"] ?? ""
   var items = existing.isEmpty ? [] : existing.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -588,7 +588,7 @@ private func mergeBetaFeatures(_ features: [String], into options: inout Request
   options.headers["anthropic-beta"] = items.joined(separator: ", ")
 }
 
-private func modelFromSettings(_ settings: SessionSettingsSnapshot) -> Model {
+func modelFromSettings(_ settings: SessionSettingsSnapshot) -> Model {
   let provider: Provider = switch settings.effectiveModel.provider.rawValue {
   case ProviderID.openai.rawValue:
     .openai

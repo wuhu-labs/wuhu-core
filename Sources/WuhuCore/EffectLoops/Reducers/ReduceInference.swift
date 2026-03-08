@@ -1,3 +1,8 @@
+import Foundation
+
+/// Maximum number of retry attempts for transient inference errors.
+private let maxInferenceRetries = 10
+
 /// Sub-reducer for inference actions.
 func reduceInference(state: inout WuhuState, action: InferenceAction) {
   switch action {
@@ -18,10 +23,15 @@ func reduceInference(state: inout WuhuState, action: InferenceAction) {
 
   case let .failed(error):
     state.inference.lastError = error
-    state.inference.retryCount += 1
-    // retryAfter will be set by nextEffect in Step 2.
-    // For now, just transition to idle on failure.
-    state.inference.status = .idle
+    if error.isTransient, state.inference.retryCount < maxInferenceRetries {
+      state.inference.retryCount += 1
+      let delay = min(Foundation.pow(2, Double(state.inference.retryCount - 1)), 60)
+      state.inference.retryAfter = .now + .seconds(delay)
+      state.inference.status = .waitingRetry
+    } else {
+      state.inference.retryCount += 1
+      state.inference.status = .idle
+    }
 
   case .retryReady:
     state.inference.retryAfter = nil
