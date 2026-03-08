@@ -59,6 +59,7 @@ public struct WuhuServer: Sendable {
 
     // Runner registry — connect to configured remote runners
     let runnerRegistry = RunnerRegistry()
+    let callbackBridge = BashCallbackBridge()
     let logger = Logger(label: "WuhuServer")
 
     // Declare configured runner names so they always appear in list_runners
@@ -77,6 +78,7 @@ public struct WuhuServer: Sendable {
       _runnerTasks = WuhuMuxRunnerConnector.connectAll(
         runners: muxRunners,
         registry: runnerRegistry,
+        callbackBridge: callbackBridge,
         logger: logger,
       )
     }
@@ -85,6 +87,7 @@ public struct WuhuServer: Sendable {
     let localRunnerSpawner = WuhuLocalRunnerSpawner(
       socketPath: config.localRunnerSocket,
       registry: runnerRegistry,
+      callbackBridge: callbackBridge,
       logger: logger,
     )
     try await localRunnerSpawner.start()
@@ -100,6 +103,7 @@ public struct WuhuServer: Sendable {
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
+      callbackBridge: callbackBridge,
     )
     await service.startAgentLoopManager()
 
@@ -567,6 +571,7 @@ public struct WuhuServer: Sendable {
     // WebSocket router for incoming runner connections
     let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
       registry: runnerRegistry,
+      callbackBridge: callbackBridge,
       logger: logger,
     )
 

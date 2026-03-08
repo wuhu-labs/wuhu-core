@@ -2,16 +2,20 @@ import Foundation
 import Mux
 import WuhuAPI
 
-/// Server-side actor that implements the `Runner` protocol by forwarding
+/// Server-side actor that implements `RunnerCommands` by forwarding
 /// all calls over a `MuxSession` to a remote runner process.
 ///
-/// Each Runner method opens a dedicated mux stream, sends the request,
+/// Each command opens a dedicated mux stream, sends the request,
 /// reads the response, and returns. The stream is the correlation —
 /// no request IDs, no pending maps, no continuations.
-public actor MuxRunnerClient: Runner {
+///
+/// Also starts a callback handler loop that accepts inbound mux streams
+/// from the runner for `bashOutput` and `bashFinished` callbacks.
+public actor MuxRunnerCommandsClient: RunnerCommands {
   public nonisolated let id: RunnerID
   public let runnerName: String
   private let session: MuxSession
+  private var callbackHandler: Task<Void, Never>?
 
   public init(name: String, session: MuxSession) {
     id = .remote(name: name)
@@ -19,14 +23,62 @@ public actor MuxRunnerClient: Runner {
     self.session = session
   }
 
-  // MARK: - Runner protocol
-
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout))
+  /// Start accepting inbound callback streams from the runner.
+  /// Must be called after construction to enable bash callbacks.
+  public func startCallbackHandler(callbacks: any RunnerCallbacks) {
+    let session = session
+    callbackHandler = Task {
+      for await stream in session.inbound {
+        let callbacks = callbacks
+        Task {
+          await Self.handleCallbackStream(stream, callbacks: callbacks)
+        }
+      }
+    }
   }
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult {
-    try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout, tag: tag))
+  /// Stop the callback handler.
+  public func stopCallbackHandler() {
+    callbackHandler?.cancel()
+    callbackHandler = nil
+  }
+
+  /// Handle a single inbound callback stream from the runner.
+  private static func handleCallbackStream(_ stream: MuxStream, callbacks: any RunnerCallbacks) async {
+    do {
+      let reader = MuxStreamReader(stream: stream)
+      let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
+
+      switch op {
+      case .bashOutput:
+        let cb = try MuxRunnerCodec.decode(BashOutputCallback.self, from: payload)
+        try await callbacks.bashOutput(tag: cb.tag, chunk: cb.chunk)
+        try await MuxRunnerCodec.writeSuccess(stream, op: .bashOutput, payload: CallbackAck())
+
+      case .bashFinished:
+        let cb = try MuxRunnerCodec.decode(BashFinishedCallback.self, from: payload)
+        try await callbacks.bashFinished(tag: cb.tag, result: cb.result)
+        try await MuxRunnerCodec.writeSuccess(stream, op: .bashFinished, payload: CallbackAck())
+
+      default:
+        // Unexpected op on callback channel — ignore
+        try await MuxRunnerCodec.writeError(stream, op: op, message: "Unexpected op on callback channel: \(op)")
+      }
+
+      try await stream.finish()
+    } catch {
+      try? await stream.reset()
+    }
+  }
+
+  // MARK: - RunnerCommands protocol
+
+  public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    try await rpc(.startBash, request: StartBashRequest(tag: tag, command: command, cwd: cwd, timeout: timeout))
+  }
+
+  public func cancelBash(tag: String) async throws -> CancelResult {
+    try await rpc(.cancelBash, request: CancelBashRequest(tag: tag))
   }
 
   public func readData(path: String) async throws -> Data {
@@ -98,15 +150,9 @@ public actor MuxRunnerClient: Runner {
     try await rpc(.materialize, request: params)
   }
 
-  /// Send a cancel request to kill a bash process on the runner.
-  public func cancel(tag: String) async throws -> CancelResponse {
-    try await rpc(.cancel, request: CancelRequest(tag: tag))
-  }
-
   // MARK: - Generic RPC helper
 
   /// Open a stream, send a request, read a typed response, close.
-  /// Used for simple request/response operations (no binary data).
   private func rpc<Resp: Decodable>(_ op: MuxRunnerOp, request: some Encodable & Sendable) async throws -> Resp {
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: op, payload: request)

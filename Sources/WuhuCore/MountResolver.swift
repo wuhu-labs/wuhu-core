@@ -3,11 +3,11 @@ import WuhuAPI
 
 /// Result of resolving a mount for tool execution.
 public struct ResolvedMount: Sendable {
-  public var runner: any Runner
+  public var runner: any RunnerCommands
   public var cwd: String
   public var mount: WuhuMount?
 
-  public init(runner: any Runner, cwd: String, mount: WuhuMount? = nil) {
+  public init(runner: any RunnerCommands, cwd: String, mount: WuhuMount? = nil) {
     self.runner = runner
     self.cwd = cwd
     self.mount = mount

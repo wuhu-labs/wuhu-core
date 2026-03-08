@@ -4,10 +4,12 @@ import Mux
 // MARK: - RPC Operation Codes
 
 /// Operation codes for the mux-based runner RPC protocol.
-/// Each operation maps to a Runner protocol method.
+/// Commands (server → runner) and callbacks (runner → server)
+/// share the same op space on the same mux session.
 public enum MuxRunnerOp: UInt8, Sendable {
+  // Commands (server → runner)
   case hello = 0
-  case bash = 1
+  case startBash = 1
   case read = 2
   case write = 3
   case exists = 4
@@ -17,7 +19,11 @@ public enum MuxRunnerOp: UInt8, Sendable {
   case find = 8
   case grep = 9
   case materialize = 10
-  case cancel = 11
+  case cancelBash = 11
+
+  // Callbacks (runner → server)
+  case bashOutput = 12
+  case bashFinished = 13
 }
 
 // MARK: - Buffered Stream Reader

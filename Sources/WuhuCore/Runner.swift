@@ -28,6 +28,25 @@ public struct BashResult: Sendable, Hashable {
   }
 }
 
+/// Acknowledgement that a bash process has been started.
+public struct BashStarted: Sendable, Hashable, Codable {
+  public var tag: String
+
+  public init(tag: String) {
+    self.tag = tag
+  }
+}
+
+/// Result of a cancel request.
+public enum CancelResult: String, Sendable, Hashable, Codable {
+  /// The bash process was found and cancelled.
+  case cancelled
+  /// No bash process with that tag was found.
+  case notFound
+  /// The bash process had already finished.
+  case alreadyFinished
+}
+
 /// File existence check result.
 public enum FileExistence: String, Sendable, Hashable, Codable {
   case notFound
@@ -157,23 +176,22 @@ public struct GrepResult: Sendable, Hashable, Codable {
   }
 }
 
-// MARK: - Runner protocol
+// MARK: - RunnerCommands protocol
 
-/// Minimal execution proxy for filesystem operations and process execution.
+/// Commands sent TO the runner. Every method is a short-lived RPC.
 ///
 /// `LocalRunner` implements this in the runner process.
-/// `MuxRunnerClient` implements this by forwarding calls over a
-/// mux session to a remote runner process. The server uses
-/// `MuxRunnerClient` for all runners, including the local one.
-public protocol Runner: Actor, Sendable {
+/// `MuxRunnerCommandsClient` implements this by forwarding calls over a
+/// mux session to a remote runner process.
+///
+/// Bash is fire-and-forget: `startBash` spawns the process and returns
+/// immediately. Results arrive via `RunnerCallbacks.bashFinished`.
+public protocol RunnerCommands: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
-  /// -- Process execution --
-  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
-  /// Run a bash command with a cancellation tag. The tag allows the server
-  /// to cancel the command via the cancel RPC. Default implementation
-  /// ignores the tag and delegates to `runBash(command:cwd:timeout:)`.
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult
+  // -- Bash (fire-and-forget) --
+  func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted
+  func cancelBash(tag: String) async throws -> CancelResult
 
   // -- File I/O --
   func readData(path: String) async throws -> Data
@@ -193,12 +211,16 @@ public protocol Runner: Actor, Sendable {
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
 }
 
-// MARK: - Runner default implementations
+// MARK: - RunnerCallbacks protocol
 
-public extension Runner {
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag _: String?) async throws -> BashResult {
-    try await runBash(command: command, cwd: cwd, timeout: timeout)
-  }
+/// Callbacks FROM the runner. The runner pushes these to the server.
+///
+/// `BashCallbackBridge` implements this on the server side, bridging
+/// fire-and-forget `startBash` with the eventually-arriving results.
+/// `MuxRunnerCallbacksClient` implements this over mux (runner side).
+public protocol RunnerCallbacks: Sendable {
+  func bashOutput(tag: String, chunk: String) async throws
+  func bashFinished(tag: String, result: BashResult) async throws
 }
 
 // MARK: - Runner errors

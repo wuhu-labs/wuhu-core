@@ -7,9 +7,9 @@ import WuhuAPI
 // MARK: - InMemoryRunner for testing
 
 /// A test runner that operates on an in-memory filesystem.
-/// Conforms to the Runner protocol, enabling tool-level and handler-level testing
+/// Conforms to the RunnerCommands protocol, enabling tool-level testing
 /// without touching the real filesystem.
-actor InMemoryRunner: Runner {
+actor InMemoryRunner: RunnerCommands {
   nonisolated let id: RunnerID
 
   private var files: [String: Data] = [:]
@@ -18,11 +18,24 @@ actor InMemoryRunner: Runner {
   /// Bash commands and their scripted responses.
   private var bashResponses: [(pattern: String, result: BashResult)] = []
 
+  /// Callbacks for pushing bash results.
+  private var callbacks: (any RunnerCallbacks)?
+
+  /// Active bash tasks by tag.
+  private var activeTasks: [String: Task<Void, Never>] = [:]
+
+  /// Tags that have already completed.
+  private var completedTags: Set<String> = []
+
   init(id: RunnerID = .local) {
     self.id = id
   }
 
   // MARK: - Test helpers
+
+  func setCallbacks(_ cb: any RunnerCallbacks) {
+    callbacks = cb
+  }
 
   func seedFile(path: String, content: String) {
     files[path] = Data(content.utf8)
@@ -60,14 +73,47 @@ actor InMemoryRunner: Runner {
     files[path].map { String(decoding: $0, as: UTF8.self) }
   }
 
-  // MARK: - Runner protocol
+  // MARK: - RunnerCommands protocol
 
-  func runBash(command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    for (pattern, result) in bashResponses {
-      if command.contains(pattern) { return result }
+  func startBash(tag: String, command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
+    if activeTasks[tag] != nil || completedTags.contains(tag) {
+      return BashStarted(tag: tag)
     }
-    // Default: return empty success
-    return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+
+    let callbacks = callbacks
+    let bashResponses = bashResponses
+
+    let task = Task<Void, Never> { [weak self] in
+      var result = BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+      for (pattern, r) in bashResponses {
+        if command.contains(pattern) { result = r; break }
+      }
+
+      if Task.isCancelled {
+        result = BashResult(exitCode: 137, output: "", timedOut: false, terminated: true)
+      }
+
+      await self?.markCompleted(tag: tag)
+      try? await callbacks?.bashFinished(tag: tag, result: result)
+    }
+    activeTasks[tag] = task
+    return BashStarted(tag: tag)
+  }
+
+  func cancelBash(tag: String) async throws -> CancelResult {
+    if completedTags.contains(tag) {
+      return .alreadyFinished
+    }
+    guard let task = activeTasks.removeValue(forKey: tag) else {
+      return .notFound
+    }
+    task.cancel()
+    return .cancelled
+  }
+
+  private func markCompleted(tag: String) {
+    activeTasks.removeValue(forKey: tag)
+    completedTags.insert(tag)
   }
 
   func readData(path: String) async throws -> Data {
@@ -164,11 +210,9 @@ actor InMemoryRunner: Runner {
   }
 
   func find(params: FindParams) async throws -> FindResult {
-    // Simple in-memory find: match file paths against the glob pattern.
     let allFiles = files.keys.sorted()
     var matching: [String] = []
     for path in allFiles {
-      // Compute relative path from root
       let root = params.root.hasSuffix("/") ? params.root : params.root + "/"
       guard path.hasPrefix(root) else { continue }
       let rel = String(path.dropFirst(root.count))
@@ -181,7 +225,6 @@ actor InMemoryRunner: Runner {
   }
 
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
-    // In-memory materialization: copy all files/dirs under templatePath to destinationPath.
     let srcPrefix = params.templatePath.hasSuffix("/") ? params.templatePath : params.templatePath + "/"
     let dstPrefix = params.destinationPath.hasSuffix("/") ? params.destinationPath : params.destinationPath + "/"
 
@@ -189,16 +232,13 @@ actor InMemoryRunner: Runner {
       throw RunnerError.fileNotFound(path: params.templatePath)
     }
 
-    // Copy destination directory
     directories.insert(params.destinationPath)
 
-    // Copy files
     for (path, data) in files {
       if path.hasPrefix(srcPrefix) {
         let rel = String(path.dropFirst(srcPrefix.count))
         let newPath = dstPrefix + rel
         files[newPath] = data
-        // Ensure parent dirs
         var dir = (newPath as NSString).deletingLastPathComponent
         while dir != "/", !dir.isEmpty {
           directories.insert(dir)
@@ -207,7 +247,6 @@ actor InMemoryRunner: Runner {
       }
     }
 
-    // Copy subdirectories
     for dir in Array(directories) {
       if dir.hasPrefix(srcPrefix) {
         let rel = String(dir.dropFirst(srcPrefix.count))
@@ -219,7 +258,6 @@ actor InMemoryRunner: Runner {
   }
 
   func grep(params: GrepParams) async throws -> GrepResult {
-    // Simple in-memory grep: search through in-memory files.
     let root = params.root.hasSuffix("/") ? params.root : params.root + "/"
     let allFiles = files.keys.filter { $0.hasPrefix(root) }.sorted()
     var matches: [GrepMatch] = []
@@ -319,15 +357,19 @@ struct LocalRunnerTests {
 
   @Test func localRunnerBashExecutesCommand() async throws {
     let runner = LocalRunner()
+    let bridge = BashCallbackBridge()
+    await runner.setCallbacks(bridge)
+
     let tmpDir = NSTemporaryDirectory() + "wuhu-runner-test-\(UUID().uuidString)"
     try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: tmpDir) }
 
-    let result = try await runner.runBash(command: "echo hello", cwd: tmpDir, timeout: 5)
+    let tag = UUID().uuidString
+    _ = try await runner.startBash(tag: tag, command: "echo hello", cwd: tmpDir, timeout: 5)
+    let result = try await bridge.waitForResult(tag: tag)
     #expect(result.exitCode == 0)
     #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello")
     #expect(!result.timedOut)
-    // Clean up output file
     if let path = result.fullOutputPath { try? FileManager.default.removeItem(atPath: path) }
   }
 
@@ -390,236 +432,106 @@ struct LocalRunnerTests {
   }
 }
 
-// MARK: - RunnerServerHandler Tests
+// MARK: - InMemoryRunner Direct Tests
 
-struct RunnerServerHandlerTests {
-  @Test func handlerDispatchesBash() async throws {
-    let mem = InMemoryRunner()
-    await mem.stubBash(pattern: "echo test", result: BashResult(exitCode: 0, output: "test\n", timedOut: false, terminated: false))
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (response, _) = await handler.handle(request: .bash(id: "r1", BashRequest(command: "echo test", cwd: "/", timeout: nil)))
-    guard case let .bash(id, result) = response else {
-      Issue.record("Expected bash response"); return
-    }
-    #expect(id == "r1")
-    let r = try result.get()
-    #expect(r.output == "test\n")
-    #expect(r.exitCode == 0)
-  }
-
-  @Test func handlerDispatchesReadBinary() async throws {
-    let mem = InMemoryRunner()
-    await mem.seedFile(path: "/workspace/hello.txt", content: "world")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (response, binaryData) = await handler.handle(request: .read(id: "r2", ReadRequest(path: "/workspace/hello.txt", binary: true)))
-    guard case let .read(id, result) = response else {
-      Issue.record("Expected read response"); return
-    }
-    #expect(id == "r2")
-    let r = try result.get()
-    #expect(r.content == nil) // binary mode — content in companion frame
-    #expect(r.size == 5)
-    #expect(binaryData != nil)
-    #expect(try String(decoding: #require(binaryData), as: UTF8.self) == "world")
-  }
-
-  @Test func handlerDispatchesReadText() async throws {
-    let mem = InMemoryRunner()
-    await mem.seedFile(path: "/workspace/test.txt", content: "hello runner")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (response, binaryData) = await handler.handle(request: .read(id: "r3", ReadRequest(path: "/workspace/test.txt", binary: false)))
-    guard case let .read(id, result) = response else {
-      Issue.record("Expected read response"); return
-    }
-    #expect(id == "r3")
-    let r = try result.get()
-    #expect(r.content == "hello runner")
-    #expect(binaryData == nil)
-  }
-
-  @Test func handlerDispatchesWriteAndRead() async throws {
+struct InMemoryRunnerDirectTests {
+  @Test func readWriteString() async throws {
     let mem = InMemoryRunner()
     await mem.seedDirectory(path: "/workspace")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (writeResp, _) = await handler.handle(request: .write(id: "w1", WriteRequest(path: "/workspace/new.txt", createDirs: false, content: "created")))
-    guard case let .write(_, writeResult) = writeResp else {
-      Issue.record("Expected write response"); return
-    }
-    _ = try writeResult.get()
-
-    let (readResp, _) = await handler.handle(request: .read(id: "r4", ReadRequest(path: "/workspace/new.txt")))
-    guard case let .read(_, readResult) = readResp else {
-      Issue.record("Expected read response"); return
-    }
-    let r = try readResult.get()
-    #expect(r.content == "created")
+    try await mem.writeString(path: "/workspace/test.txt", content: "hello", createIntermediateDirectories: false, encoding: .utf8)
+    let content = try await mem.readString(path: "/workspace/test.txt", encoding: .utf8)
+    #expect(content == "hello")
   }
 
-  @Test func handlerReturnsErrorForMissingFile() async {
-    let mem = InMemoryRunner()
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (response, _) = await handler.handle(request: .read(id: "r5", ReadRequest(path: "/nonexistent")))
-    guard case let .read(_, result) = response else {
-      Issue.record("Expected read response"); return
-    }
-    switch result {
-    case .success: Issue.record("Expected error")
-    case let .failure(msg): #expect(msg.message.contains("not found") || msg.message.contains("File not found"))
-    }
-  }
-
-  @Test func handlerDispatchesExists() async throws {
+  @Test func existsChecks() async throws {
     let mem = InMemoryRunner()
     await mem.seedFile(path: "/workspace/file.txt", content: "data")
     await mem.seedDirectory(path: "/workspace/dir")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
-    let (fileResp, _) = await handler.handle(request: .exists(id: "e1", ExistsRequest(path: "/workspace/file.txt")))
-    guard case let .exists(_, result) = fileResp else { Issue.record("Expected exists response"); return }
-    #expect(try result.get().existence == .file)
-
-    let (dirResp, _) = await handler.handle(request: .exists(id: "e2", ExistsRequest(path: "/workspace/dir")))
-    guard case let .exists(_, dirResult) = dirResp else { Issue.record("Expected exists response"); return }
-    #expect(try dirResult.get().existence == .directory)
-
-    let (missingResp, _) = await handler.handle(request: .exists(id: "e3", ExistsRequest(path: "/workspace/nope")))
-    guard case let .exists(_, missingResult) = missingResp else { Issue.record("Expected exists response"); return }
-    #expect(try missingResult.get().existence == .notFound)
+    #expect(try await mem.exists(path: "/workspace/file.txt") == .file)
+    #expect(try await mem.exists(path: "/workspace/dir") == .directory)
+    #expect(try await mem.exists(path: "/workspace/nope") == .notFound)
   }
 
-  @Test func handlerDispatchesListDirectory() async throws {
+  @Test func listDirectory() async throws {
     let mem = InMemoryRunner()
     await mem.seedDirectory(path: "/workspace")
     await mem.seedFile(path: "/workspace/a.txt", content: "a")
     await mem.seedDirectory(path: "/workspace/sub")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
-    let (response, _) = await handler.handle(request: .ls(id: "l1", LsRequest(path: "/workspace")))
-    guard case let .ls(_, result) = response else { Issue.record("Expected ls response"); return }
-    let entries = try result.get().entries
+    let entries = try await mem.listDirectory(path: "/workspace")
     let names = entries.map(\.name).sorted()
     #expect(names.contains("a.txt"))
     #expect(names.contains("sub"))
   }
 
-  @Test func handlerDispatchesCreateDirectory() async throws {
+  @Test func createDirectory() async throws {
     let mem = InMemoryRunner()
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let (response, _) = await handler.handle(request: .mkdir(id: "c1", MkdirRequest(path: "/workspace/new/nested", recursive: true)))
-    guard case let .mkdir(_, result) = response else { Issue.record("Expected mkdir response"); return }
-    _ = try result.get()
-
-    let (existsResp, _) = await handler.handle(request: .exists(id: "e4", ExistsRequest(path: "/workspace/new/nested")))
-    guard case let .exists(_, existsResult) = existsResp else { Issue.record("Expected exists response"); return }
-    #expect(try existsResult.get().existence == .directory)
+    try await mem.createDirectory(path: "/workspace/new/nested", withIntermediateDirectories: true)
+    #expect(try await mem.exists(path: "/workspace/new/nested") == .directory)
   }
 
-  @Test func handlerHelloResponse() async {
-    let mem = InMemoryRunner()
-    let handler = RunnerServerHandler(runner: mem, name: "my-runner")
-
-    let (response, _) = await handler.handle(request: .hello(HelloRequest(serverName: "wuhu-server", version: muxRunnerProtocolVersion)))
-    guard case let .hello(helloResp) = response else {
-      Issue.record("Expected hello response"); return
-    }
-    #expect(helloResp.runnerName == "my-runner")
-    #expect(helloResp.version == muxRunnerProtocolVersion)
-  }
-
-  @Test func handlerDispatchesFind() async throws {
+  @Test func find() async throws {
     let mem = InMemoryRunner()
     await mem.seedFile(path: "/workspace/src/main.swift", content: "import Foundation")
     await mem.seedFile(path: "/workspace/src/util.swift", content: "// util")
     await mem.seedFile(path: "/workspace/README.md", content: "# Readme")
 
-    let handler = RunnerServerHandler(runner: mem, name: "finder")
-    let (response, _) = await handler.handle(request: .find(id: "f1", FindParams(root: "/workspace", pattern: "**/*.swift", limit: 100)))
-    guard case let .find(id, result) = response else { Issue.record("Expected find response"); return }
-    #expect(id == "f1")
-    let r = try result.get()
-    #expect(r.entries.count == 2)
-    #expect(r.entries.contains(where: { $0.relativePath == "src/main.swift" }))
-    #expect(r.entries.contains(where: { $0.relativePath == "src/util.swift" }))
+    let result = try await mem.find(params: FindParams(root: "/workspace", pattern: "**/*.swift", limit: 100))
+    #expect(result.entries.count == 2)
+    #expect(result.entries.contains(where: { $0.relativePath == "src/main.swift" }))
+    #expect(result.entries.contains(where: { $0.relativePath == "src/util.swift" }))
   }
 
-  @Test func handlerDispatchesGrep() async throws {
+  @Test func grep() async throws {
     let mem = InMemoryRunner()
     await mem.seedFile(path: "/workspace/a.swift", content: "let x = 1\nlet TODO = 2\nlet z = 3")
     await mem.seedFile(path: "/workspace/b.swift", content: "// nothing here")
 
-    let handler = RunnerServerHandler(runner: mem, name: "grepper")
-    let (response, _) = await handler.handle(request: .grep(id: "g1", GrepParams(root: "/workspace", pattern: "TODO", literal: true, limit: 100)))
-    guard case let .grep(id, result) = response else { Issue.record("Expected grep response"); return }
-    #expect(id == "g1")
-    let r = try result.get()
-    #expect(r.matchCount == 1)
-    #expect(r.matches.first?.file == "a.swift")
-    #expect(r.matches.first?.lineNumber == 2)
+    let result = try await mem.grep(params: GrepParams(root: "/workspace", pattern: "TODO", literal: true, limit: 100))
+    #expect(result.matchCount == 1)
+    #expect(result.matches.first?.file == "a.swift")
+    #expect(result.matches.first?.lineNumber == 2)
   }
 
-  @Test func handlerBinaryWrite() async throws {
-    let mem = InMemoryRunner()
-    await mem.seedDirectory(path: "/workspace")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
-
-    let data = Data([0x89, 0x50, 0x4E, 0x47]) // PNG magic bytes
-    let response = await handler.handleBinaryWrite(id: "bw1", path: "/workspace/image.png", data: data, createDirs: true)
-    guard case let .write(id, result) = response else { Issue.record("Expected write response"); return }
-    #expect(id == "bw1")
-    let r = try result.get()
-    #expect(r.bytesWritten == 4)
-
-    // Verify data was written
-    let readBack = try await mem.readData(path: "/workspace/image.png")
-    #expect(readBack == data)
-  }
-
-  @Test func handlerDispatchesMaterialize() async throws {
+  @Test func materialize() async throws {
     let mem = InMemoryRunner()
     await mem.seedDirectory(path: "/templates/myapp")
     await mem.seedFile(path: "/templates/myapp/README.md", content: "# My App")
     await mem.seedFile(path: "/templates/myapp/src/main.swift", content: "print(\"hello\")")
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
-    let (response, binaryData) = await handler.handle(request: .materialize(
-      id: "m1",
-      MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-1"),
+    let result = try await mem.materialize(params: MaterializeRequest(
+      templatePath: "/templates/myapp",
+      destinationPath: "/workspaces/sess-1",
     ))
-    guard case let .materialize(id, result) = response else {
-      Issue.record("Expected materialize response"); return
-    }
-    #expect(id == "m1")
-    #expect(binaryData == nil)
-    let r = try result.get()
-    #expect(r.workspacePath == "/workspaces/sess-1")
-
-    // Verify files were copied
+    #expect(result.workspacePath == "/workspaces/sess-1")
     let readme = try await mem.readString(path: "/workspaces/sess-1/README.md", encoding: .utf8)
     #expect(readme == "# My App")
-    let main = try await mem.readString(path: "/workspaces/sess-1/src/main.swift", encoding: .utf8)
-    #expect(main == "print(\"hello\")")
   }
 
-  @Test func handlerMaterializeReturnsErrorForMissingTemplate() async {
+  @Test func startBashWithCallbacks() async throws {
     let mem = InMemoryRunner()
-    let handler = RunnerServerHandler(runner: mem, name: "test-runner")
+    let bridge = BashCallbackBridge()
+    await mem.setCallbacks(bridge)
+    await mem.stubBash(pattern: "echo test", result: BashResult(exitCode: 0, output: "test\n", timedOut: false, terminated: false))
 
-    let (response, _) = await handler.handle(request: .materialize(
-      id: "m2",
-      MaterializeRequest(templatePath: "/nonexistent", destinationPath: "/workspaces/sess-2"),
-    ))
-    guard case let .materialize(_, result) = response else {
-      Issue.record("Expected materialize response"); return
-    }
-    switch result {
-    case .success: Issue.record("Expected error")
-    case let .failure(err): #expect(err.message.contains("not found") || err.message.contains("File not found"))
+    let tag = "test-tag-1"
+    let started = try await mem.startBash(tag: tag, command: "echo test", cwd: "/", timeout: nil)
+    #expect(started.tag == tag)
+
+    let result = try await bridge.waitForResult(tag: tag)
+    #expect(result.exitCode == 0)
+    #expect(result.output == "test\n")
+  }
+
+  @Test func readMissingFileThrows() async {
+    let mem = InMemoryRunner()
+    do {
+      _ = try await mem.readData(path: "/nonexistent")
+      Issue.record("Should have thrown")
+    } catch {
+      let msg = String(describing: error)
+      #expect(msg.contains("not found") || msg.contains("File not found"))
     }
   }
 }

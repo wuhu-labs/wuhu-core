@@ -34,8 +34,11 @@ struct CodingAgentToolsTests {
 
   /// Real-filesystem tools — only used by bash/swift tests that need process execution.
   private func realTools(cwd: String) -> [String: AnyAgentTool] {
-    let resolver = WuhuTools.testMountResolver(cwd: cwd)
-    return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
+    let bridge = BashCallbackBridge()
+    let runner = LocalRunner()
+    Task { await runner.setCallbacks(bridge) }
+    let resolver = WuhuTools.testMountResolver(cwd: cwd, runner: runner)
+    return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver, callbackBridge: bridge).map { ($0.tool.name, $0) })
   }
 
   // MARK: - read tool

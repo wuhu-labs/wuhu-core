@@ -86,7 +86,7 @@ public struct WuhuMuxRunnerServer: Sendable {
 
   // MARK: - UDS mode
 
-  private func runUDS(socketPath: String, runner: any Runner, name: String, logger: Logger) async throws {
+  private func runUDS(socketPath: String, runner: LocalRunner, name: String, logger: Logger) async throws {
     logger.info("Starting mux runner '\(name)' on UDS: \(socketPath)")
 
     let listener = try await SocketListener.bind(unixDomainSocketPath: socketPath)
@@ -102,14 +102,16 @@ public struct WuhuMuxRunnerServer: Sendable {
     }
   }
 
-  private func handleMuxConnection(_ connection: SocketConnection, runner: any Runner, name: String, logger: Logger) async {
+  private func handleMuxConnection(_ connection: SocketConnection, runner: LocalRunner, name: String, logger: Logger) async {
     let session = MuxSession(connection: connection, role: .responder)
+    let callbacksClient = MuxRunnerCallbacksClient(session: session)
+    await runner.setCallbacks(callbacksClient)
 
     await withTaskGroup(of: Void.self) { group in
       group.addTask { try? await session.run() }
       group.addTask {
-        // First stream is hello, then serve RPCs
-        await MuxRunnerHandler.serve(session: session, runner: runner, name: name)
+        // First stream is hello, then serve command RPCs
+        await MuxRunnerCommandsServer.serve(session: session, commands: runner, name: name)
         logger.info("Mux UDS connection ended for runner '\(name)'")
       }
     }
@@ -117,7 +119,7 @@ public struct WuhuMuxRunnerServer: Sendable {
 
   // MARK: - WebSocket mode
 
-  private func runWebSocket(config: WuhuRunnerConfig, runner: any Runner, name: String, logger: Logger) async throws {
+  private func runWebSocket(config: WuhuRunnerConfig, runner: LocalRunner, name: String, logger: Logger) async throws {
     let host = config.listen?.host ?? "0.0.0.0"
     let port = config.listen?.port ?? 5532
 
@@ -146,16 +148,18 @@ public struct WuhuMuxRunnerServer: Sendable {
 
 private func handleWSConnection(
   _ connection: WebSocketConnection,
-  runner: any Runner,
+  runner: LocalRunner,
   name: String,
   logger: Logger,
 ) async {
   let session = MuxSession(connection: connection, role: .responder)
+  let callbacksClient = MuxRunnerCallbacksClient(session: session)
+  await runner.setCallbacks(callbacksClient)
 
   await withTaskGroup(of: Void.self) { group in
     group.addTask { try? await session.run() }
     group.addTask {
-      await MuxRunnerHandler.serve(session: session, runner: runner, name: name)
+      await MuxRunnerCommandsServer.serve(session: session, commands: runner, name: name)
       logger.info("Mux connection from server ended for runner '\(name)'")
     }
   }

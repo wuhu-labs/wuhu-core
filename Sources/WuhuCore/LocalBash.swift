@@ -14,7 +14,18 @@ import Subprocess
 /// - pidfd/kqueue-based exit monitoring (no polling)
 /// - Structured teardown sequences on cancellation
 public enum LocalBash {
-  public static func run(command: String, cwd: String, timeoutSeconds: TimeInterval?) async throws -> BashResult {
+  /// Output chunk callback type.
+  public typealias OutputChunkCallback = @Sendable (String) async -> Void
+
+  /// Interval between output chunk pushes (seconds).
+  private static let chunkInterval: UInt64 = 10_000_000_000 // 10s
+
+  public static func run(
+    command: String,
+    cwd: String,
+    timeoutSeconds: TimeInterval?,
+    onOutputChunk: OutputChunkCallback? = nil,
+  ) async throws -> BashResult {
     let outputURL = FileManager.default.temporaryDirectory
       .appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
     FileManager.default.createFile(atPath: outputURL.path, contents: nil)
@@ -48,14 +59,6 @@ public enum LocalBash {
     ])
 
     // Wrap the command so that SIGTERM kills the entire process tree.
-    //
-    // swift-subprocess's teardownSequence sends SIGTERM to the bash process only
-    // (toProcessGroup: false), so child processes like `sleep` survive as orphans.
-    //
-    // The wrapper runs the user command in a background job, waits for it, and
-    // installs a trap that kills the entire process group on SIGTERM. Since the
-    // child uses processGroupID=0 (PGID == PID), `kill 0` in the trap sends
-    // SIGTERM to all processes in the group.
     let wrappedCommand = """
     _wuhu_cleanup() { kill 0; exit 143; }
     trap _wuhu_cleanup TERM
@@ -89,39 +92,95 @@ public enum LocalBash {
           return .timedOut
         }
 
-        // Take the first result
-        let first = try await group.next()!
-        // Cancel the other task
+        // Task 3: Output chunk monitor (if callback provided)
+        if let onOutputChunk {
+          group.addTask {
+            await monitorOutput(outputURL: outputURL, callback: onOutputChunk)
+            return .chunkMonitorDone
+          }
+        }
+
+        // Take the first non-monitor result
+        var first: BashRunOutcome?
+        while let outcome = try await group.next() {
+          if case .chunkMonitorDone = outcome { continue }
+          first = outcome
+          break
+        }
+        // Cancel remaining tasks
         group.cancelAll()
 
         switch first {
         case let .completed(status):
           return makeResult(terminationStatus: status, outputURL: outputURL, timedOut: false, terminated: false)
         case .timedOut:
-          // The subprocess task gets cancelled → teardownSequence runs
           // Wait for the subprocess task to finish cleanup
-          _ = try? await group.next()
+          for try await outcome in group {
+            if case .completed = outcome { break }
+          }
           return makeResult(terminationStatus: .exited(-1), outputURL: outputURL, timedOut: true, terminated: false)
+        default:
+          return makeResult(terminationStatus: .exited(-1), outputURL: outputURL, timedOut: false, terminated: false)
         }
       }
     } else {
-      // No timeout: simple collected run. Task cancellation triggers teardownSequence.
-      let result = try await Subprocess.run(
-        .path("/bin/bash"),
-        arguments: ["-lc", wrappedCommand],
-        environment: env,
-        workingDirectory: FilePath(cwd),
-        platformOptions: platformOptions,
-        input: .none,
-        output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
-        error: .discarded,
-      )
-      return makeResult(
-        terminationStatus: result.terminationStatus,
-        outputURL: outputURL,
-        timedOut: false,
-        terminated: false,
-      )
+      // No timeout: simple collected run with optional chunk monitoring.
+      if let onOutputChunk {
+        return try await withThrowingTaskGroup(of: BashRunOutcome.self, returning: BashResult.self) { group in
+          group.addTask {
+            let result = try await Subprocess.run(
+              .path("/bin/bash"),
+              arguments: ["-lc", wrappedCommand],
+              environment: env,
+              workingDirectory: FilePath(cwd),
+              platformOptions: platformOptions,
+              input: .none,
+              output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
+              error: .discarded,
+            )
+            return .completed(result.terminationStatus)
+          }
+
+          group.addTask {
+            await monitorOutput(outputURL: outputURL, callback: onOutputChunk)
+            return .chunkMonitorDone
+          }
+
+          var status: TerminationStatus = .exited(-1)
+          for try await outcome in group {
+            if case let .completed(s) = outcome {
+              status = s
+              group.cancelAll()
+              break
+            }
+          }
+
+          return makeResult(
+            terminationStatus: status,
+            outputURL: outputURL,
+            timedOut: false,
+            terminated: false,
+          )
+        }
+      } else {
+        // No timeout, no chunks: simple run.
+        let result = try await Subprocess.run(
+          .path("/bin/bash"),
+          arguments: ["-lc", wrappedCommand],
+          environment: env,
+          workingDirectory: FilePath(cwd),
+          platformOptions: platformOptions,
+          input: .none,
+          output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
+          error: .discarded,
+        )
+        return makeResult(
+          terminationStatus: result.terminationStatus,
+          outputURL: outputURL,
+          timedOut: false,
+          terminated: false,
+        )
+      }
     }
   }
 
@@ -130,6 +189,31 @@ public enum LocalBash {
   private enum BashRunOutcome: Sendable {
     case completed(TerminationStatus)
     case timedOut
+    case chunkMonitorDone
+  }
+
+  /// Monitor the output file and push chunks periodically.
+  private static func monitorOutput(outputURL: URL, callback: @escaping OutputChunkCallback) async {
+    var bytesRead = 0
+
+    while !Task.isCancelled {
+      do {
+        try await Task.sleep(nanoseconds: chunkInterval)
+      } catch {
+        break
+      }
+
+      guard let data = try? Data(contentsOf: outputURL) else { continue }
+      let currentSize = data.count
+      if currentSize > bytesRead {
+        let newData = data[bytesRead ..< currentSize]
+        let chunk = String(decoding: newData, as: UTF8.self)
+        if !chunk.isEmpty {
+          await callback(chunk)
+        }
+        bytesRead = currentSize
+      }
+    }
   }
 
   private static func makeResult(

@@ -16,6 +16,7 @@ enum WuhuMuxRunnerAcceptor {
   /// The returned router should be passed to `.http1WebSocketUpgrade(webSocketRouter:)`.
   static func webSocketRouter(
     registry: RunnerRegistry,
+    callbackBridge: BashCallbackBridge,
     logger: Logger,
   ) -> Router<BasicWebSocketRequestContext> {
     let wsRouter = Router(context: BasicWebSocketRequestContext.self)
@@ -24,7 +25,7 @@ enum WuhuMuxRunnerAcceptor {
       .upgrade([:])
     } onUpgrade: { inbound, outbound, _ in
       let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
-      await handleConnection(conn, registry: registry, logger: logger)
+      await handleConnection(conn, registry: registry, callbackBridge: callbackBridge, logger: logger)
     }
 
     return wsRouter
@@ -33,6 +34,7 @@ enum WuhuMuxRunnerAcceptor {
   private static func handleConnection(
     _ connection: WebSocketConnection,
     registry: RunnerRegistry,
+    callbackBridge: BashCallbackBridge,
     logger: Logger,
   ) async {
     let session = MuxSession(connection: connection, role: .responder)
@@ -44,17 +46,20 @@ enum WuhuMuxRunnerAcceptor {
       let runnerName = hello.runnerName
       logger.info("Incoming mux runner '\(runnerName)' connected (v\(hello.version))")
 
-      let client = MuxRunnerClient(name: runnerName, session: session)
+      let client = MuxRunnerCommandsClient(name: runnerName, session: session)
+      await client.startCallbackHandler(callbacks: callbackBridge)
       let registered = await registry.registerIncoming(client, name: runnerName)
 
       guard registered else {
         logger.warning("Incoming mux runner '\(runnerName)' rejected: runner with same name already connected")
+        await client.stopCallbackHandler()
         await session.close()
         return
       }
 
       defer {
         Task {
+          await client.stopCallbackHandler()
           await registry.remove(.remote(name: runnerName))
           logger.info("Incoming mux runner '\(runnerName)' disconnected")
         }

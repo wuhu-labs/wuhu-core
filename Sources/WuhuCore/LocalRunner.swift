@@ -4,15 +4,72 @@ import Foundation
 /// Local runner — executes everything on the local machine.
 /// Uses the `FileIO` dependency for filesystem operations, preserving
 /// testability via `InMemoryFileIO`.
-public actor LocalRunner: Runner {
+///
+/// Implements `RunnerCommands` with fire-and-forget bash: `startBash`
+/// spawns a task and returns immediately, pushing results via callbacks.
+public actor LocalRunner: RunnerCommands {
   public nonisolated let id: RunnerID = .local
+
+  /// Callbacks target for pushing bash results.
+  private var callbacks: (any RunnerCallbacks)?
+
+  /// Active bash tasks keyed by tag. Used for idempotent startBash and cancel.
+  private var activeTasks: [String: Task<Void, Never>] = [:]
+
+  /// Tags that have completed (for idempotent startBash after completion).
+  private var completedTags: Set<String> = []
 
   public init() {}
 
-  // MARK: - Process execution
+  /// Set the callbacks target. Called once during setup.
+  public func setCallbacks(_ callbacks: any RunnerCallbacks) {
+    self.callbacks = callbacks
+  }
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+  // MARK: - Bash (fire-and-forget)
+
+  public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    // Idempotent: if already running or completed, return existing.
+    if activeTasks[tag] != nil || completedTags.contains(tag) {
+      return BashStarted(tag: tag)
+    }
+
+    let callbacks = callbacks
+    let task = Task { [weak self] in
+      let result: BashResult
+      do {
+        result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout, onOutputChunk: { chunk in
+          try? await callbacks?.bashOutput(tag: tag, chunk: chunk)
+        })
+      } catch is CancellationError {
+        result = BashResult(exitCode: -15, output: "", timedOut: false, terminated: true)
+      } catch {
+        result = BashResult(exitCode: -1, output: "Error: \(error)", timedOut: false, terminated: false)
+      }
+
+      // Clean up and push result
+      await self?.taskCompleted(tag: tag)
+      try? await callbacks?.bashFinished(tag: tag, result: result)
+    }
+    activeTasks[tag] = task
+    return BashStarted(tag: tag)
+  }
+
+  public func cancelBash(tag: String) async throws -> CancelResult {
+    if completedTags.contains(tag) {
+      return .alreadyFinished
+    }
+    guard let task = activeTasks.removeValue(forKey: tag) else {
+      return .notFound
+    }
+    task.cancel()
+    return .cancelled
+  }
+
+  /// Called when a bash task finishes (before pushing the callback).
+  private func taskCompleted(tag: String) {
+    activeTasks.removeValue(forKey: tag)
+    completedTags.insert(tag)
   }
 
   // MARK: - File I/O

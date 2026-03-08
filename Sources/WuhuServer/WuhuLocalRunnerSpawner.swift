@@ -19,6 +19,7 @@ import WuhuCore
 public actor WuhuLocalRunnerSpawner {
   private let socketPath: String
   private let registry: RunnerRegistry
+  private let callbackBridge: BashCallbackBridge
   private let logger: Logger
   private var childProcess: Process?
   private var connectionTask: Task<Void, Never>?
@@ -28,10 +29,12 @@ public actor WuhuLocalRunnerSpawner {
   public init(
     socketPath: String? = nil,
     registry: RunnerRegistry,
+    callbackBridge: BashCallbackBridge,
     logger: Logger,
   ) {
     self.socketPath = socketPath ?? WuhuLocalRunnerSpawner.randomSocketPath()
     self.registry = registry
+    self.callbackBridge = callbackBridge
     self.logger = logger
   }
 
@@ -53,14 +56,6 @@ public actor WuhuLocalRunnerSpawner {
     let pipe = Pipe()
     watchdogPipe = pipe
 
-    // Spawn the runner child process.
-    //
-    // NOTE: We use Foundation.Process here rather than swift-subprocess because
-    // the runner is a long-lived child process (not a short-lived command).
-    // The Linux Foundation.Process bugs (isRunning TOCTOU races, terminationStatus
-    // SIGILL) primarily affect short-lived processes where you poll for completion.
-    // For this spawner, the child runs for the server's entire lifetime, and we
-    // only call terminate() during an orderly shutdown where the race is benign.
     let process = Process()
     process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
     process.arguments = ["runner", "--config", configPath]
@@ -77,6 +72,7 @@ public actor WuhuLocalRunnerSpawner {
     try await waitForSocket(timeout: 10.0)
 
     // Connect to the local runner over UDS mux with reconnection
+    let callbackBridge = callbackBridge
     connectionTask = Task { [socketPath, registry, logger] in
       var backoff: UInt64 = 100_000_000 // 100ms
       let maxBackoff: UInt64 = 5_000_000_000
@@ -112,11 +108,13 @@ public actor WuhuLocalRunnerSpawner {
 
           logger.info("Local runner connected via UDS (v\(runnerHello.version))")
 
-          let client = MuxRunnerClient(name: "local", session: session)
+          let client = MuxRunnerCommandsClient(name: "local", session: session)
+          await client.startCallbackHandler(callbacks: callbackBridge)
           await registry.register(client)
 
           // Block until session ends
           try? await runTask.value
+          await client.stopCallbackHandler()
           await session.close()
 
           await registry.remove(.remote(name: "local"))
@@ -138,11 +136,6 @@ public actor WuhuLocalRunnerSpawner {
   }
 
   /// Stop the local runner child process.
-  ///
-  /// There is a small race between cancelling `connectionTask` and unlinking the
-  /// socket — the reconnection logic might briefly try to reconnect to a deleted
-  /// socket. This is benign: the reconnection will fail and the task checks
-  /// `Task.isCancelled`.
   public func stop() {
     connectionTask?.cancel()
     connectionTask = nil

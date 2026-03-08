@@ -1,27 +1,26 @@
 import Foundation
 import Mux
 
-/// Accepts inbound mux streams and dispatches each to the appropriate
-/// `Runner` method via `RunnerServerHandler`.
+/// Runner-side: accepts inbound command streams from the server and
+/// dispatches them to a `RunnerCommands` implementation (typically `LocalRunner`).
 ///
-/// Each inbound stream is one RPC call. The handler reads the request,
-/// dispatches it, writes the response, and closes the stream.
-public enum MuxRunnerHandler {
-  /// Run the handler loop: accept inbound streams and dispatch them.
+/// Also provides `MuxRunnerCallbacksClient` which implements `RunnerCallbacks`
+/// by opening streams back to the server for bash output/finished callbacks.
+public enum MuxRunnerCommandsServer {
+  /// Run the handler loop: accept inbound command streams and dispatch them.
   /// Returns when the session closes or is cancelled.
-  public static func serve(session: MuxSession, runner: any Runner, name: String) async {
-    let handler = RunnerServerHandler(runner: runner, name: name)
-
+  public static func serve(session: MuxSession, commands: any RunnerCommands, name: String) async {
     for await stream in session.inbound {
-      let handler = handler
+      let commands = commands
+      let name = name
       Task {
-        await handleStream(stream, handler: handler)
+        await handleStream(stream, commands: commands, name: name)
       }
     }
   }
 
-  /// Handle a single inbound stream (one RPC call).
-  private static func handleStream(_ stream: MuxStream, handler: RunnerServerHandler) async {
+  /// Handle a single inbound command stream (one RPC call).
+  private static func handleStream(_ stream: MuxStream, commands: any RunnerCommands, name: String) async {
     do {
       let reader = MuxStreamReader(stream: stream)
       let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
@@ -34,134 +33,163 @@ public enum MuxRunnerHandler {
           try await stream.finish()
           return
         }
-        let resp = HelloResponse(runnerName: handler.runnerName, version: muxRunnerProtocolVersion)
+        let resp = HelloResponse(runnerName: name, version: muxRunnerProtocolVersion)
         try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: resp)
 
-      case .bash:
-        let req = try MuxRunnerCodec.decode(BashRequest.self, from: payload)
-        let tag = req.tag
-        if let tag, !tag.isEmpty {
-          // Tracked bash: spawn a task, register it for cancellation, await result.
-          let bashTask = Task {
-            await handler.runBash(id: "", request: req)
-          }
-          await handler.registerBashTask(tag, task: bashTask)
-          let (response, _) = await bashTask.value
-          await handler.unregisterBashTask(tag)
-          try await writeRunnerResponse(stream, op: op, response: response)
-        } else {
-          // Untagged bash (legacy/test): run inline.
-          let (response, _) = await handler.handle(request: .bash(id: "", req))
-          try await writeRunnerResponse(stream, op: op, response: response)
+      case .startBash:
+        let req = try MuxRunnerCodec.decode(StartBashRequest.self, from: payload)
+        do {
+          let result = try await commands.startBash(tag: req.tag, command: req.command, cwd: req.cwd, timeout: req.timeout)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: result)
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
+
+      case .cancelBash:
+        let req = try MuxRunnerCodec.decode(CancelBashRequest.self, from: payload)
+        do {
+          let result = try await commands.cancelBash(tag: req.tag)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: result)
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
         }
 
       case .read:
         let req = try MuxRunnerCodec.decode(ReadRequest.self, from: payload)
-        let (response, binaryData) = await handler.handle(request: .read(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
-        // If there's binary data, send it after the response frame
-        if let data = binaryData {
-          try await MuxRunnerCodec.writeBinary(stream, data: data)
+        do {
+          if req.binary {
+            let data = try await commands.readData(path: req.path)
+            let resp = ReadResponse(size: data.count)
+            try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
+            try await MuxRunnerCodec.writeBinary(stream, data: data)
+          } else {
+            let content = try await commands.readString(path: req.path, encoding: .utf8)
+            let resp = ReadResponse(content: content, size: content.utf8.count)
+            try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
+          }
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
         }
 
       case .write:
         let req = try MuxRunnerCodec.decode(WriteRequest.self, from: payload)
-        if req.content != nil {
-          // Text write — content is in the JSON payload
-          let (response, _) = await handler.handle(request: .write(id: "", req))
-          try await writeRunnerResponse(stream, op: op, response: response)
-        } else {
-          // Binary write — data follows as length-prefixed bytes on the stream
-          let data = try await MuxRunnerCodec.readBinary(reader)
-          let response = await handler.handleBinaryWrite(id: "", path: req.path, data: data, createDirs: req.createDirs)
-          try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          if let content = req.content {
+            try await commands.writeString(path: req.path, content: content, createIntermediateDirectories: req.createDirs, encoding: .utf8)
+            try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: WriteResponse(bytesWritten: content.utf8.count))
+          } else {
+            let data = try await MuxRunnerCodec.readBinary(reader)
+            try await commands.writeData(path: req.path, data: data, createIntermediateDirectories: req.createDirs)
+            try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: WriteResponse(bytesWritten: data.count))
+          }
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
         }
 
       case .exists:
         let req = try MuxRunnerCodec.decode(ExistsRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .exists(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let existence = try await commands.exists(path: req.path)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: ExistsResponse(existence: existence))
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .ls:
         let req = try MuxRunnerCodec.decode(LsRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .ls(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let entries = try await commands.listDirectory(path: req.path)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: LsResponse(entries: entries))
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .enumerate:
         let req = try MuxRunnerCodec.decode(EnumerateRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .enumerate(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let entries = try await commands.enumerateDirectory(root: req.root)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: EnumerateResponse(entries: entries))
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .mkdir:
         let req = try MuxRunnerCodec.decode(MkdirRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .mkdir(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          try await commands.createDirectory(path: req.path, withIntermediateDirectories: req.recursive)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: MkdirResponse())
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .find:
         let req = try MuxRunnerCodec.decode(FindParams.self, from: payload)
-        let (response, _) = await handler.handle(request: .find(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let result = try await commands.find(params: req)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: result)
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .grep:
         let req = try MuxRunnerCodec.decode(GrepParams.self, from: payload)
-        let (response, _) = await handler.handle(request: .grep(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let result = try await commands.grep(params: req)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: result)
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
       case .materialize:
         let req = try MuxRunnerCodec.decode(MaterializeRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .materialize(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+        do {
+          let result = try await commands.materialize(params: req)
+          try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: result)
+        } catch {
+          try await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+        }
 
-      case .cancel:
-        let req = try MuxRunnerCodec.decode(CancelRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .cancel(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+      case .bashOutput, .bashFinished:
+        // These are callback ops — shouldn't arrive on the command channel
+        try await MuxRunnerCodec.writeError(stream, op: op, message: "Callback op received on command channel")
       }
 
       try await stream.finish()
     } catch {
-      // Best effort — stream may already be closed
       try? await stream.reset()
     }
   }
+}
 
-  /// Convert a RunnerResponse (from the existing handler) into a mux response frame.
-  private static func writeRunnerResponse(_ stream: MuxStream, op: MuxRunnerOp, response: RunnerResponse) async throws {
-    // Extract the result from the response enum
-    switch response {
-    case let .hello(resp):
-      try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
-    case let .bash(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .read(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .write(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .exists(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .ls(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .enumerate(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .mkdir(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .find(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .grep(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .materialize(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .cancel(_, result):
-      try await writeResult(stream, op: op, result: result)
-    }
+// MARK: - MuxRunnerCallbacksClient
+
+/// Runner-side: implements `RunnerCallbacks` by opening mux streams
+/// back to the server for bash output and finished callbacks.
+public final class MuxRunnerCallbacksClient: RunnerCallbacks, @unchecked Sendable {
+  private let session: MuxSession
+
+  public init(session: MuxSession) {
+    self.session = session
   }
 
-  private static func writeResult(_ stream: MuxStream, op: MuxRunnerOp, result: Result<some Encodable, RunnerWireError>) async throws {
-    switch result {
-    case let .success(value):
-      try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: value)
-    case let .failure(error):
-      try await MuxRunnerCodec.writeError(stream, op: op, message: error.message)
+  public func bashOutput(tag: String, chunk: String) async throws {
+    try await sendCallback(.bashOutput, payload: BashOutputCallback(tag: tag, chunk: chunk))
+  }
+
+  public func bashFinished(tag: String, result: BashResult) async throws {
+    try await sendCallback(.bashFinished, payload: BashFinishedCallback(tag: tag, result: result))
+  }
+
+  private func sendCallback(_ op: MuxRunnerOp, payload: some Encodable & Sendable) async throws {
+    let stream = try await session.open()
+    try await MuxRunnerCodec.writeRequest(stream, op: op, payload: payload)
+    try await stream.finish()
+
+    let reader = MuxStreamReader(stream: stream)
+    let (ok, _, respPayload) = try await MuxRunnerCodec.readResponse(reader)
+    guard ok else {
+      let message = String(decoding: Data(respPayload), as: UTF8.self)
+      throw RunnerError.requestFailed(message: "Callback failed: \(message)")
     }
   }
 }
