@@ -1,24 +1,14 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-# Pre-commit hook: run swiftformat on staged Swift files.
-# Matches CI: `swiftformat --lint .` but only on staged files, and auto-fixes.
+# Capture staged files before formatting
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
 
-STAGED=$(git diff --cached --name-only --diff-filter=ACM -- '*.swift')
+deno fmt core
+deno fmt web
 
-if [ -z "$STAGED" ]; then
-  exit 0
+# Re-stage only what was previously staged
+if [ -n "$STAGED_FILES" ]; then
+  git add $STAGED_FILES
 fi
 
-if ! command -v swiftformat &>/dev/null; then
-  echo "warning: swiftformat not found, skipping format check"
-  exit 0
-fi
-
-# Auto-fix the staged files in-place.
-echo "$STAGED" | xargs swiftformat
-
-# Re-stage any files that were reformatted.
-echo "$STAGED" | xargs git add
-
-exit 0

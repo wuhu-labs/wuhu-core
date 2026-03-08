@@ -4,77 +4,15 @@ import Foundation
 /// Local runner — executes everything on the local machine.
 /// Uses the `FileIO` dependency for filesystem operations, preserving
 /// testability via `InMemoryFileIO`.
-public actor LocalRunner: RunnerCommands {
+public actor LocalRunner: Runner {
   public nonisolated let id: RunnerID = .local
-
-  /// Embedded bridge for in-process bash result delivery.
-  /// Used by `waitForBashResult(tag:)`.
-  nonisolated let embeddedBridge = BashCallbackBridge()
-
-  /// Active bash tasks keyed by tag.
-  private var activeBash: [String: Task<Void, Never>] = [:]
 
   public init() {}
 
-  // MARK: - RunnerCommands: Bash
+  // MARK: - Process execution
 
-  public func startBash(
-    tag: String,
-    command: String,
-    cwd: String,
-    timeout: TimeInterval?,
-  ) async throws -> BashStarted {
-    if activeBash[tag] != nil {
-      return BashStarted(tag: tag, alreadyRunning: true)
-    }
-
-    let bridge = embeddedBridge
-    let task = Task<Void, Never> {
-      do {
-        let result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
-        if Task.isCancelled {
-          // The subprocess was torn down by task cancellation. Override the result
-          // so callers see terminated=true regardless of the process exit status.
-          _ = try? await bridge.bashFinished(
-            tag: tag,
-            result: BashResult(exitCode: result.exitCode, output: result.output, timedOut: false, terminated: true, fullOutputPath: result.fullOutputPath),
-          )
-        } else {
-          _ = try? await bridge.bashFinished(tag: tag, result: result)
-        }
-      } catch is CancellationError {
-        _ = try? await bridge.bashFinished(
-          tag: tag,
-          result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true),
-        )
-      } catch {
-        _ = try? await bridge.bashFinished(
-          tag: tag,
-          result: BashResult(exitCode: -1, output: String(describing: error), timedOut: false, terminated: false),
-        )
-      }
-      await self.bashTaskFinished(tag: tag)
-    }
-    activeBash[tag] = task
-    return BashStarted(tag: tag, alreadyRunning: false)
-  }
-
-  public func cancelBash(tag: String) async throws -> CancelResult {
-    guard let task = activeBash.removeValue(forKey: tag) else {
-      return CancelResult(cancelled: false)
-    }
-    task.cancel()
-    // The task's CancellationError handler will call bridge.bashFinished(terminated:true)
-    return CancelResult(cancelled: true)
-  }
-
-  /// Called by the bash Task when it finishes normally, to remove the stale map entry.
-  private func bashTaskFinished(tag: String) {
-    activeBash.removeValue(forKey: tag)
-  }
-
-  public func waitForBashResult(tag: String) async throws -> BashResult {
-    try await embeddedBridge.waitForResult(tag: tag)
+  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
+    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
   }
 
   // MARK: - File I/O
@@ -176,9 +114,11 @@ public actor LocalRunner: RunnerCommands {
       guard fm.fileExists(atPath: scriptPath) else {
         throw RunnerError.requestFailed(message: "Startup script not found: \(scriptPath)")
       }
-      let tag = "materialize-\(UUID().uuidString)"
-      let started = try await startBash(tag: tag, command: "bash \(shellEscape(scriptPath))", cwd: destinationPath, timeout: 120)
-      let result = try await waitForBashResult(tag: started.tag)
+      let result = try await LocalBash.run(
+        command: "bash \(shellEscape(scriptPath))",
+        cwd: destinationPath,
+        timeoutSeconds: 120,
+      )
       if result.exitCode != 0 {
         throw RunnerError.requestFailed(
           message: "Startup script failed (exit \(result.exitCode)): \(result.output)",
