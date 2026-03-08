@@ -48,17 +48,32 @@ public actor MuxRunnerCommandsClient: RunnerCommands {
           timeout: timeout,
           tag: tag,
         )
-        _ = try? await bridge.bashFinished(tag: tag, result: result)
+        if Task.isCancelled {
+          _ = try? await bridge.bashFinished(
+            tag: tag,
+            result: BashResult(exitCode: result.exitCode, output: result.output, timedOut: false, terminated: true),
+          )
+        } else {
+          _ = try? await bridge.bashFinished(tag: tag, result: result)
+        }
       } catch is CancellationError {
         _ = try? await bridge.bashFinished(
           tag: tag,
           result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true),
         )
       } catch {
-        _ = try? await bridge.bashFinished(
-          tag: tag,
-          result: BashResult(exitCode: -1, output: String(describing: error), timedOut: false, terminated: false),
-        )
+        if Task.isCancelled {
+          // Stream disrupted due to task cancellation — treat as terminated.
+          _ = try? await bridge.bashFinished(
+            tag: tag,
+            result: BashResult(exitCode: -1, output: "", timedOut: false, terminated: true),
+          )
+        } else {
+          _ = try? await bridge.bashFinished(
+            tag: tag,
+            result: BashResult(exitCode: -1, output: String(describing: error), timedOut: false, terminated: false),
+          )
+        }
       }
       await self.bashTaskFinished(tag: tag)
     }

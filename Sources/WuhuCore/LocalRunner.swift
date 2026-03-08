@@ -32,7 +32,16 @@ public actor LocalRunner: RunnerCommands {
     let task = Task<Void, Never> {
       do {
         let result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
-        _ = try? await bridge.bashFinished(tag: tag, result: result)
+        if Task.isCancelled {
+          // The subprocess was torn down by task cancellation. Override the result
+          // so callers see terminated=true regardless of the process exit status.
+          _ = try? await bridge.bashFinished(
+            tag: tag,
+            result: BashResult(exitCode: result.exitCode, output: result.output, timedOut: false, terminated: true, fullOutputPath: result.fullOutputPath),
+          )
+        } else {
+          _ = try? await bridge.bashFinished(tag: tag, result: result)
+        }
       } catch is CancellationError {
         _ = try? await bridge.bashFinished(
           tag: tag,

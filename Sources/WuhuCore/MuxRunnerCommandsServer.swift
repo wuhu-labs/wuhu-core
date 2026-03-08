@@ -27,10 +27,19 @@ public enum MuxRunnerCommandsServer {
   // MARK: - Stream dispatch
 
   private static func handleStream(_ stream: MuxStream, runner: any RunnerCommands, name: String) async {
-    do {
-      let reader = MuxStreamReader(stream: stream)
-      let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
+    let reader = MuxStreamReader(stream: stream)
 
+    // Read the request header first so we have `op` available for error responses.
+    let op: MuxRunnerOp
+    let payload: [UInt8]
+    do {
+      (op, payload) = try await MuxRunnerCodec.readRequest(reader)
+    } catch {
+      try? await stream.reset()
+      return
+    }
+
+    do {
       switch op {
       case .hello:
         let peerHello: HelloResponse? = payload.isEmpty ? nil : try? MuxRunnerCodec.decode(HelloResponse.self, from: payload)
@@ -116,9 +125,12 @@ public enum MuxRunnerCommandsServer {
       }
 
       try await stream.finish()
-    } catch {
-      // Best effort — stream may already be closed
+    } catch is CancellationError {
       try? await stream.reset()
+    } catch {
+      // Send a structured error response so the client sees the original error message.
+      try? await MuxRunnerCodec.writeError(stream, op: op, message: String(describing: error))
+      try? await stream.finish()
     }
   }
 }

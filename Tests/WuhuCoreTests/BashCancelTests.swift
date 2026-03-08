@@ -5,14 +5,11 @@ import Testing
 
 @Suite("Bash Cancel")
 struct BashCancelTests {
-  /// Test that cancelling a tagged bash via InMemoryRunnerCommands works.
-  @Test func cancelTaggedBashInMemory() async throws {
-    let runner = InMemoryRunnerCommands()
-    // Default stub returns immediately, so we need a slow one.
-    // We use cancelBash directly before waitForBashResult.
+  /// Test that cancelling a tagged bash via SlowRunnerCommands works.
+  @Test func cancelTaggedBash() async throws {
+    let runner = SlowRunnerCommands(delay: .seconds(60))
     let tag = "cancel-test-1"
     _ = try await runner.startBash(tag: tag, command: "sleep 60", cwd: "/tmp", timeout: nil)
-    try await Task.sleep(for: .milliseconds(10))
     let cancel = try await runner.cancelBash(tag: tag)
     #expect(cancel.cancelled)
     let result = try await runner.waitForBashResult(tag: tag)
@@ -62,7 +59,7 @@ struct BashCancelTests {
 
   /// Integration test: withTaskCancellationHandler triggers cancelBash.
   @Test func taskCancellationTriggersCancelBash() async throws {
-    let runner = InMemoryRunnerCommands()
+    let runner = SlowRunnerCommands(delay: .seconds(60))
     let tag = "integration-cancel-tag"
 
     // Track whether the cancel handler was called
@@ -78,6 +75,7 @@ struct BashCancelTests {
       }
     }
 
+    // Give the task time to register the cancellation handler
     try await Task.sleep(for: .milliseconds(50))
 
     // Cancel the task
