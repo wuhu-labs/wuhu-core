@@ -9,6 +9,8 @@ extension WuhuBehavior {
     let sessionID = sessionID
     let store = store
     return Effect { send in
+      defer { Task { await send(WuhuAction.queue(.drainFinished)) } }
+
       guard state.status.snapshot.status != .stopped else { return }
       let drained = try await store.drainInterruptCheckpoint(sessionID: sessionID)
       guard drained.didDrain else { return }
@@ -33,6 +35,8 @@ extension WuhuBehavior {
     let sessionID = sessionID
     let store = store
     return Effect { send in
+      defer { Task { await send(WuhuAction.queue(.drainFinished)) } }
+
       guard state.status.snapshot.status != .stopped else { return }
       let drained = try await store.drainTurnBoundary(sessionID: sessionID)
       guard drained.didDrain else { return }

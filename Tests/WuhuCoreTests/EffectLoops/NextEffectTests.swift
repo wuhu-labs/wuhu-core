@@ -19,6 +19,12 @@ private func makeState() -> WuhuState {
   )
 }
 
+private func makeRunningState() -> WuhuState {
+  var state = makeState()
+  state.status.snapshot = .init(status: .running)
+  return state
+}
+
 private func makeBehavior() throws -> WuhuBehavior {
   let store = try SQLiteSessionStore(path: ":memory:")
   let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
@@ -87,7 +93,7 @@ struct NextEffectPriorityTests {
   @Test("cost gate: isPaused returns nil")
   func costGatePaused() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.cost.isPaused = true
     // Even with work pending, cost gate blocks
     state.transcript.entries.append(makeUserEntry())
@@ -181,12 +187,50 @@ struct NextEffectPriorityTests {
     #expect(state.inference.retryAfter == nil)
   }
 
+  // MARK: - Session Status Gate
+
+  @Test("stopped session returns nil even with pending work")
+  func stoppedSessionReturnsNil() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.status.snapshot = .init(status: .stopped)
+    state.transcript.entries.append(makeUserEntry())
+    state.tools.statuses["tc-1"] = .started
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect == nil)
+  }
+
+  @Test("idle session returns nil even with pending work")
+  func idleSessionReturnsNil() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.status.snapshot = .init(status: .idle)
+    state.transcript.entries.append(makeUserEntry())
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect == nil)
+  }
+
+  @Test("retry backoff still fires for non-running sessions")
+  func retryBackoffIgnoresStatusGate() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.status.snapshot = .init(status: .stopped)
+    state.inference.retryAfter = .now + .seconds(5)
+    state.inference.status = .waitingRetry
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect != nil) // Retry backoff is above the status gate
+    #expect(state.inference.retryAfter == nil)
+  }
+
   // MARK: - Stale Tool Recovery (Priority 3)
 
   @Test("stale tool recovery takes priority over draining")
   func staleToolRecovery() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
 
     // Set up a stale tool call (started, no result in transcript)
     state.tools.statuses["tc-1"] = .started
@@ -200,7 +244,23 @@ struct NextEffectPriorityTests {
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
-    // Should pick up stale recovery, not drain
+    // Guard token: should be marked as recovering
+    #expect(state.tools.recoveringIDs.contains("tc-1"))
+  }
+
+  @Test("stale tool recovery sets recoveringIDs guard token")
+  func staleRecoveryGuardToken() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+    state.tools.statuses["tc-1"] = .started
+
+    let effect1 = behavior.nextEffect(state: &state)
+    #expect(effect1 != nil)
+    #expect(state.tools.recoveringIDs.contains("tc-1"))
+
+    // Second call should not re-schedule the same recovery
+    let effect2 = behavior.nextEffect(state: &state)
+    #expect(effect2 == nil)
   }
 
   // MARK: - Drain Interrupts (Priority 4)
@@ -208,7 +268,7 @@ struct NextEffectPriorityTests {
   @Test("drain interrupts when system queue has items")
   func drainInterrupts() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.queue.system = .init(
       cursor: .init(rawValue: "0"),
       pending: [.init(id: .init(rawValue: "q1"), enqueuedAt: Date(), input: .init(source: .other("test"), content: .text("test")))],
@@ -217,12 +277,13 @@ struct NextEffectPriorityTests {
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
+    #expect(state.queue.isDraining == true) // Guard token set
   }
 
   @Test("drain interrupts when steer queue has items")
   func drainSteer() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.queue.steer = .init(
       cursor: .init(rawValue: "0"),
       pending: [.init(id: .init(rawValue: "q1"), enqueuedAt: Date(), message: .init(author: .system, content: .text("hi")))],
@@ -231,6 +292,26 @@ struct NextEffectPriorityTests {
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
+    #expect(state.queue.isDraining == true) // Guard token set
+  }
+
+  @Test("drain guard token prevents double-scheduling")
+  func drainGuardToken() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+    state.queue.system = .init(
+      cursor: .init(rawValue: "0"),
+      pending: [.init(id: .init(rawValue: "q1"), enqueuedAt: Date(), input: .init(source: .other("test"), content: .text("test")))],
+      journal: [],
+    )
+
+    let effect1 = behavior.nextEffect(state: &state)
+    #expect(effect1 != nil)
+    #expect(state.queue.isDraining == true)
+
+    // Second call should not re-schedule drain
+    let effect2 = behavior.nextEffect(state: &state)
+    #expect(effect2 == nil)
   }
 
   // MARK: - Drain Turn Items (Priority 5)
@@ -238,7 +319,7 @@ struct NextEffectPriorityTests {
   @Test("drain followUp when queue has items and no interrupts pending")
   func drainFollowUp() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.queue.followUp = .init(
       cursor: .init(rawValue: "0"),
       pending: [.init(id: .init(rawValue: "q1"), enqueuedAt: Date(), message: .init(author: .system, content: .text("follow up")))],
@@ -247,16 +328,16 @@ struct NextEffectPriorityTests {
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
+    #expect(state.queue.isDraining == true) // Guard token set
   }
 
   // MARK: - Inference (Priority 6)
 
-  @Test("inference starts when transcript needs response and status is idle")
+  @Test("inference starts when transcript needs response and session is running")
   func inferenceStarts() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.transcript.entries.append(makeUserEntry())
-    state.status.snapshot = .init(status: .running)
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
@@ -266,7 +347,7 @@ struct NextEffectPriorityTests {
   @Test("inference skipped when already running")
   func inferenceSkippedWhenRunning() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.inference.status = .running
     state.transcript.entries.append(makeUserEntry())
 
@@ -277,7 +358,7 @@ struct NextEffectPriorityTests {
   @Test("inference skipped when last message is assistant")
   func inferenceSkippedWhenAssistantResponded() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.transcript.entries.append(makeUserEntry())
     state.transcript.entries.append(makeAssistantEntry())
 
@@ -290,7 +371,7 @@ struct NextEffectPriorityTests {
   @Test("tool execution when pending tool calls exist")
   func toolExecution() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
 
     // Add an assistant entry with a tool call
     let assistantEntry = WuhuSessionEntry(
@@ -318,7 +399,7 @@ struct NextEffectPriorityTests {
   @Test("cost gate has highest priority")
   func costGateHighestPriority() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.cost.isPaused = true
     state.inference.retryAfter = .now + .seconds(5) // Priority 2
     state.tools.statuses["tc-1"] = .started // Priority 3 (stale)
@@ -331,7 +412,7 @@ struct NextEffectPriorityTests {
   @Test("retry backoff beats stale recovery")
   func retryBeatsStale() throws {
     let behavior = try makeBehavior()
-    var state = makeState()
+    var state = makeRunningState()
     state.inference.retryAfter = .now + .seconds(5)
     state.inference.status = .waitingRetry
     state.tools.statuses["tc-1"] = .started // Stale tool
@@ -346,17 +427,14 @@ struct NextEffectPriorityTests {
 
 @Suite("Tool repetition tracking")
 struct ToolRepetitionTests {
-  @Test("repetition tracker records consecutive identical results")
-  func repetitionTracker() {
+  @Test("repetition tracker records via reducer on completed action")
+  func repetitionTrackerViaReducer() {
     var state = makeState()
-    // Record same tool call 5 times
-    for _ in 0 ..< 5 {
-      let count = state.tools.repetitionTracker.record(
-        toolName: "bash",
-        argsHash: 42,
-        resultHash: 99,
-      )
-      _ = count
+    for i in 0 ..< 5 {
+      reduceTools(state: &state, action: .completed(
+        id: "tc-\(i)", status: .completed,
+        toolName: "bash", argsHash: 42, resultHash: 99,
+      ))
     }
 
     let count = state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42)

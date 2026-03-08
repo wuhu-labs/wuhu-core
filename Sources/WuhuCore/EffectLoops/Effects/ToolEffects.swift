@@ -5,8 +5,8 @@ import WuhuAPI
 /// Effect factories for tool execution and stale tool recovery.
 extension WuhuBehavior {
   /// Execute tool calls in parallel. Each sends `.tools(.completed)` or
-  /// `.tools(.failed)` with the result. Integrates ToolCallRepetitionTracker
-  /// for degenerate loop detection.
+  /// `.tools(.failed)` with the result. Repetition tracking data is sent
+  /// back in the actions so the reducer can update the tracker.
   func executeToolCalls(_ calls: [ToolCall], state: WuhuState) -> Effect<WuhuAction> {
     let sessionID = sessionID
     let store = store
@@ -39,6 +39,7 @@ extension WuhuBehavior {
       // Record blocked calls as errors immediately.
       for call in blocked {
         let now = Date()
+        let argsHash = call.arguments.hashValue
         let toolResult: Message = .toolResult(.init(
           toolCallId: call.id,
           toolName: call.name,
@@ -56,7 +57,7 @@ extension WuhuBehavior {
         await send(WuhuAction.transcript(.append(entry)))
 
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
-        await send(WuhuAction.tools(.failed(id: call.id, status: .errored)))
+        await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
 
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
         await send(WuhuAction.status(.updated(status)))
@@ -91,14 +92,10 @@ extension WuhuBehavior {
 
       // Record results
       for (call, result) in results {
+        let argsHash = call.arguments.hashValue
         switch result {
         case let .success(toolResult):
-          let argsHash = call.arguments.hashValue
           let resultHash = toolResult.hashValue
-
-          // Track repetition — send record action
-          // Note: repetition tracking is state, updated via reducer.
-          // For now, persist and send result actions.
           await persistToolSuccess(
             call: call,
             toolResult: toolResult,
@@ -115,6 +112,7 @@ extension WuhuBehavior {
           await persistToolFailure(
             call: call,
             error: error,
+            argsHash: argsHash,
             sessionID: sessionID,
             store: store,
             send: send,
@@ -137,12 +135,6 @@ extension WuhuBehavior {
         return t.toolCallId == id
       }
 
-      if hasResult {
-        _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-        await send(WuhuAction.tools(.failed(id: id, status: .errored)))
-        return
-      }
-
       // Find the tool name from the transcript
       let toolName: String = {
         for entry in state.transcript.entries.reversed() {
@@ -155,6 +147,12 @@ extension WuhuBehavior {
         }
         return "unknown"
       }()
+
+      if hasResult {
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
+        await send(WuhuAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
+        return
+      }
 
       let now = Date()
       let repaired: Message = .toolResult(.init(
@@ -177,7 +175,7 @@ extension WuhuBehavior {
       await send(WuhuAction.transcript(.append(entry)))
 
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-      await send(WuhuAction.tools(.failed(id: id, status: .errored)))
+      await send(WuhuAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
       await send(WuhuAction.status(.updated(status)))
@@ -201,12 +199,12 @@ private func persistToolSuccess(
   do {
     let now = Date()
 
-    // Check repetition — we use a local copy to check count
-    var localTracker = tracker
-    let count = localTracker.record(toolName: call.name, argsHash: argsHash, resultHash: resultHash)
+    // Check repetition count from the snapshot to decide whether to append a warning.
+    // The actual tracker update happens in the reducer when it processes .completed.
+    let currentCount = tracker.preflightCount(toolName: call.name, argsHash: argsHash)
 
     var finalResult = toolResult
-    if count >= ToolCallRepetitionTracker.warningThreshold {
+    if currentCount + 1 >= ToolCallRepetitionTracker.warningThreshold {
       finalResult.content.append(.text(ToolCallRepetitionTracker.warningText))
     }
 
@@ -239,19 +237,26 @@ private func persistToolSuccess(
     await send(WuhuAction.transcript(.append(entry)))
 
     _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .completed)
-    await send(WuhuAction.tools(.completed(id: call.id, status: .completed)))
+    await send(WuhuAction.tools(.completed(
+      id: call.id, status: .completed,
+      toolName: call.name, argsHash: argsHash, resultHash: resultHash,
+    )))
 
     let status = try await store.loadStatusSnapshot(sessionID: sessionID)
     await send(WuhuAction.status(.updated(status)))
   } catch {
     // If persistence fails, record as failure
-    await persistToolFailure(call: call, error: error, sessionID: sessionID, store: store, send: send)
+    await persistToolFailure(
+      call: call, error: error, argsHash: argsHash,
+      sessionID: sessionID, store: store, send: send,
+    )
   }
 }
 
 private func persistToolFailure(
   call: ToolCall,
   error: any Error,
+  argsHash: Int,
   sessionID: SessionID,
   store: SQLiteSessionStore,
   send: Send<WuhuAction>,
@@ -275,12 +280,12 @@ private func persistToolFailure(
     await send(WuhuAction.transcript(.append(entry)))
 
     _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
-    await send(WuhuAction.tools(.failed(id: call.id, status: .errored)))
+    await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
 
     let status = try await store.loadStatusSnapshot(sessionID: sessionID)
     await send(WuhuAction.status(.updated(status)))
   } catch {
     // Best-effort: if even error persistence fails, just send the failure action.
-    await send(WuhuAction.tools(.failed(id: call.id, status: .errored)))
+    await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
   }
 }

@@ -52,19 +52,27 @@ struct WuhuBehavior: LoopBehavior {
       return sleepUntil(retryAfter)
     }
 
+    // Only do work when the session is running.
+    guard state.status.snapshot.status == .running else { return nil }
+
     // 3. Stale tool recovery — orphaned tool calls with no result
     let staleIDs = staleToolCallIDs(in: state)
     if let firstStale = staleIDs.first {
+      state.tools.recoveringIDs.insert(firstStale) // guard token
       return recoverStaleToolCall(id: firstStale, state: state)
     }
 
     // 4. Drain interrupts — system + steer queues
-    if !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty {
+    if !state.queue.isDraining,
+       !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty
+    {
+      state.queue.isDraining = true // guard token
       return persistAndDrainInterrupts(state: state)
     }
 
     // 5. Drain turn items — followUp queue (only if no interrupts pending)
-    if !state.queue.followUp.pending.isEmpty {
+    if !state.queue.isDraining, !state.queue.followUp.pending.isEmpty {
+      state.queue.isDraining = true // guard token
       return persistAndDrainTurn(state: state)
     }
 
@@ -85,7 +93,8 @@ struct WuhuBehavior: LoopBehavior {
     }
 
     // 8. Compaction — if transcript exceeds threshold
-    if shouldCompact(state: state) {
+    if !state.transcript.isCompacting, shouldCompact(state: state) {
+      state.transcript.isCompacting = true // guard token
       return runCompaction(state: state)
     }
 
@@ -106,7 +115,9 @@ struct WuhuBehavior: LoopBehavior {
 
     return state.tools.statuses.compactMap { id, status in
       guard status == .started else { return nil }
-      return finished.contains(id) ? nil : id
+      guard !finished.contains(id) else { return nil }
+      guard !state.tools.recoveringIDs.contains(id) else { return nil }
+      return id
     }.sorted()
   }
 

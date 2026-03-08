@@ -13,6 +13,8 @@ extension WuhuBehavior {
     let settingsSnapshot = state.settings.snapshot
 
     return Effect { send in
+      defer { Task { await send(WuhuAction.transcript(.compactionFinished)) } }
+
       let session = try await store.getSession(id: sessionID.rawValue)
       let provider = session.provider.piProvider
       let settingsModel = Model(id: session.model, provider: provider)

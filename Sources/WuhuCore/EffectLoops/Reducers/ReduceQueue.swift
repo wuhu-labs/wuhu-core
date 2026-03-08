@@ -7,5 +7,7 @@ func reduceQueue(state: inout WuhuState, action: QueueAction) {
     state.queue.steer = backfill
   case let .followUpUpdated(backfill):
     state.queue.followUp = backfill
+  case .drainFinished:
+    state.queue.isDraining = false
   }
 }

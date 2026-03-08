@@ -80,7 +80,7 @@ extension WuhuBehavior {
         if !calls.isEmpty {
           let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
           for update in updates {
-            await send(WuhuAction.tools(.completed(id: update.id, status: update.status)))
+            await send(WuhuAction.tools(.statusSet(id: update.id, status: update.status)))
           }
         }
 

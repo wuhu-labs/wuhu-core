@@ -30,7 +30,7 @@ public actor EffectLoop<B: LoopBehavior> {
 
   // MARK: - In-flight effect tasks
 
-  private var inflightTasks: [Task<Void, Never>] = []
+  private var inflightTasks: [UUID: Task<Void, Never>] = [:]
 
   // MARK: - Observation
 
@@ -86,9 +86,6 @@ public actor EffectLoop<B: LoopBehavior> {
 
   /// Pull effects from the behavior until idle.
   private func step() {
-    // Prune finished tasks to avoid unbounded growth.
-    inflightTasks.removeAll(where: \.isCancelled)
-
     while let effect = behavior.nextEffect(state: &state) {
       execute(effect)
     }
@@ -103,10 +100,12 @@ public actor EffectLoop<B: LoopBehavior> {
     case let .send(action):
       send(action)
     case let .run(work):
+      let taskID = UUID()
       let sendFn = Send<B.Action> { [weak self] action in
         await self?.send(action)
       }
-      let task = Task {
+      let task = Task { [weak self] in
+        defer { Task { [weak self] in await self?.removeInflightTask(taskID) } }
         do {
           try await work(sendFn)
         } catch is CancellationError {
@@ -116,13 +115,18 @@ public actor EffectLoop<B: LoopBehavior> {
           // by sending error actions. Unhandled errors are dropped.
         }
       }
-      inflightTasks.append(task)
+      inflightTasks[taskID] = task
     }
   }
 
-  /// Cancel all in-flight effect tasks and clear the tracking list.
+  /// Remove a completed task from the in-flight set.
+  private func removeInflightTask(_ id: UUID) {
+    inflightTasks.removeValue(forKey: id)
+  }
+
+  /// Cancel all in-flight effect tasks and clear the tracking set.
   private func cancelAllInflightTasks() {
-    for task in inflightTasks {
+    for (_, task) in inflightTasks {
       task.cancel()
     }
     inflightTasks.removeAll()

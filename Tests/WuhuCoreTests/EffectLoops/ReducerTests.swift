@@ -48,6 +48,14 @@ private func makeBehavior() throws -> WuhuBehavior {
 
 @Suite("reduceQueue")
 struct QueueReducerTests {
+  @Test("drainFinished clears isDraining guard token")
+  func drainFinished() {
+    var state = makeState()
+    state.queue.isDraining = true
+    reduceQueue(state: &state, action: .drainFinished)
+    #expect(state.queue.isDraining == false)
+  }
+
   @Test("systemUpdated replaces system queue")
   func systemUpdated() {
     var state = makeState()
@@ -225,20 +233,44 @@ struct ToolsReducerTests {
     #expect(state.tools.statuses["tc-1"] == .started)
   }
 
-  @Test("completed updates status")
+  @Test("completed updates status and records repetition")
   func completed() {
     var state = makeState()
     state.tools.statuses["tc-1"] = .started
-    reduceTools(state: &state, action: .completed(id: "tc-1", status: .completed))
+    reduceTools(state: &state, action: .completed(
+      id: "tc-1", status: .completed,
+      toolName: "bash", argsHash: 42, resultHash: 99,
+    ))
     #expect(state.tools.statuses["tc-1"] == .completed)
+    #expect(state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42) == 1)
   }
 
-  @Test("failed updates status to errored")
+  @Test("failed updates status to errored and records repetition")
   func failed() {
     var state = makeState()
     state.tools.statuses["tc-1"] = .started
-    reduceTools(state: &state, action: .failed(id: "tc-1", status: .errored))
+    reduceTools(state: &state, action: .failed(id: "tc-1", status: .errored, toolName: "bash", argsHash: 42))
     #expect(state.tools.statuses["tc-1"] == .errored)
+    #expect(state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42) == 1)
+  }
+
+  @Test("completed clears recoveringIDs")
+  func completedClearsRecovering() {
+    var state = makeState()
+    state.tools.recoveringIDs.insert("tc-1")
+    reduceTools(state: &state, action: .completed(
+      id: "tc-1", status: .completed,
+      toolName: "bash", argsHash: 0, resultHash: 0,
+    ))
+    #expect(!state.tools.recoveringIDs.contains("tc-1"))
+  }
+
+  @Test("failed clears recoveringIDs")
+  func failedClearsRecovering() {
+    var state = makeState()
+    state.tools.recoveringIDs.insert("tc-1")
+    reduceTools(state: &state, action: .failed(id: "tc-1", status: .errored, toolName: "bash", argsHash: 0))
+    #expect(!state.tools.recoveringIDs.contains("tc-1"))
   }
 
   @Test("resetRepetitions clears tracker")
@@ -331,6 +363,14 @@ struct TranscriptReducerTests {
     reduceTranscript(state: &state, action: .append(makeEntry(id: 3)))
     #expect(state.transcript.entries.map(\.id) == [1, 2, 3])
   }
+
+  @Test("compactionFinished clears isCompacting guard token")
+  func compactionFinished() {
+    var state = makeState()
+    state.transcript.isCompacting = true
+    reduceTranscript(state: &state, action: .compactionFinished)
+    #expect(state.transcript.isCompacting == false)
+  }
 }
 
 // MARK: - Settings Reducer Tests
@@ -413,6 +453,17 @@ struct WuhuBehaviorStateQueryTests {
 
     let stale = behavior.staleToolCallIDs(in: state)
     #expect(stale == ["tc-1"]) // Only started (not pending) is stale
+  }
+
+  @Test("staleToolCallIDs excludes tool calls currently recovering")
+  func staleExcludesRecovering() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    state.tools.statuses["tc-1"] = .started
+    state.tools.recoveringIDs.insert("tc-1")
+
+    let stale = behavior.staleToolCallIDs(in: state)
+    #expect(stale.isEmpty)
   }
 
   @Test("staleToolCallIDs excludes tool calls with results in transcript")
