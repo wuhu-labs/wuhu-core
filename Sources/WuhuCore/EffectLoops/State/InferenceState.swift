@@ -18,4 +18,7 @@ enum InferenceStatus: Sendable, Equatable {
   case idle
   case running
   case waitingRetry
+  /// Terminal error — inference will not be retried until a new user
+  /// message arrives or the session is explicitly restarted.
+  case failed
 }

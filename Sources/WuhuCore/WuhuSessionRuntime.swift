@@ -24,6 +24,7 @@ actor WuhuSessionRuntime {
   private var inflightText: String = ""
   private var observedState: WuhuState = .empty
   private var observationReady: Bool = false
+  private var pendingActions: AsyncStream<WuhuAction>?
 
   init(
     sessionID: SessionID,
@@ -66,7 +67,9 @@ actor WuhuSessionRuntime {
             status: .init(snapshot: parts.status),
           )
           let newLoop = EffectLoop(behavior: behavior, initialState: initialState)
-          await self?.installLoop(newLoop, state: initialState)
+          // Subscribe BEFORE start() so no early actions are lost.
+          let (snapshot, actions) = await newLoop.subscribe()
+          await self?.installLoop(newLoop, state: snapshot, actions: actions)
           await newLoop.start()
           return
         } catch is CancellationError {
@@ -90,29 +93,25 @@ actor WuhuSessionRuntime {
     }
   }
 
-  private func installLoop(_ newLoop: EffectLoop<WuhuBehavior>, state: WuhuState) {
+  private func installLoop(_ newLoop: EffectLoop<WuhuBehavior>, state: WuhuState, actions: AsyncStream<WuhuAction>) {
     loop = newLoop
     observedState = state
+    streaming = state.inference.status == .running
+    inflightText = ""
     publishedSystemCursor = state.queue.system.cursor
     publishedSteerCursor = state.queue.steer.cursor
     publishedFollowUpCursor = state.queue.followUp.cursor
+    pendingActions = actions
+    observationReady = true
   }
 
   private func runObservation() async {
-    // Wait for loop to be created by startTask.
-    while loop == nil, !Task.isCancelled {
+    // Wait for the subscription to be set up by startTask (via installLoop).
+    while pendingActions == nil, !Task.isCancelled {
       await Task.yield()
     }
-    guard let loop else { return }
-
-    let (snapshot, actions) = await loop.subscribe()
-    observedState = snapshot
-    streaming = snapshot.inference.status == .running
-    inflightText = ""
-    publishedSystemCursor = snapshot.queue.system.cursor
-    publishedSteerCursor = snapshot.queue.steer.cursor
-    publishedFollowUpCursor = snapshot.queue.followUp.cursor
-    observationReady = true
+    guard let actions = pendingActions else { return }
+    pendingActions = nil
 
     for await action in actions {
       await handleAction(action)
@@ -128,7 +127,12 @@ actor WuhuSessionRuntime {
   }
 
   func isIdle() -> Bool {
-    !streaming && observedState.status.snapshot.status != .running
+    if streaming { return false }
+    if observedState.status.snapshot.status != .running { return true }
+    // Terminal inference failure — the loop has no more work to do
+    // until a new user message arrives and resets the error.
+    if observedState.inference.status == .failed { return true }
+    return false
   }
 
   /// Returns accumulated streaming text if inference is in progress, nil otherwise.
@@ -237,6 +241,7 @@ actor WuhuSessionRuntime {
     startTask = nil
     observeTask = nil
     loop = nil
+    pendingActions = nil
     observationReady = false
     streaming = false
     inflightText = ""

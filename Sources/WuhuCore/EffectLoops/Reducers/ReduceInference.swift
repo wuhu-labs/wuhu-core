@@ -30,7 +30,7 @@ func reduceInference(state: inout WuhuState, action: InferenceAction) {
       state.inference.status = .waitingRetry
     } else {
       state.inference.retryCount += 1
-      state.inference.status = .idle
+      state.inference.status = .failed
     }
 
   case .retryReady:

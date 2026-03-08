@@ -91,6 +91,38 @@ struct QueueReducerTests {
     reduceQueue(state: &state, action: .followUpUpdated(backfill))
     #expect(state.queue.followUp.cursor.rawValue == "99")
   }
+
+  @Test("queue update resets .failed inference to .idle")
+  func queueUpdateResetsFailedInference() {
+    var state = makeState()
+    state.inference.status = .failed
+    state.inference.retryCount = 5
+    state.inference.lastError = InferenceError(message: "bad key", httpStatusCode: 401, isTransient: false)
+
+    let backfill = UserQueueBackfill(
+      cursor: .init(rawValue: "1"),
+      pending: [],
+      journal: [],
+    )
+    reduceQueue(state: &state, action: .followUpUpdated(backfill))
+    #expect(state.inference.status == .idle)
+    #expect(state.inference.retryCount == 0)
+    #expect(state.inference.lastError == nil)
+  }
+
+  @Test("queue update does not reset non-failed inference status")
+  func queueUpdateDoesNotResetRunning() {
+    var state = makeState()
+    state.inference.status = .running
+
+    let backfill = UserQueueBackfill(
+      cursor: .init(rawValue: "1"),
+      pending: [],
+      journal: [],
+    )
+    reduceQueue(state: &state, action: .followUpUpdated(backfill))
+    #expect(state.inference.status == .running) // Unchanged
+  }
 }
 
 // MARK: - Inference Reducer Tests
@@ -143,7 +175,7 @@ struct InferenceReducerTests {
     #expect(state.inference.lastError == error2)
   }
 
-  @Test("failed with permanent error stays idle")
+  @Test("failed with permanent error transitions to .failed terminal state")
   func failedPermanent() {
     var state = makeState()
     state.inference.status = .running
@@ -151,10 +183,30 @@ struct InferenceReducerTests {
     let error = InferenceError(message: "HTTP 401", httpStatusCode: 401, isTransient: false)
     reduceInference(state: &state, action: .failed(error))
     #expect(state.inference.retryCount == 1)
-    #expect(state.inference.status == .idle)
+    #expect(state.inference.status == .failed)
     #expect(state.inference.retryAfter == nil)
     #expect(state.inference.lastError?.httpStatusCode == 401)
     #expect(state.inference.lastError?.isTransient == false)
+  }
+
+  @Test("transient error exhausting retry budget transitions to .failed")
+  func failedTransientExhausted() {
+    var state = makeState()
+    let error = InferenceError(message: "HTTP 500", httpStatusCode: 500, isTransient: true)
+
+    // Exhaust the retry budget (maxInferenceRetries = 10)
+    for _ in 0 ..< 10 {
+      state.inference.status = .running
+      reduceInference(state: &state, action: .failed(error))
+      #expect(state.inference.status == .waitingRetry)
+      state.inference.retryAfter = nil
+    }
+
+    // 11th failure should exceed budget and transition to .failed
+    state.inference.status = .running
+    reduceInference(state: &state, action: .failed(error))
+    #expect(state.inference.status == .failed)
+    #expect(state.inference.retryAfter == nil)
   }
 
   @Test("retryReady clears retryAfter and goes idle")

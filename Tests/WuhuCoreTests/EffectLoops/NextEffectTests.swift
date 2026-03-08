@@ -176,15 +176,28 @@ struct NextEffectPriorityTests {
     #expect(state.inference.status == .waitingRetry)
   }
 
-  @Test("permanent error does not set waitingRetry")
+  @Test("permanent error transitions to .failed, not .idle")
   func permanentErrorNoRetry() {
     var state = makeState()
     state.inference.status = .running
 
     let error = InferenceError(message: "HTTP 401", httpStatusCode: 401, isTransient: false)
     reduceInference(state: &state, action: .failed(error))
-    #expect(state.inference.status == .idle)
+    #expect(state.inference.status == .failed)
     #expect(state.inference.retryAfter == nil)
+  }
+
+  @Test(".failed inference blocks nextEffect from scheduling inference")
+  func failedInferenceBlocksNextEffect() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+    state.transcript.entries.append(makeUserEntry())
+    state.inference.status = .failed
+
+    // Even though transcript needs a response, .failed blocks inference
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect == nil)
+    #expect(state.inference.status == .failed) // Unchanged
   }
 
   // MARK: - Session Status Gate

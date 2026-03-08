@@ -574,31 +574,28 @@ struct InferenceRetryTests {
     #expect(response.stopEntry != nil)
   }
 
-  /// Non-transient errors (e.g., 401 auth errors) are not retried by the
-  /// inference retry loop — they propagate immediately. The outer runtime
-  /// restart loop may trigger a second attempt via `needsInference` recovery,
-  /// but there is no exponential backoff between attempts.
+  /// Non-transient errors (e.g., 401 auth errors) put inference into a
+  /// terminal `.failed` state. The loop stops trying until a new user
+  /// message arrives, which resets the error and allows a fresh attempt.
   @Test func nonTransientErrorNotRetried() async throws {
     let mock = MockStreamFn(responses: [
       .transientError(code: 401),
-      .text("recovered after restart"),
+      .text("recovered after new message"),
     ])
     let harness = try TestHarness(mockLLM: mock)
 
     let session = try await harness.createSession()
 
-    // The 401 error propagates immediately without retries from
-    // performInferenceWithRetry. The outer WuhuSessionRuntime restarts
-    // the loop after 1 second, at which point needsInference detects
-    // the unanswered user message and triggers a fresh inference call.
+    // First message: 401 error → inference enters .failed → session goes idle.
+    // No automatic retry — the loop stops scheduling inference.
     try await harness.enqueueAndWaitForIdle("hello", sessionID: session.id, timeout: 10)
+    #expect(mock.callCount == 1)
 
-    // Two calls: one failed (401), one succeeded (after runtime restart).
-    // Critically, there is NO exponential backoff between them — just the
-    // runtime's fixed 1-second restart delay.
+    // A new user message resets the .failed state and allows retry.
+    try await harness.enqueueAndWaitForIdle("try again", sessionID: session.id, timeout: 10)
     #expect(mock.callCount == 2)
 
     let texts = try await harness.assistantTexts(sessionID: session.id)
-    #expect(texts.contains("recovered after restart"))
+    #expect(texts.contains("recovered after new message"))
   }
 }
