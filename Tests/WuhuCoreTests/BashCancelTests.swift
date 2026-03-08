@@ -5,131 +5,175 @@ import Testing
 
 @Suite("Bash Cancel")
 struct BashCancelTests {
-  /// Test that cancelling a tagged bash via SlowRunnerCommands works.
-  @Test func cancelTaggedBash() async throws {
-    let runner = SlowRunnerCommands(delay: .seconds(60))
-    let tag = "cancel-test-1"
-    _ = try await runner.startBash(tag: tag, command: "sleep 60", cwd: "/tmp", timeout: nil)
-    let cancel = try await runner.cancelBash(tag: tag)
-    #expect(cancel.cancelled)
-    let result = try await runner.waitForBashResult(tag: tag)
-    #expect(result.terminated)
+  /// Test that cancelBash on the handler dispatches to the runner.
+  @Test func cancelBashViaHandler() async throws {
+    let runner = SlowBashRunner(delay: .seconds(60))
+    let handler = RunnerServerHandler(runner: runner, name: "test-runner")
+
+    let tag = "tool-call-123"
+    let req = StartBashRequest(tag: tag, command: "sleep 60", cwd: "/tmp")
+
+    // Start bash
+    let (response, _) = await handler.handle(request: .startBash(id: "r1", req))
+    guard case let .startBash(_, result) = response else {
+      Issue.record("Expected startBash response"); return
+    }
+    let started = try result.get()
+    #expect(started.alreadyRunning == false)
+
+    // Cancel it
+    let (cancelResp, _) = await handler.handle(request: .cancelBash(id: "c1", CancelBashRequest(tag: tag)))
+    guard case let .cancelBash(_, cancelResult) = cancelResp else {
+      Issue.record("Expected cancelBash response"); return
+    }
+    let cr = try cancelResult.get()
+    #expect(cr == .cancelled)
   }
 
-  /// Test that cancelling a non-existent tag returns cancelled=false.
+  /// Test that cancelling a non-existent tag returns notFound.
   @Test func cancelNonExistentTag() async throws {
-    let runner = InMemoryRunnerCommands()
-    let cancel = try await runner.cancelBash(tag: "does-not-exist")
-    #expect(!cancel.cancelled)
+    let runner = InMemoryRunner()
+    let handler = RunnerServerHandler(runner: runner, name: "test-runner")
+
+    let (response, _) = await handler.handle(request: .cancelBash(id: "c1", CancelBashRequest(tag: "does-not-exist")))
+    guard case let .cancelBash(_, result) = response else {
+      Issue.record("Expected cancelBash response"); return
+    }
+    let cr = try result.get()
+    #expect(cr == .notFound)
   }
 
-  /// Test the full cancel flow over mux transport: startBash + cancelBash.
+  /// Test cancel over mux transport.
   @Test("Cancel over mux transport", arguments: TransportKind.allCases)
   func cancelOverMux(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = SlowRunnerCommands(delay: .seconds(60))
+      let runner = SlowBashRunner(delay: .seconds(60))
 
       let handlerTask = Task {
-        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
+      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
 
-      let tag = "mux-cancel-test-1"
+      let tag = "mux-tool-call-789"
 
-      // Start bash in background — it will wait for result
-      let waitTask = Task {
-        _ = try await client.startBash(tag: tag, command: "sleep 60", cwd: "/tmp", timeout: nil)
-        return try await client.waitForBashResult(tag: tag)
-      }
+      // Start bash
+      let started = try await client.startBash(tag: tag, command: "sleep 60", cwd: "/tmp", timeout: nil)
+      #expect(started.alreadyRunning == false)
 
-      // Give runner time to start processing
-      try await Task.sleep(for: .milliseconds(200))
+      // Cancel it
+      let result = try await client.cancelBash(tag: tag)
+      #expect(result == .cancelled)
 
-      // Cancel
-      let cancelResult = try await client.cancelBash(tag: tag)
-      #expect(cancelResult.cancelled)
-
-      // Wait task should complete with terminated=true
-      let result = try await waitTask.value
-      #expect(result.terminated)
+      // Cancel again — notFound
+      let result2 = try await client.cancelBash(tag: tag)
+      #expect(result2 == .notFound)
     }
   }
 
-  /// Integration test: withTaskCancellationHandler triggers cancelBash.
-  @Test func taskCancellationTriggersCancelBash() async throws {
-    let runner = SlowRunnerCommands(delay: .seconds(60))
-    let tag = "integration-cancel-tag"
+  /// Test BashTagCoordinator cancel flow: start → cancel → result is terminated.
+  @Test func coordinatorCancelBeforeResult() async throws {
+    let runner = SlowBashRunner(delay: .seconds(60))
+    let coordinator = BashTagCoordinator()
+    await runner.setCallbacks(coordinator)
 
-    // Track whether the cancel handler was called
-    let cancelCalled = MutableFlag()
+    let tag = "coord-cancel-1"
 
+    // Start runBash in background — it will wait for bashFinished
     let bashTask = Task {
-      _ = try await runner.startBash(tag: tag, command: "sleep 60", cwd: "/tmp", timeout: nil)
-      return try await withTaskCancellationHandler {
-        try await runner.waitForBashResult(tag: tag)
-      } onCancel: {
-        cancelCalled.set()
-        Task { _ = try? await runner.cancelBash(tag: tag) }
-      }
+      try await coordinator.runBash(
+        tag: tag,
+        command: "sleep 60",
+        runner: runner,
+        cwd: "/tmp",
+        timeout: nil,
+      )
     }
 
-    // Give the task time to register the cancellation handler
+    // Give it time to enter the continuation
     try await Task.sleep(for: .milliseconds(50))
 
-    // Cancel the task
-    bashTask.cancel()
+    // Cancel via coordinator
+    await coordinator.cancel(tag: tag, runner: runner)
 
-    // Either CancellationError or terminated result is acceptable
-    do {
-      let result = try await bashTask.value
-      #expect(result.terminated)
-    } catch is CancellationError {
-      // Expected
-    }
+    // Should return terminated
+    let result = try await bashTask.value
+    #expect(result.terminated == true)
+    #expect(result.exitCode == -15)
+  }
 
-    #expect(cancelCalled.value)
+  /// Test BashTagCoordinator pre-cancel: cancel before start.
+  @Test func coordinatorPreCancel() async throws {
+    let runner = SlowBashRunner(delay: .seconds(60))
+    let coordinator = BashTagCoordinator()
+    await runner.setCallbacks(coordinator)
+
+    let tag = "pre-cancel-1"
+
+    // Cancel before start
+    await coordinator.cancel(tag: tag, runner: runner)
+
+    // Now start — should return terminated immediately
+    let result = try await coordinator.runBash(
+      tag: tag,
+      command: "sleep 60",
+      runner: runner,
+      cwd: "/tmp",
+      timeout: nil,
+    )
+    #expect(result.terminated == true)
+    #expect(result.exitCode == -15)
   }
 }
 
-// MARK: - SlowRunnerCommands
+// MARK: - SlowBashRunner
 
-/// A RunnerCommands implementation where bash suspends for a configurable duration.
-private actor SlowRunnerCommands: RunnerCommands {
+/// A test runner where bash processes block for a configurable duration.
+/// Uses v3 protocol: startBash spawns a delayed task, cancelBash cancels it.
+private actor SlowBashRunner: Runner {
   nonisolated let id: RunnerID = .local
   let delay: Duration
-  private let bridge = BashCallbackBridge()
   private var activeTasks: [String: Task<Void, Never>] = [:]
+  private var callbacks: (any RunnerCallbacks)?
 
   init(delay: Duration) {
     self.delay = delay
   }
 
+  func setCallbacks(_ cb: any RunnerCallbacks) async {
+    callbacks = cb
+  }
+
   func startBash(tag: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
-    if activeTasks[tag] != nil { return BashStarted(tag: tag, alreadyRunning: true) }
-    let bridge = bridge
-    let delay = delay
-    let task = Task<Void, Never> {
+    if activeTasks[tag] != nil {
+      return BashStarted(tag: tag, alreadyRunning: true)
+    }
+    let cb = callbacks
+    let d = delay
+    let task = Task { [weak self] in
       do {
-        try await Task.sleep(for: delay)
-        _ = try? await bridge.bashFinished(tag: tag, result: BashResult(exitCode: 0, output: "done\n", timedOut: false, terminated: false))
-      } catch is CancellationError {
-        _ = try? await bridge.bashFinished(tag: tag, result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true))
-      } catch {}
+        try await Task.sleep(for: d)
+        try? await cb?.bashFinished(tag: tag, result: BashResult(exitCode: 0, output: "done\n", timedOut: false, terminated: false))
+      } catch {
+        try? await cb?.bashFinished(tag: tag, result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true))
+      }
+      await self?.unregister(tag: tag)
     }
     activeTasks[tag] = task
     return BashStarted(tag: tag, alreadyRunning: false)
   }
 
-  func cancelBash(tag: String) async throws -> CancelResult {
-    guard let task = activeTasks.removeValue(forKey: tag) else { return CancelResult(cancelled: false) }
+  func cancelBash(tag: String) async throws -> BashCancelResult {
+    guard let task = activeTasks.removeValue(forKey: tag) else {
+      return .notFound
+    }
     task.cancel()
-    return CancelResult(cancelled: true)
+    return .cancelled
   }
 
-  func waitForBashResult(tag: String) async throws -> BashResult {
-    try await bridge.waitForResult(tag: tag)
+  private func unregister(tag: String) {
+    activeTasks.removeValue(forKey: tag)
   }
 
   func readData(path: String) async throws -> Data {

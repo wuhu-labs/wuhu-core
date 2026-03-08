@@ -157,6 +157,57 @@ public struct GrepResult: Sendable, Hashable, Codable {
   }
 }
 
+// MARK: - Runner protocol
+
+/// Minimal execution proxy for filesystem operations and process execution.
+///
+/// `LocalRunner` implements this in the runner process.
+/// `MuxRunnerClient` implements this by forwarding calls over a
+/// mux session to a remote runner process. The server uses
+/// `MuxRunnerClient` for all runners, including the local one.
+public protocol Runner: Actor, Sendable {
+  nonisolated var id: RunnerID { get }
+
+  // -- Bash (short-lived start/cancel, results come back via RunnerCallbacks) --
+
+  /// Start a bash process. Returns immediately once the process is spawned.
+  /// The result will be delivered asynchronously via `RunnerCallbacks.bashFinished`.
+  ///
+  /// **Idempotent**: if a bash process for the given tag already exists,
+  /// returns its existing `BashStarted` status without spawning a new one.
+  func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted
+
+  /// Cancel a running bash process by tag.
+  func cancelBash(tag: String) async throws -> BashCancelResult
+
+  /// Set the callbacks target for push-based bash results.
+  /// Runners that spawn local processes use this to push bashOutput/bashFinished.
+  /// Remote proxy runners (MuxRunnerClient) may ignore this.
+  func setCallbacks(_ callbacks: any RunnerCallbacks) async
+
+  // -- File I/O --
+  func readData(path: String) async throws -> Data
+  func readString(path: String, encoding: String.Encoding) async throws -> String
+  func writeData(path: String, data: Data, createIntermediateDirectories: Bool) async throws
+  func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding: String.Encoding) async throws
+  func exists(path: String) async throws -> FileExistence
+  func listDirectory(path: String) async throws -> [DirectoryEntry]
+  func enumerateDirectory(root: String) async throws -> [EnumeratedEntry]
+  func createDirectory(path: String, withIntermediateDirectories: Bool) async throws
+
+  // -- Search --
+  func find(params: FindParams) async throws -> FindResult
+  func grep(params: GrepParams) async throws -> GrepResult
+
+  /// -- Workspace materialization --
+  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
+}
+
+/// Default no-op for setCallbacks — remote proxy runners don't need it.
+public extension Runner {
+  func setCallbacks(_: any RunnerCallbacks) async {}
+}
+
 // MARK: - Runner errors
 
 public enum RunnerError: Error, Sendable, CustomStringConvertible {

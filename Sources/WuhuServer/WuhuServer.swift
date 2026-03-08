@@ -66,6 +66,10 @@ public struct WuhuServer: Sendable {
       await runnerRegistry.declareConfigured(runners.map(\.name))
     }
 
+    // Bash tag coordinator — bridges fire-and-forget startBash with tool-level await.
+    // Created early so runner connectors can wire callbacks to it.
+    let bashCoordinator = BashTagCoordinator()
+
     // Runner tasks are retained to keep the connections alive for the server lifetime.
     // They auto-cancel when the process exits.
     var _runnerTasks: [Task<Void, Never>] = []
@@ -77,6 +81,7 @@ public struct WuhuServer: Sendable {
       _runnerTasks = WuhuMuxRunnerConnector.connectAll(
         runners: muxRunners,
         registry: runnerRegistry,
+        bashCoordinator: bashCoordinator,
         logger: logger,
       )
     }
@@ -100,6 +105,7 @@ public struct WuhuServer: Sendable {
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
+      bashCoordinator: bashCoordinator,
     )
     await service.startAgentLoopManager()
 
@@ -567,6 +573,7 @@ public struct WuhuServer: Sendable {
     // WebSocket router for incoming runner connections
     let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
       registry: runnerRegistry,
+      bashCoordinator: bashCoordinator,
       logger: logger,
     )
 

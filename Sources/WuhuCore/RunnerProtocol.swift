@@ -16,16 +16,11 @@ public struct BashRequest: Sendable, Hashable, Codable {
   public var command: String
   public var cwd: String
   public var timeout: Double?
-  /// Opaque tag for cancellation. The runner tracks active bash executions
-  /// by this tag so the server can cancel them via `MuxRunnerOp.cancel`.
-  /// Typically the tool call ID from the agent loop.
-  public var tag: String?
 
-  public init(command: String, cwd: String, timeout: Double? = nil, tag: String? = nil) {
+  public init(command: String, cwd: String, timeout: Double? = nil) {
     self.command = command
     self.cwd = cwd
     self.timeout = timeout
-    self.tag = tag
   }
 }
 
@@ -99,27 +94,6 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
 
 // FindParams and GrepParams are defined in Runner.swift.
 
-// MARK: - Cancel request
-
-/// Request to cancel a running bash process on the runner.
-public struct CancelRequest: Sendable, Hashable, Codable {
-  /// Tag identifying the bash execution to cancel.
-  /// Matches the `tag` field from the originating `BashRequest`.
-  public var tag: String
-
-  public init(tag: String) {
-    self.tag = tag
-  }
-}
-
-/// Response to a cancel request (acknowledgement).
-public struct CancelResponse: Sendable, Hashable, Codable {
-  public var cancelled: Bool
-  public init(cancelled: Bool) {
-    self.cancelled = cancelled
-  }
-}
-
 // MARK: - Response payloads
 
 public struct HelloResponse: Sendable, Hashable, Codable {
@@ -178,6 +152,81 @@ public struct MaterializeResponse: Sendable, Hashable, Codable {
   public var workspacePath: String
   public init(workspacePath: String) {
     self.workspacePath = workspacePath
+  }
+}
+
+// MARK: - Wire error type
+
+/// Error type used in Result values for runner dispatch.
+public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringConvertible {
+  public var message: String
+
+  public init(_ message: String) {
+    self.message = message
+  }
+
+  public var description: String {
+    message
+  }
+
+  public init(from decoder: any Decoder) throws {
+    message = try decoder.singleValueContainer().decode(String.self)
+  }
+
+  public func encode(to encoder: any Encoder) throws {
+    var c = encoder.singleValueContainer()
+    try c.encode(message)
+  }
+}
+
+// MARK: - Internal dispatch enums
+
+/// A runner request, used internally by `RunnerServerHandler` for dispatch.
+public enum RunnerRequest: Sendable, Hashable {
+  case hello(HelloRequest)
+  case startBash(id: String, StartBashRequest)
+  case cancelBash(id: String, CancelBashRequest)
+  case read(id: String, ReadRequest)
+  case write(id: String, WriteRequest)
+  case exists(id: String, ExistsRequest)
+  case ls(id: String, LsRequest)
+  case enumerate(id: String, EnumerateRequest)
+  case mkdir(id: String, MkdirRequest)
+  case find(id: String, FindParams)
+  case grep(id: String, GrepParams)
+  case materialize(id: String, MaterializeRequest)
+}
+
+/// A runner response, used internally by `RunnerServerHandler` for dispatch.
+public enum RunnerResponse: Sendable {
+  case hello(HelloResponse)
+  case startBash(id: String, Result<BashStarted, RunnerWireError>)
+  case cancelBash(id: String, Result<BashCancelResult, RunnerWireError>)
+  case read(id: String, Result<ReadResponse, RunnerWireError>)
+  case write(id: String, Result<WriteResponse, RunnerWireError>)
+  case exists(id: String, Result<ExistsResponse, RunnerWireError>)
+  case ls(id: String, Result<LsResponse, RunnerWireError>)
+  case enumerate(id: String, Result<EnumerateResponse, RunnerWireError>)
+  case mkdir(id: String, Result<MkdirResponse, RunnerWireError>)
+  case find(id: String, Result<FindResult, RunnerWireError>)
+  case grep(id: String, Result<GrepResult, RunnerWireError>)
+  case materialize(id: String, Result<MaterializeResponse, RunnerWireError>)
+
+  public var responseID: String? {
+    switch self {
+    case .hello: nil
+    case let .startBash(id, _): id
+    case let .cancelBash(id, _): id
+    case let .read(id, _): id
+    case let .write(id, _): id
+    case let .exists(id, _): id
+    case let .ls(id, _): id
+    case let .enumerate(id, _): id
+    case let .mkdir(id, _): id
+    case let .find(id, _): id
+    case let .grep(id, _): id
+    case let .materialize(id, _): id
+    }
   }
 }
 
