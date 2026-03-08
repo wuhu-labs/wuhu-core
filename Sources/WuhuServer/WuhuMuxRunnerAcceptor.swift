@@ -44,7 +44,7 @@ enum WuhuMuxRunnerAcceptor {
       let runnerName = hello.runnerName
       logger.info("Incoming mux runner '\(runnerName)' connected (v\(hello.version))")
 
-      let client = MuxRunnerCommandsClient(name: runnerName, session: session)
+      let client = MuxRunnerClient(name: runnerName, session: session)
       let registered = await registry.registerIncoming(client, name: runnerName)
 
       guard registered else {

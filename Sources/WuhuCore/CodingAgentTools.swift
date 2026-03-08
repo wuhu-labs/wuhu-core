@@ -11,6 +11,7 @@ public extension WuhuTools {
     mountResolver: @escaping MountResolver,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
+    bashReaper: BashReaper? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
       readTool(mountResolver: mountResolver),
@@ -19,7 +20,7 @@ public extension WuhuTools {
       lsTool(mountResolver: mountResolver),
       findTool(mountResolver: mountResolver),
       grepTool(mountResolver: mountResolver),
-      bashTool(mountResolver: mountResolver),
+      bashTool(mountResolver: mountResolver, bashReaper: bashReaper),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
@@ -32,7 +33,7 @@ public extension WuhuTools {
 
   /// Create a simple mount resolver for tests.
   /// Wraps a runner + cwd — all tool calls resolve to this runner.
-  static func testMountResolver(cwd: String, runner: any RunnerCommands = LocalRunner()) -> MountResolver {
+  static func testMountResolver(cwd: String, runner: any Runner = LocalRunner()) -> MountResolver {
     { _ in ResolvedMount(runner: runner, cwd: cwd) }
   }
 }
@@ -618,7 +619,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
+private func bashTool(mountResolver: @escaping MountResolver, bashReaper: BashReaper?) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -658,17 +659,16 @@ private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     // All bash execution goes through a runner (local or remote) via mount resolver.
     let resolved = try await mountResolver(params.mount)
     let runner = resolved.runner
+    let runnerID = runner.id
 
-    // Use the tool call ID as the cancellation tag.
+    // Use the tool call ID as the cancellation tag so the reaper can
+    // tell the runner which bash process to kill.
     let tag = toolCallId
 
-    // Start bash (non-blocking) then wait for result.
-    // On task cancellation, cancel the bash process via the runner.
-    _ = try await runner.startBash(tag: tag, command: params.command, cwd: resolved.cwd, timeout: params.timeout)
     let run = try await withTaskCancellationHandler {
-      try await runner.waitForBashResult(tag: tag)
+      try await runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout, tag: tag)
     } onCancel: {
-      Task { _ = try? await runner.cancelBash(tag: tag) }
+      bashReaper?.enqueueKill(runnerID: runnerID, tag: tag)
     }
     return try formatBashResult(run)
   }
