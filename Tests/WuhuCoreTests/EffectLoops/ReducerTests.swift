@@ -86,7 +86,7 @@ struct InferenceReducerTests {
     var state = makeState()
     state.inference.status = .running
     state.inference.retryCount = 3
-    state.inference.lastError = "some error"
+    state.inference.lastError = InferenceError(message: "some error", httpStatusCode: nil, isTransient: false)
 
     let message = AssistantMessage(provider: .openai, model: "test")
     reduceInference(state: &state, action: .completed(message))
@@ -102,13 +102,37 @@ struct InferenceReducerTests {
     var state = makeState()
     state.inference.status = .running
 
-    reduceInference(state: &state, action: .failed("timeout"))
+    let error1 = InferenceError(message: "timeout", httpStatusCode: nil, isTransient: true)
+    reduceInference(state: &state, action: .failed(error1))
     #expect(state.inference.retryCount == 1)
-    #expect(state.inference.lastError == "timeout")
+    #expect(state.inference.lastError == error1)
 
-    reduceInference(state: &state, action: .failed("timeout again"))
+    let error2 = InferenceError(message: "timeout again", httpStatusCode: nil, isTransient: true)
+    reduceInference(state: &state, action: .failed(error2))
     #expect(state.inference.retryCount == 2)
-    #expect(state.inference.lastError == "timeout again")
+    #expect(state.inference.lastError == error2)
+  }
+
+  @Test("failed with transient HTTP error preserves status code")
+  func failedTransient() {
+    var state = makeState()
+    state.inference.status = .running
+
+    let error = InferenceError(message: "HTTP 429", httpStatusCode: 429, isTransient: true)
+    reduceInference(state: &state, action: .failed(error))
+    #expect(state.inference.lastError?.httpStatusCode == 429)
+    #expect(state.inference.lastError?.isTransient == true)
+  }
+
+  @Test("failed with permanent error preserves non-transient flag")
+  func failedPermanent() {
+    var state = makeState()
+    state.inference.status = .running
+
+    let error = InferenceError(message: "HTTP 401", httpStatusCode: 401, isTransient: false)
+    reduceInference(state: &state, action: .failed(error))
+    #expect(state.inference.lastError?.httpStatusCode == 401)
+    #expect(state.inference.lastError?.isTransient == false)
   }
 
   @Test("retryReady clears retryAfter and goes idle")
@@ -129,6 +153,49 @@ struct InferenceReducerTests {
     let before = state
     reduceInference(state: &state, action: .delta("hello"))
     #expect(state == before)
+  }
+}
+
+// MARK: - InferenceError Classification Tests
+
+@Suite("InferenceError.from")
+struct InferenceErrorClassificationTests {
+  @Test("PiAI 429 is transient")
+  func piAI429() {
+    let error = InferenceError.from(PiAIError.httpStatus(code: 429, body: "rate limited"))
+    #expect(error.httpStatusCode == 429)
+    #expect(error.isTransient == true)
+  }
+
+  @Test("PiAI 500/502/503/529 are transient")
+  func piAIServerErrors() {
+    for code in [500, 502, 503, 529] {
+      let error = InferenceError.from(PiAIError.httpStatus(code: code, body: nil))
+      #expect(error.httpStatusCode == code)
+      #expect(error.isTransient == true)
+    }
+  }
+
+  @Test("PiAI 401 is not transient")
+  func piAI401() {
+    let error = InferenceError.from(PiAIError.httpStatus(code: 401, body: "unauthorized"))
+    #expect(error.httpStatusCode == 401)
+    #expect(error.isTransient == false)
+  }
+
+  @Test("PiAI 400 is not transient")
+  func piAI400() {
+    let error = InferenceError.from(PiAIError.httpStatus(code: 400, body: "bad request"))
+    #expect(error.httpStatusCode == 400)
+    #expect(error.isTransient == false)
+  }
+
+  @Test("non-PiAI error is not transient")
+  func genericError() {
+    struct SomeError: Error {}
+    let error = InferenceError.from(SomeError())
+    #expect(error.httpStatusCode == nil)
+    #expect(error.isTransient == false)
   }
 }
 

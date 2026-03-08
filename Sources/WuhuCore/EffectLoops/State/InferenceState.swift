@@ -6,7 +6,7 @@ struct InferenceState: Sendable, Equatable {
   var status: InferenceStatus
   var retryCount: Int
   var retryAfter: ContinuousClock.Instant?
-  var lastError: String?
+  var lastError: InferenceError?
 
   static var empty: InferenceState {
     .init(status: .idle, retryCount: 0, retryAfter: nil, lastError: nil)

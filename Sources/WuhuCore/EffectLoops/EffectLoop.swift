@@ -28,6 +28,10 @@ public actor EffectLoop<B: LoopBehavior> {
 
   private var signal: AsyncStream<Void>.Continuation?
 
+  // MARK: - In-flight effect tasks
+
+  private var inflightTasks: [Task<Void, Never>] = []
+
   // MARK: - Observation
 
   private var observers: [UUID: Observer] = [:]
@@ -60,12 +64,15 @@ public actor EffectLoop<B: LoopBehavior> {
   /// Start the loop. Blocks until cancelled.
   ///
   /// After each wake (from ``send(_:)`` or effect completion), the
-  /// loop calls `nextEffect` repeatedly until nil.
+  /// loop calls `nextEffect` repeatedly until nil. When cancelled,
+  /// all in-flight effect tasks are cancelled before returning.
   public func start() async {
     let (stream, continuation) = AsyncStream<Void>.makeStream(
       bufferingPolicy: .bufferingNewest(1),
     )
     signal = continuation
+
+    defer { cancelAllInflightTasks() }
 
     // Initial step — behavior may have work from initial state.
     step()
@@ -79,6 +86,9 @@ public actor EffectLoop<B: LoopBehavior> {
 
   /// Pull effects from the behavior until idle.
   private func step() {
+    // Prune finished tasks to avoid unbounded growth.
+    inflightTasks.removeAll(where: \.isCancelled)
+
     while let effect = behavior.nextEffect(state: &state) {
       execute(effect)
     }
@@ -96,7 +106,7 @@ public actor EffectLoop<B: LoopBehavior> {
       let sendFn = Send<B.Action> { [weak self] action in
         await self?.send(action)
       }
-      Task {
+      let task = Task {
         do {
           try await work(sendFn)
         } catch is CancellationError {
@@ -106,7 +116,16 @@ public actor EffectLoop<B: LoopBehavior> {
           // by sending error actions. Unhandled errors are dropped.
         }
       }
+      inflightTasks.append(task)
     }
+  }
+
+  /// Cancel all in-flight effect tasks and clear the tracking list.
+  private func cancelAllInflightTasks() {
+    for task in inflightTasks {
+      task.cancel()
+    }
+    inflightTasks.removeAll()
   }
 
   // MARK: - Observation
