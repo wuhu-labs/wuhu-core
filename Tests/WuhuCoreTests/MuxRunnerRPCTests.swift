@@ -118,8 +118,13 @@ enum MuxTransportFactory {
 
 private actor _SessionHolder {
   var session: MuxSession?
-  func set(_ s: MuxSession) { session = s }
-  func get() -> MuxSession? { session }
+  func set(_ s: MuxSession) {
+    session = s
+  }
+
+  func get() -> MuxSession? {
+    session
+  }
 }
 
 enum MuxTestError: Error {
@@ -527,6 +532,11 @@ actor SlowInMemoryRunner: Runner {
 
 private actor ErrorHolder {
   var error: (any Error)?
-  func set(_ e: any Error) { error = e }
-  func get() -> (any Error)? { error }
+  func set(_ e: any Error) {
+    error = e
+  }
+
+  func get() -> (any Error)? {
+    error
+  }
 }

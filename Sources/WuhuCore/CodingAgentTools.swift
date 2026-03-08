@@ -663,10 +663,9 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
     // Use the tool call ID as the cancellation tag.
     let tag = toolCallId
 
-    let run: BashResult
-    if let coordinator = bashCoordinator {
+    let run: BashResult = if let coordinator = bashCoordinator {
       // v3 protocol: fire-and-forget start + await callback via coordinator.
-      run = try await withTaskCancellationHandler {
+      try await withTaskCancellationHandler {
         try await coordinator.runBash(
           tag: tag,
           command: params.command,
@@ -681,7 +680,7 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
       }
     } else {
       // Fallback for tests without coordinator: use LocalBash directly.
-      run = try await LocalBash.run(command: params.command, cwd: resolved.cwd, timeoutSeconds: params.timeout)
+      try await LocalBash.run(command: params.command, cwd: resolved.cwd, timeoutSeconds: params.timeout)
     }
     return try formatBashResult(run)
   }

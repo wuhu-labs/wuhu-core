@@ -31,7 +31,7 @@ actor InMemoryRunner: Runner {
   // MARK: - Test helpers
 
   func setCallbacks(_ callbacks: any RunnerCallbacks) async {
-    self.bashCallbacks = callbacks
+    bashCallbacks = callbacks
   }
 
   func seedFile(path: String, content: String) {
@@ -90,7 +90,7 @@ actor InMemoryRunner: Runner {
 
     // Deliver result via callbacks after a tiny delay
     let result = matchedResult
-    let callbacks = self.bashCallbacks
+    let callbacks = bashCallbacks
     Task {
       try? await Task.sleep(nanoseconds: 1_000_000)
       try? await callbacks?.bashFinished(tag: tag, result: result)

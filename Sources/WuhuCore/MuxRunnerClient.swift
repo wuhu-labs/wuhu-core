@@ -40,7 +40,7 @@ public actor MuxRunnerClient: Runner {
   /// Returns when the session closes.
   public func startCallbackListener() async {
     for await stream in session.inbound {
-      let callbacks = self.callbacks
+      let callbacks = callbacks
       Task {
         await Self.handleCallbackStream(stream, callbacks: callbacks)
       }

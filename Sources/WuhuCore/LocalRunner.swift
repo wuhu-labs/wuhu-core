@@ -30,7 +30,7 @@ public actor LocalRunner: Runner {
       return BashStarted(tag: tag, alreadyRunning: true)
     }
 
-    let callbacks = self.callbacks
+    let callbacks = callbacks
 
     // Spawn the bash process in a background task
     let task = Task { [weak self] in

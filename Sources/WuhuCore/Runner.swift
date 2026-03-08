@@ -203,7 +203,7 @@ public protocol Runner: Actor, Sendable {
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
 }
 
-// Default no-op for setCallbacks — remote proxy runners don't need it.
+/// Default no-op for setCallbacks — remote proxy runners don't need it.
 public extension Runner {
   func setCallbacks(_: any RunnerCallbacks) async {}
 }

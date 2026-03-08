@@ -186,13 +186,30 @@ private actor SlowBashRunner: Runner {
 
   func writeData(path _: String, data _: Data, createIntermediateDirectories _: Bool) async throws {}
   func writeString(path _: String, content _: String, createIntermediateDirectories _: Bool, encoding _: String.Encoding) async throws {}
-  func exists(path _: String) async throws -> FileExistence { .notFound }
-  func listDirectory(path _: String) async throws -> [DirectoryEntry] { [] }
-  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] { [] }
+  func exists(path _: String) async throws -> FileExistence {
+    .notFound
+  }
+
+  func listDirectory(path _: String) async throws -> [DirectoryEntry] {
+    []
+  }
+
+  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] {
+    []
+  }
+
   func createDirectory(path _: String, withIntermediateDirectories _: Bool) async throws {}
-  func find(params _: FindParams) async throws -> FindResult { FindResult(entries: [], totalBeforeLimit: 0) }
-  func grep(params _: GrepParams) async throws -> GrepResult { GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false) }
-  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse { MaterializeResponse(workspacePath: params.destinationPath) }
+  func find(params _: FindParams) async throws -> FindResult {
+    FindResult(entries: [], totalBeforeLimit: 0)
+  }
+
+  func grep(params _: GrepParams) async throws -> GrepResult {
+    GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false)
+  }
+
+  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
+    MaterializeResponse(workspacePath: params.destinationPath)
+  }
 }
 
 // MARK: - MutableFlag
