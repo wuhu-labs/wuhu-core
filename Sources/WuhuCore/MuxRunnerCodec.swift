@@ -7,7 +7,7 @@ import Mux
 /// Each operation maps to a Runner protocol method.
 public enum MuxRunnerOp: UInt8, Sendable {
   case hello = 0
-  case bash = 1
+  // case bash = 1 // RETIRED in v3
   case read = 2
   case write = 3
   case exists = 4
@@ -17,7 +17,10 @@ public enum MuxRunnerOp: UInt8, Sendable {
   case find = 8
   case grep = 9
   case materialize = 10
-  case cancel = 11
+  case startBash = 11
+  case cancelBash = 12
+  case bashOutput = 13
+  case bashFinished = 14
 }
 
 // MARK: - Buffered Stream Reader

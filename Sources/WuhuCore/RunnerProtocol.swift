@@ -16,16 +16,11 @@ public struct BashRequest: Sendable, Hashable, Codable {
   public var command: String
   public var cwd: String
   public var timeout: Double?
-  /// Opaque tag for cancellation. The runner tracks active bash executions
-  /// by this tag so the server can cancel them via `MuxRunnerOp.cancel`.
-  /// Typically the tool call ID from the agent loop.
-  public var tag: String?
 
-  public init(command: String, cwd: String, timeout: Double? = nil, tag: String? = nil) {
+  public init(command: String, cwd: String, timeout: Double? = nil) {
     self.command = command
     self.cwd = cwd
     self.timeout = timeout
-    self.tag = tag
   }
 }
 
@@ -98,27 +93,6 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
 }
 
 // FindParams and GrepParams are defined in Runner.swift.
-
-// MARK: - Cancel request
-
-/// Request to cancel a running bash process on the runner.
-public struct CancelRequest: Sendable, Hashable, Codable {
-  /// Tag identifying the bash execution to cancel.
-  /// Matches the `tag` field from the originating `BashRequest`.
-  public var tag: String
-
-  public init(tag: String) {
-    self.tag = tag
-  }
-}
-
-/// Response to a cancel request (acknowledgement).
-public struct CancelResponse: Sendable, Hashable, Codable {
-  public var cancelled: Bool
-  public init(cancelled: Bool) {
-    self.cancelled = cancelled
-  }
-}
 
 // MARK: - Response payloads
 
@@ -210,7 +184,8 @@ public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringC
 /// A runner request, used internally by `RunnerServerHandler` for dispatch.
 public enum RunnerRequest: Sendable, Hashable {
   case hello(HelloRequest)
-  case bash(id: String, BashRequest)
+  case startBash(id: String, StartBashRequest)
+  case cancelBash(id: String, CancelBashRequest)
   case read(id: String, ReadRequest)
   case write(id: String, WriteRequest)
   case exists(id: String, ExistsRequest)
@@ -220,13 +195,13 @@ public enum RunnerRequest: Sendable, Hashable {
   case find(id: String, FindParams)
   case grep(id: String, GrepParams)
   case materialize(id: String, MaterializeRequest)
-  case cancel(id: String, CancelRequest)
 }
 
 /// A runner response, used internally by `RunnerServerHandler` for dispatch.
 public enum RunnerResponse: Sendable {
   case hello(HelloResponse)
-  case bash(id: String, Result<BashResult, RunnerWireError>)
+  case startBash(id: String, Result<BashStarted, RunnerWireError>)
+  case cancelBash(id: String, Result<BashCancelResult, RunnerWireError>)
   case read(id: String, Result<ReadResponse, RunnerWireError>)
   case write(id: String, Result<WriteResponse, RunnerWireError>)
   case exists(id: String, Result<ExistsResponse, RunnerWireError>)
@@ -236,12 +211,12 @@ public enum RunnerResponse: Sendable {
   case find(id: String, Result<FindResult, RunnerWireError>)
   case grep(id: String, Result<GrepResult, RunnerWireError>)
   case materialize(id: String, Result<MaterializeResponse, RunnerWireError>)
-  case cancel(id: String, Result<CancelResponse, RunnerWireError>)
 
   public var responseID: String? {
     switch self {
     case .hello: nil
-    case let .bash(id, _): id
+    case let .startBash(id, _): id
+    case let .cancelBash(id, _): id
     case let .read(id, _): id
     case let .write(id, _): id
     case let .exists(id, _): id
@@ -251,7 +226,6 @@ public enum RunnerResponse: Sendable {
     case let .find(id, _): id
     case let .grep(id, _): id
     case let .materialize(id, _): id
-    case let .cancel(id, _): id
     }
   }
 }

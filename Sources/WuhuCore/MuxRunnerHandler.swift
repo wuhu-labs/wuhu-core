@@ -6,11 +6,21 @@ import Mux
 ///
 /// Each inbound stream is one RPC call. The handler reads the request,
 /// dispatches it, writes the response, and closes the stream.
+///
+/// ## v3 protocol
+///
+/// Bash callbacks (bashOutput, bashFinished) are pushed from the runner
+/// back to the server via `MuxCallbackSender`, which opens outbound
+/// streams on the same session.
 public enum MuxRunnerHandler {
   /// Run the handler loop: accept inbound streams and dispatch them.
   /// Returns when the session closes or is cancelled.
   public static func serve(session: MuxSession, runner: any Runner, name: String) async {
     let handler = RunnerServerHandler(runner: runner, name: name)
+
+    // Set up callback sender so the runner can push bash results back to the server
+    let callbackSender = MuxCallbackSender(session: session)
+    await runner.setCallbacks(callbackSender)
 
     for await stream in session.inbound {
       let handler = handler
@@ -37,29 +47,20 @@ public enum MuxRunnerHandler {
         let resp = HelloResponse(runnerName: handler.runnerName, version: muxRunnerProtocolVersion)
         try await MuxRunnerCodec.writeSuccess(stream, op: .hello, payload: resp)
 
-      case .bash:
-        let req = try MuxRunnerCodec.decode(BashRequest.self, from: payload)
-        let tag = req.tag
-        if let tag, !tag.isEmpty {
-          // Tracked bash: spawn a task, register it for cancellation, await result.
-          let bashTask = Task {
-            await handler.runBash(id: "", request: req)
-          }
-          await handler.registerBashTask(tag, task: bashTask)
-          let (response, _) = await bashTask.value
-          await handler.unregisterBashTask(tag)
-          try await writeRunnerResponse(stream, op: op, response: response)
-        } else {
-          // Untagged bash (legacy/test): run inline.
-          let (response, _) = await handler.handle(request: .bash(id: "", req))
-          try await writeRunnerResponse(stream, op: op, response: response)
-        }
+      case .startBash:
+        let req = try MuxRunnerCodec.decode(StartBashRequest.self, from: payload)
+        let (response, _) = await handler.handle(request: .startBash(id: "", req))
+        try await writeRunnerResponse(stream, op: op, response: response)
+
+      case .cancelBash:
+        let req = try MuxRunnerCodec.decode(CancelBashRequest.self, from: payload)
+        let (response, _) = await handler.handle(request: .cancelBash(id: "", req))
+        try await writeRunnerResponse(stream, op: op, response: response)
 
       case .read:
         let req = try MuxRunnerCodec.decode(ReadRequest.self, from: payload)
         let (response, binaryData) = await handler.handle(request: .read(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
-        // If there's binary data, send it after the response frame
         if let data = binaryData {
           try await MuxRunnerCodec.writeBinary(stream, data: data)
         }
@@ -67,11 +68,9 @@ public enum MuxRunnerHandler {
       case .write:
         let req = try MuxRunnerCodec.decode(WriteRequest.self, from: payload)
         if req.content != nil {
-          // Text write — content is in the JSON payload
           let (response, _) = await handler.handle(request: .write(id: "", req))
           try await writeRunnerResponse(stream, op: op, response: response)
         } else {
-          // Binary write — data follows as length-prefixed bytes on the stream
           let data = try await MuxRunnerCodec.readBinary(reader)
           let response = await handler.handleBinaryWrite(id: "", path: req.path, data: data, createDirs: req.createDirs)
           try await writeRunnerResponse(stream, op: op, response: response)
@@ -112,26 +111,26 @@ public enum MuxRunnerHandler {
         let (response, _) = await handler.handle(request: .materialize(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
-      case .cancel:
-        let req = try MuxRunnerCodec.decode(CancelRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .cancel(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
+      case .bashOutput, .bashFinished:
+        // These are callback ops — they flow runner→server, not server→runner.
+        // If we receive them here, it's an error.
+        try await MuxRunnerCodec.writeError(stream, op: op, message: "Callback ops should not be sent as requests")
       }
 
       try await stream.finish()
     } catch {
-      // Best effort — stream may already be closed
       try? await stream.reset()
     }
   }
 
-  /// Convert a RunnerResponse (from the existing handler) into a mux response frame.
+  /// Convert a RunnerResponse into a mux response frame.
   private static func writeRunnerResponse(_ stream: MuxStream, op: MuxRunnerOp, response: RunnerResponse) async throws {
-    // Extract the result from the response enum
     switch response {
     case let .hello(resp):
       try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
-    case let .bash(_, result):
+    case let .startBash(_, result):
+      try await writeResult(stream, op: op, result: result)
+    case let .cancelBash(_, result):
       try await writeResult(stream, op: op, result: result)
     case let .read(_, result):
       try await writeResult(stream, op: op, result: result)
@@ -151,8 +150,6 @@ public enum MuxRunnerHandler {
       try await writeResult(stream, op: op, result: result)
     case let .materialize(_, result):
       try await writeResult(stream, op: op, result: result)
-    case let .cancel(_, result):
-      try await writeResult(stream, op: op, result: result)
     }
   }
 
@@ -163,5 +160,39 @@ public enum MuxRunnerHandler {
     case let .failure(error):
       try await MuxRunnerCodec.writeError(stream, op: op, message: error.message)
     }
+  }
+}
+
+// MARK: - MuxCallbackSender
+
+/// Runner-side actor that pushes bash callbacks to the server
+/// by opening outbound mux streams.
+///
+/// Each callback opens a new stream, writes the op + payload,
+/// reads an ack response, and closes.
+public actor MuxCallbackSender: RunnerCallbacks {
+  private let session: MuxSession
+
+  public init(session: MuxSession) {
+    self.session = session
+  }
+
+  public func bashOutput(tag: String, chunk: String) async throws {
+    let payload = BashOutputChunk(tag: tag, chunk: chunk)
+    try await sendCallback(op: .bashOutput, payload: payload)
+  }
+
+  public func bashFinished(tag: String, result: BashResult) async throws {
+    let payload = BashFinished(tag: tag, result: result)
+    try await sendCallback(op: .bashFinished, payload: payload)
+  }
+
+  private func sendCallback(op: MuxRunnerOp, payload: some Encodable & Sendable) async throws {
+    let stream = try await session.open()
+    try await MuxRunnerCodec.writeRequest(stream, op: op, payload: payload)
+    try await stream.finish()
+    // Read ack response
+    let reader = MuxStreamReader(stream: stream)
+    _ = try await MuxRunnerCodec.readResponse(reader)
   }
 }

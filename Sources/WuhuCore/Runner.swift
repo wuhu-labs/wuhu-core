@@ -168,12 +168,22 @@ public struct GrepResult: Sendable, Hashable, Codable {
 public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
-  /// -- Process execution --
-  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
-  /// Run a bash command with a cancellation tag. The tag allows the server
-  /// to cancel the command via the cancel RPC. Default implementation
-  /// ignores the tag and delegates to `runBash(command:cwd:timeout:)`.
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag: String?) async throws -> BashResult
+  // -- Bash (short-lived start/cancel, results come back via RunnerCallbacks) --
+
+  /// Start a bash process. Returns immediately once the process is spawned.
+  /// The result will be delivered asynchronously via `RunnerCallbacks.bashFinished`.
+  ///
+  /// **Idempotent**: if a bash process for the given tag already exists,
+  /// returns its existing `BashStarted` status without spawning a new one.
+  func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted
+
+  /// Cancel a running bash process by tag.
+  func cancelBash(tag: String) async throws -> BashCancelResult
+
+  /// Set the callbacks target for push-based bash results.
+  /// Runners that spawn local processes use this to push bashOutput/bashFinished.
+  /// Remote proxy runners (MuxRunnerClient) may ignore this.
+  func setCallbacks(_ callbacks: any RunnerCallbacks) async
 
   // -- File I/O --
   func readData(path: String) async throws -> Data
@@ -193,12 +203,9 @@ public protocol Runner: Actor, Sendable {
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
 }
 
-// MARK: - Runner default implementations
-
+// Default no-op for setCallbacks — remote proxy runners don't need it.
 public extension Runner {
-  func runBash(command: String, cwd: String, timeout: TimeInterval?, tag _: String?) async throws -> BashResult {
-    try await runBash(command: command, cwd: cwd, timeout: timeout)
-  }
+  func setCallbacks(_: any RunnerCallbacks) async {}
 }
 
 // MARK: - Runner errors

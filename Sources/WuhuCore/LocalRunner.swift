@@ -7,12 +7,67 @@ import Foundation
 public actor LocalRunner: Runner {
   public nonisolated let id: RunnerID = .local
 
+  /// Callbacks target for pushing bash results.
+  private var callbacks: (any RunnerCallbacks)?
+
+  /// Active bash tasks keyed by tag, for cancellation.
+  private var activeBashTasks: [String: Task<Void, Never>] = [:]
+
   public init() {}
 
-  // MARK: - Process execution
+  // MARK: - Callbacks
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+  /// Set the callbacks target. Must be called before startBash.
+  public func setCallbacks(_ callbacks: any RunnerCallbacks) async {
+    self.callbacks = callbacks
+  }
+
+  // MARK: - Process execution (v3: fire-and-forget)
+
+  public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    // Idempotent: if already running for this tag, return existing
+    if activeBashTasks[tag] != nil {
+      return BashStarted(tag: tag, alreadyRunning: true)
+    }
+
+    let callbacks = self.callbacks
+
+    // Spawn the bash process in a background task
+    let task = Task { [weak self] in
+      let result: BashResult
+      do {
+        result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout) { chunk in
+          try? await callbacks?.bashOutput(tag: tag, chunk: chunk)
+        }
+      } catch is CancellationError {
+        let terminated = BashResult(exitCode: -15, output: "", timedOut: false, terminated: true)
+        try? await callbacks?.bashFinished(tag: tag, result: terminated)
+        await self?.unregisterBashTask(tag: tag)
+        return
+      } catch {
+        let errResult = BashResult(exitCode: -1, output: "Error: \(error)", timedOut: false, terminated: false)
+        try? await callbacks?.bashFinished(tag: tag, result: errResult)
+        await self?.unregisterBashTask(tag: tag)
+        return
+      }
+      try? await callbacks?.bashFinished(tag: tag, result: result)
+      await self?.unregisterBashTask(tag: tag)
+    }
+
+    activeBashTasks[tag] = task
+    return BashStarted(tag: tag, alreadyRunning: false)
+  }
+
+  public func cancelBash(tag: String) async throws -> BashCancelResult {
+    guard let task = activeBashTasks.removeValue(forKey: tag) else {
+      return .notFound
+    }
+    task.cancel()
+    return .cancelled
+  }
+
+  private func unregisterBashTask(tag: String) {
+    activeBashTasks.removeValue(forKey: tag)
   }
 
   // MARK: - File I/O

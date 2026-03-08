@@ -16,6 +16,7 @@ enum WuhuMuxRunnerAcceptor {
   /// The returned router should be passed to `.http1WebSocketUpgrade(webSocketRouter:)`.
   static func webSocketRouter(
     registry: RunnerRegistry,
+    bashCoordinator: BashTagCoordinator,
     logger: Logger,
   ) -> Router<BasicWebSocketRequestContext> {
     let wsRouter = Router(context: BasicWebSocketRequestContext.self)
@@ -24,7 +25,7 @@ enum WuhuMuxRunnerAcceptor {
       .upgrade([:])
     } onUpgrade: { inbound, outbound, _ in
       let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
-      await handleConnection(conn, registry: registry, logger: logger)
+      await handleConnection(conn, registry: registry, bashCoordinator: bashCoordinator, logger: logger)
     }
 
     return wsRouter
@@ -33,6 +34,7 @@ enum WuhuMuxRunnerAcceptor {
   private static func handleConnection(
     _ connection: WebSocketConnection,
     registry: RunnerRegistry,
+    bashCoordinator: BashTagCoordinator,
     logger: Logger,
   ) async {
     let session = MuxSession(connection: connection, role: .responder)
@@ -45,6 +47,12 @@ enum WuhuMuxRunnerAcceptor {
       logger.info("Incoming mux runner '\(runnerName)' connected (v\(hello.version))")
 
       let client = MuxRunnerClient(name: runnerName, session: session)
+
+      // Wire callbacks: inbound callback streams → bashCoordinator
+      await client.setCallbacks(bashCoordinator)
+      let callbackTask = Task { await client.startCallbackListener() }
+      defer { callbackTask.cancel() }
+
       let registered = await registry.registerIncoming(client, name: runnerName)
 
       guard registered else {

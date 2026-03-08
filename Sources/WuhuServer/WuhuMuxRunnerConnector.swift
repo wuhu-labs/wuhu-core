@@ -16,6 +16,7 @@ enum WuhuMuxRunnerConnector {
     host: String,
     port: Int,
     registry: RunnerRegistry,
+    bashCoordinator: BashTagCoordinator,
     logger: Logger,
   ) async -> Bool {
     logger.info("Connecting to mux runner '\(name)' at \(host):\(port)")
@@ -54,6 +55,12 @@ enum WuhuMuxRunnerConnector {
         logger.info("Mux runner '\(runnerHello.runnerName)' connected (v\(runnerHello.version))")
 
         let client = MuxRunnerClient(name: runnerHello.runnerName, session: session)
+
+        // Wire callbacks: inbound callback streams → bashCoordinator
+        await client.setCallbacks(bashCoordinator)
+        let callbackTask = Task { await client.startCallbackListener() }
+        defer { callbackTask.cancel() }
+
         await registry.register(client)
 
         // Block until session ends
@@ -75,6 +82,7 @@ enum WuhuMuxRunnerConnector {
   static func connectAll(
     runners: [(name: String, host: String, port: Int)],
     registry: RunnerRegistry,
+    bashCoordinator: BashTagCoordinator,
     logger: Logger,
   ) -> [Task<Void, Never>] {
     runners.map { runner in
@@ -88,6 +96,7 @@ enum WuhuMuxRunnerConnector {
             host: runner.host,
             port: runner.port,
             registry: registry,
+            bashCoordinator: bashCoordinator,
             logger: logger,
           )
 

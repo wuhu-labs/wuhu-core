@@ -11,7 +11,7 @@ public extension WuhuTools {
     mountResolver: @escaping MountResolver,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
-    bashReaper: BashReaper? = nil,
+    bashCoordinator: BashTagCoordinator? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
       readTool(mountResolver: mountResolver),
@@ -20,7 +20,7 @@ public extension WuhuTools {
       lsTool(mountResolver: mountResolver),
       findTool(mountResolver: mountResolver),
       grepTool(mountResolver: mountResolver),
-      bashTool(mountResolver: mountResolver, bashReaper: bashReaper),
+      bashTool(mountResolver: mountResolver, bashCoordinator: bashCoordinator),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
@@ -619,7 +619,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(mountResolver: @escaping MountResolver, bashReaper: BashReaper?) -> AnyAgentTool {
+private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: BashTagCoordinator?) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -659,16 +659,29 @@ private func bashTool(mountResolver: @escaping MountResolver, bashReaper: BashRe
     // All bash execution goes through a runner (local or remote) via mount resolver.
     let resolved = try await mountResolver(params.mount)
     let runner = resolved.runner
-    let runnerID = runner.id
 
-    // Use the tool call ID as the cancellation tag so the reaper can
-    // tell the runner which bash process to kill.
+    // Use the tool call ID as the cancellation tag.
     let tag = toolCallId
 
-    let run = try await withTaskCancellationHandler {
-      try await runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout, tag: tag)
-    } onCancel: {
-      bashReaper?.enqueueKill(runnerID: runnerID, tag: tag)
+    let run: BashResult
+    if let coordinator = bashCoordinator {
+      // v3 protocol: fire-and-forget start + await callback via coordinator.
+      run = try await withTaskCancellationHandler {
+        try await coordinator.runBash(
+          tag: tag,
+          command: params.command,
+          runner: runner,
+          cwd: resolved.cwd,
+          timeout: params.timeout,
+        )
+      } onCancel: {
+        Task {
+          await coordinator.cancel(tag: tag, runner: runner)
+        }
+      }
+    } else {
+      // Fallback for tests without coordinator: use LocalBash directly.
+      run = try await LocalBash.run(command: params.command, cwd: resolved.cwd, timeoutSeconds: params.timeout)
     }
     return try formatBashResult(run)
   }

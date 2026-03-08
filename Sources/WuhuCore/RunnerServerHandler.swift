@@ -4,70 +4,46 @@ import WuhuAPI
 /// Wraps any `Runner` and dispatches incoming `RunnerRequest` messages to it.
 ///
 /// This is the runner-side handler: a runner process creates a `LocalRunner`,
-/// wraps it in a `RunnerServerHandler`, and uses it to handle WebSocket messages.
+/// wraps it in a `RunnerServerHandler`, and uses it to handle RPC requests.
 /// The handler is also usable for in-process testing (no network needed).
+///
+/// ## v3 protocol
+///
+/// Bash is no longer a blocking RPC. `startBash` returns immediately after
+/// spawning the process. Results arrive via `RunnerCallbacks` (bashOutput,
+/// bashFinished) which are pushed back to the server on separate streams.
 public actor RunnerServerHandler {
   private let runner: any Runner
   public let runnerName: String
-
-  /// Active bash tasks keyed by their cancel tag.
-  /// When a cancel request arrives, we look up the task and cancel it,
-  /// which triggers the swift-subprocess teardownSequence (SIGTERM → 3s → SIGKILL).
-  private var activeBashTasks: [String: Task<(RunnerResponse, Data?), Never>] = [:]
 
   public init(runner: any Runner, name: String) {
     self.runner = runner
     runnerName = name
   }
 
-  /// Run a bash request, tracking it by tag for cancellation.
-  /// If the request has a tag, the task is stored in `activeBashTasks`
-  /// and removed when it completes (or is cancelled).
-  public func runBash(id: String, request: BashRequest) async -> (RunnerResponse, Data?) {
-    do {
-      let result = try await runner.runBash(command: request.command, cwd: request.cwd, timeout: request.timeout)
-      return (.bash(id: id, .success(result)), nil)
-    } catch is CancellationError {
-      return (.bash(id: id, .success(BashResult(exitCode: -15, output: "", timedOut: false, terminated: true))), nil)
-    } catch {
-      return (.bash(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
-    }
-  }
-
-  /// Register an active bash task for cancellation tracking.
-  public func registerBashTask(_ tag: String, task: Task<(RunnerResponse, Data?), Never>) {
-    activeBashTasks[tag] = task
-  }
-
-  /// Unregister a completed bash task.
-  public func unregisterBashTask(_ tag: String) {
-    activeBashTasks.removeValue(forKey: tag)
-  }
-
-  /// Cancel a bash task by tag. Cancels the Swift task, which triggers
-  /// the swift-subprocess teardownSequence (SIGTERM → 3s → SIGKILL).
-  public func cancelBash(tag: String) -> Bool {
-    guard let task = activeBashTasks.removeValue(forKey: tag) else {
-      return false
-    }
-    task.cancel()
-    return true
-  }
-
-  /// Dispatch a text-frame request. Returns a text-frame response.
-  /// For binary data, also returns optional companion data to send as a binary frame.
-  ///
-  /// Note: bash requests should use `runBash(id:request:)` directly through
-  /// `MuxRunnerHandler` so they can be tracked for cancellation. This method
-  /// still handles bash for backward compatibility (e.g., tests).
+  /// Dispatch a request. Returns a response.
+  /// For binary data, also returns optional companion data.
   public func handle(request: RunnerRequest) async -> (RunnerResponse, Data?) {
     switch request {
     case let .hello(p):
-      _ = p // acknowledge
+      _ = p
       return (.hello(HelloResponse(runnerName: runnerName, version: muxRunnerProtocolVersion)), nil)
 
-    case let .bash(id, p):
-      return await runBash(id: id, request: p)
+    case let .startBash(id, p):
+      do {
+        let result = try await runner.startBash(tag: p.tag, command: p.command, cwd: p.cwd, timeout: p.timeout)
+        return (.startBash(id: id, .success(result)), nil)
+      } catch {
+        return (.startBash(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
+
+    case let .cancelBash(id, p):
+      do {
+        let result = try await runner.cancelBash(tag: p.tag)
+        return (.cancelBash(id: id, .success(result)), nil)
+      } catch {
+        return (.cancelBash(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
 
     case let .read(id, p):
       do {
@@ -151,10 +127,6 @@ public actor RunnerServerHandler {
       } catch {
         return (.materialize(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
       }
-
-    case let .cancel(id, p):
-      let found = cancelBash(tag: p.tag)
-      return (.cancel(id: id, .success(CancelResponse(cancelled: found))), nil)
     }
   }
 
