@@ -249,17 +249,22 @@ public actor InMemoryRunnerCommands: RunnerCommands {
       for (idx, line) in lines.enumerated() {
         if matchCount >= params.limit { break }
         let found: Bool = params.literal
-          ? (params.ignoreCase
-            ? line.lowercased().contains(params.pattern.lowercased())
-            : line.contains(params.pattern))
-          : ((try? NSRegularExpression(
-            pattern: params.pattern,
-            options: params.ignoreCase ? [.caseInsensitive] : [],
-          ))
-          .flatMap {
-            $0.firstMatch(
-              in: line, range: NSRange(location: 0, length: (line as NSString).length))
-          } != nil)
+          ? (
+            params.ignoreCase
+              ? line.lowercased().contains(params.pattern.lowercased())
+              : line.contains(params.pattern)
+          )
+          : (
+            (try? NSRegularExpression(
+              pattern: params.pattern,
+              options: params.ignoreCase ? [.caseInsensitive] : [],
+            ))
+            .flatMap {
+              $0.firstMatch(
+                in: line, range: NSRange(location: 0, length: (line as NSString).length),
+              )
+            } != nil
+          )
         if found {
           matchCount += 1
           matches.append(GrepMatch(file: rel, lineNumber: idx + 1, line: line))
@@ -328,8 +333,13 @@ public actor InMemoryRunnerCallbacks: RunnerCallbacks {
 
   // MARK: - Test helpers
 
-  public func collectedOutputs() -> [CapturedOutput] { outputs }
-  public func result(tag: String) -> BashResult? { results[tag] }
+  public func collectedOutputs() -> [CapturedOutput] {
+    outputs
+  }
+
+  public func result(tag: String) -> BashResult? {
+    results[tag]
+  }
 
   /// Wait for a bash to finish. Returns immediately if the result is already available.
   public func waitForResult(tag: String) async throws -> BashResult {

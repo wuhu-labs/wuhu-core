@@ -118,8 +118,13 @@ enum MuxTransportFactory {
 
 private actor _SessionHolder {
   var session: MuxSession?
-  func set(_ s: MuxSession) { session = s }
-  func get() -> MuxSession? { session }
+  func set(_ s: MuxSession) {
+    session = s
+  }
+
+  func get() -> MuxSession? {
+    session
+  }
 }
 
 enum MuxTestError: Error {
@@ -393,7 +398,9 @@ actor SlowInMemoryRunnerCommands: RunnerCommands {
   private let bridge = BashCallbackBridge()
   private var activeTasks: [String: Task<Void, Never>] = [:]
 
-  func seedDirectory(path: String) { directories.insert(path) }
+  func seedDirectory(path: String) {
+    directories.insert(path)
+  }
 
   func startBash(tag: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
     if activeTasks[tag] != nil { return BashStarted(tag: tag, alreadyRunning: true) }
@@ -431,8 +438,13 @@ actor SlowInMemoryRunnerCommands: RunnerCommands {
     return s
   }
 
-  func writeData(path: String, data: Data, createIntermediateDirectories _: Bool) async throws { files[path] = data }
-  func writeString(path: String, content: String, createIntermediateDirectories _: Bool, encoding: String.Encoding) async throws { files[path] = content.data(using: encoding) }
+  func writeData(path: String, data: Data, createIntermediateDirectories _: Bool) async throws {
+    files[path] = data
+  }
+
+  func writeString(path: String, content: String, createIntermediateDirectories _: Bool, encoding: String.Encoding) async throws {
+    files[path] = content.data(using: encoding)
+  }
 
   func exists(path: String) async throws -> FileExistence {
     if files[path] != nil { return .file }
@@ -440,16 +452,38 @@ actor SlowInMemoryRunnerCommands: RunnerCommands {
     return .notFound
   }
 
-  func listDirectory(path _: String) async throws -> [DirectoryEntry] { [] }
-  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] { [] }
-  func createDirectory(path: String, withIntermediateDirectories _: Bool) async throws { directories.insert(path) }
-  func find(params _: FindParams) async throws -> FindResult { FindResult(entries: [], totalBeforeLimit: 0) }
-  func grep(params _: GrepParams) async throws -> GrepResult { GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false) }
-  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse { MaterializeResponse(workspacePath: params.destinationPath) }
+  func listDirectory(path _: String) async throws -> [DirectoryEntry] {
+    []
+  }
+
+  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] {
+    []
+  }
+
+  func createDirectory(path: String, withIntermediateDirectories _: Bool) async throws {
+    directories.insert(path)
+  }
+
+  func find(params _: FindParams) async throws -> FindResult {
+    FindResult(entries: [], totalBeforeLimit: 0)
+  }
+
+  func grep(params _: GrepParams) async throws -> GrepResult {
+    GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false)
+  }
+
+  func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
+    MaterializeResponse(workspacePath: params.destinationPath)
+  }
 }
 
 private actor ErrorHolder {
   var error: (any Error)?
-  func set(_ e: any Error) { error = e }
-  func get() -> (any Error)? { error }
+  func set(_ e: any Error) {
+    error = e
+  }
+
+  func get() -> (any Error)? {
+    error
+  }
 }
