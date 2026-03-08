@@ -57,8 +57,6 @@ enum MuxTransportFactory {
   ) async throws {
     let serverSessionHolder = _SessionHolder()
 
-    // Use a continuation to get the actual port once the server is listening.
-    // Bind to port 0 so the OS picks a free ephemeral port — no collisions.
     let portStream = AsyncStream<Int>.makeStream()
 
     let router = Router()
@@ -83,7 +81,6 @@ enum MuxTransportFactory {
     let serverTask = Task { try await app.run() }
     defer { serverTask.cancel() }
 
-    // Wait for the server to be listening — no arbitrary sleep.
     var portIter = portStream.stream.makeAsyncIterator()
     guard let port = await portIter.next() else {
       throw MuxTestError.serverSessionNotEstablished
@@ -96,10 +93,8 @@ enum MuxTransportFactory {
       let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
       let clientSession = MuxSession(connection: conn, role: .initiator, config: MuxConfig(keepaliveInterval: nil))
 
-      // Run the session in background
       let runTask = Task { try await clientSession.run() }
 
-      // Wait for server session to be established
       var serverSession: MuxSession?
       for _ in 0 ..< 100 {
         serverSession = await serverSessionHolder.get()
@@ -111,15 +106,10 @@ enum MuxTransportFactory {
         throw MuxTestError.serverSessionNotEstablished
       }
 
-      // Run the test body
       try await body(clientSession, serverSession)
 
-      // Graceful shutdown: close client first, let server handle the close
       await clientSession.close()
-
-      // Wait a moment for cleanup
       try? await Task.sleep(for: .milliseconds(100))
-
       await serverSession.close()
       runTask.cancel()
     }
@@ -166,20 +156,20 @@ struct MuxRunnerRPCTests {
     }
   }
 
-  @Test("Full RPC round-trip with InMemoryRunner", arguments: TransportKind.allCases)
+  @Test("Full RPC round-trip with InMemoryRunnerCommands", arguments: TransportKind.allCases)
   func fullRPCRoundTrip(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
+      let runner = InMemoryRunnerCommands()
       await runner.seedDirectory(path: "/workspace")
       await runner.seedFile(path: "/workspace/hello.txt", content: "hello from runner")
       await runner.stubBash(pattern: "echo test", result: BashResult(exitCode: 0, output: "test output\n", timedOut: false, terminated: false))
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
 
       // Test exists
       let fileExists = try await client.exists(path: "/workspace/hello.txt")
@@ -212,8 +202,10 @@ struct MuxRunnerRPCTests {
       #expect(names.contains("hello.txt"))
       #expect(names.contains("new.txt"))
 
-      // Test bash
-      let bashResult = try await client.runBash(command: "echo test", cwd: "/workspace", timeout: nil)
+      // Test bash via startBash + waitForBashResult
+      let tag = "test-bash-1"
+      _ = try await client.startBash(tag: tag, command: "echo test", cwd: "/workspace", timeout: nil)
+      let bashResult = try await client.waitForBashResult(tag: tag)
       #expect(bashResult.exitCode == 0)
       #expect(bashResult.output == "test output\n")
 
@@ -227,15 +219,15 @@ struct MuxRunnerRPCTests {
   @Test("Multiple concurrent RPCs", arguments: TransportKind.allCases)
   func concurrentRPCs(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
+      let runner = InMemoryRunnerCommands()
       await runner.seedDirectory(path: "/tmp")
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
 
       try await withThrowingTaskGroup(of: FileExistence.self) { group in
         for _ in 0 ..< 10 {
@@ -256,15 +248,13 @@ struct MuxRunnerRPCTests {
   @Test("Hello handshake: version match", arguments: TransportKind.allCases)
   func helloVersionMatch(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
+      let runner = InMemoryRunnerCommands()
 
-      // Handler serves hello as first stream
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      // Client sends hello
       let helloStream = try await clientSession.open()
       let hello = HelloResponse(runnerName: "test-client", version: muxRunnerProtocolVersion)
       try await MuxRunnerCodec.writeRequest(helloStream, op: .hello, payload: hello)
@@ -284,14 +274,13 @@ struct MuxRunnerRPCTests {
   @Test("Hello handshake: version mismatch rejected", arguments: TransportKind.allCases)
   func helloVersionMismatch(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
+      let runner = InMemoryRunnerCommands()
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      // Client sends hello with wrong version
       let helloStream = try await clientSession.open()
       let hello = HelloResponse(runnerName: "test-client", version: 999)
       try await MuxRunnerCodec.writeRequest(helloStream, op: .hello, payload: hello)
@@ -310,15 +299,14 @@ struct MuxRunnerRPCTests {
   @Test("Error propagation: runner error surfaces on client", arguments: TransportKind.allCases)
   func errorPropagation(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
-      // Don't seed /nonexistent — reading it should fail
+      let runner = InMemoryRunnerCommands()
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
 
       do {
         _ = try await client.readString(path: "/nonexistent", encoding: .utf8)
@@ -333,9 +321,8 @@ struct MuxRunnerRPCTests {
   @Test("Large payload round-trip (~25KB bash output)", arguments: TransportKind.allCases)
   func largePayloadRoundTrip(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = InMemoryRunner()
+      let runner = InMemoryRunnerCommands()
 
-      // Generate ~25KB output (similar to cat of a 690-line Swift file)
       var lines: [String] = ["import Foundation", "import SwiftUI", ""]
       for i in 1 ... 687 {
         lines.append("  let property\(i): String = \"value\(i)\" // padding to simulate real code")
@@ -343,19 +330,19 @@ struct MuxRunnerRPCTests {
       lines.append("")
       let largeOutput = lines.joined(separator: "\n")
 
-      // Verify it's actually large
       #expect(largeOutput.utf8.count > 16 * 1024, "Test output must exceed 16KB")
 
       await runner.stubBash(pattern: "cat bigfile", result: BashResult(exitCode: 0, output: largeOutput, timedOut: false, terminated: false))
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
-
-      let result = try await client.runBash(command: "cat bigfile", cwd: "/", timeout: nil)
+      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
+      let tag = "large-bash-1"
+      _ = try await client.startBash(tag: tag, command: "cat bigfile", cwd: "/", timeout: nil)
+      let result = try await client.waitForBashResult(tag: tag)
 
       #expect(result.exitCode == 0)
       #expect(result.output == largeOutput)
@@ -363,26 +350,25 @@ struct MuxRunnerRPCTests {
     }
   }
 
-  @Test("Slow operation doesn't block fast concurrent operations", arguments: TransportKind.allCases)
+  @Test("Slow bash does not block fast concurrent operations", arguments: TransportKind.allCases)
   func slowDoesNotBlockFast(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
-      let runner = SlowInMemoryRunner()
+      let runner = SlowInMemoryRunnerCommands()
       await runner.seedDirectory(path: "/tmp")
-      // Bash will take 1 second, exists is instant
 
       let handlerTask = Task {
-        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+        await MuxRunnerCommandsServer.serve(session: serverSession, runner: runner, name: "test-runner")
       }
       defer { handlerTask.cancel() }
 
-      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let client = MuxRunnerCommandsClient(name: "test-runner", session: clientSession)
 
       // Fire slow bash in background
-      let bashTask = Task {
-        try await client.runBash(command: "slow", cwd: "/tmp", timeout: nil)
-      }
+      let bashTag = "slow-bash-1"
+      _ = try await client.startBash(tag: bashTag, command: "slow", cwd: "/tmp", timeout: nil)
+      let waitTask = Task { try await client.waitForBashResult(tag: bashTag) }
+      defer { waitTask.cancel() }
 
-      // Give it a moment to start
       try await Task.sleep(for: .milliseconds(50))
 
       // Fast exists calls should complete immediately
@@ -393,32 +379,52 @@ struct MuxRunnerRPCTests {
       }
       let elapsed = ContinuousClock.now - start
 
-      // 5 exists calls should complete in well under 1 second
       #expect(elapsed < .milliseconds(500), "Fast ops should not be blocked by slow bash")
 
-      // Clean up bash task
-      bashTask.cancel()
+      // Cancel the slow bash
+      _ = try? await client.cancelBash(tag: bashTag)
     }
   }
 }
 
-// MARK: - SlowInMemoryRunner for timing tests
+// MARK: - SlowInMemoryRunnerCommands
 
-/// A variant of InMemoryRunner where bash calls take a configurable delay.
-actor SlowInMemoryRunner: Runner {
+/// A RunnerCommands variant where bash delays 1 second.
+actor SlowInMemoryRunnerCommands: RunnerCommands {
   nonisolated let id: RunnerID = .local
 
   private var files: [String: Data] = [:]
   private var directories: Set<String> = ["/"]
-  private var bashDelay: Duration = .seconds(1)
+  private let bridge = BashCallbackBridge()
+  private var activeTasks: [String: Task<Void, Never>] = [:]
 
   func seedDirectory(path: String) {
     directories.insert(path)
   }
 
-  func runBash(command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    try await Task.sleep(for: bashDelay)
-    return BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false)
+  func startBash(tag: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
+    if activeTasks[tag] != nil { return BashStarted(tag: tag, alreadyRunning: true) }
+    let bridge = bridge
+    let task = Task<Void, Never> {
+      do {
+        try await Task.sleep(for: .seconds(1))
+        _ = try? await bridge.bashFinished(tag: tag, result: BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false))
+      } catch is CancellationError {
+        _ = try? await bridge.bashFinished(tag: tag, result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true))
+      } catch {}
+    }
+    activeTasks[tag] = task
+    return BashStarted(tag: tag, alreadyRunning: false)
+  }
+
+  func cancelBash(tag: String) async throws -> CancelResult {
+    guard let task = activeTasks.removeValue(forKey: tag) else { return CancelResult(cancelled: false) }
+    task.cancel()
+    return CancelResult(cancelled: true)
+  }
+
+  func waitForBashResult(tag: String) async throws -> BashResult {
+    try await bridge.waitForResult(tag: tag)
   }
 
   func readData(path: String) async throws -> Data {
@@ -428,9 +434,7 @@ actor SlowInMemoryRunner: Runner {
 
   func readString(path: String, encoding: String.Encoding) async throws -> String {
     guard let data = files[path] else { throw RunnerError.fileNotFound(path: path) }
-    guard let s = String(data: data, encoding: encoding) else {
-      throw RunnerError.requestFailed(message: "Cannot decode")
-    }
+    guard let s = String(data: data, encoding: encoding) else { throw RunnerError.requestFailed(message: "Cannot decode") }
     return s
   }
 

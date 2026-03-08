@@ -2,7 +2,7 @@ import Foundation
 import Mux
 
 /// Protocol version for the mux-based runner protocol.
-public let muxRunnerProtocolVersion = 9
+public let muxRunnerProtocolVersion = 10
 
 /// Performs the hello exchange on a mux session.
 ///

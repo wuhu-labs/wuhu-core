@@ -16,7 +16,6 @@ public actor WuhuService {
   private let subscriptionHub = WuhuSessionSubscriptionHub()
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
-  public let bashReaper: BashReaper
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
@@ -40,7 +39,6 @@ public actor WuhuService {
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry
-    bashReaper = BashReaper(runnerRegistry: runnerRegistry)
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -199,7 +197,7 @@ public actor WuhuService {
   ///
   /// When `runner` is provided, files are read via the runner's FileIO ops (works for both local and remote).
   /// When `runner` is nil, files are read from the local filesystem.
-  public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any Runner)?) async throws {
+  public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any RunnerCommands)?) async throws {
     // Mount announcement
     let announcementPayload: WuhuEntryPayload = .custom(
       customType: WuhuCustomMessageTypes.mountContext,
@@ -477,7 +475,7 @@ private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
 }
 
 /// Load AGENTS.md files via a runner's FileIO ops (works for both local and remote runners).
-private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async -> [WuhuContextFile] {
+private func loadAgentsFilesViaRunner(runner: any RunnerCommands, root: String) async -> [WuhuContextFile] {
   let candidates = [
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.md").path,
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.local.md").path,
@@ -500,7 +498,7 @@ private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async ->
 
 /// Load skills from `.wuhu/skills/` via a runner's FileIO ops.
 /// Uses `runner.find` to locate SKILL.md files, then reads each one.
-private func loadSkillsViaRunner(runner: any Runner, root: String) async -> [WuhuSkill] {
+private func loadSkillsViaRunner(runner: any RunnerCommands, root: String) async -> [WuhuSkill] {
   let skillsDir = URL(fileURLWithPath: root, isDirectory: true)
     .appendingPathComponent(".wuhu")
     .appendingPathComponent("skills")
@@ -577,7 +575,6 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       mountResolver: mountResolver,
       asyncBash: asyncBash,
       braveSearchAPIKey: braveSearchAPIKey,
-      bashReaper: bashReaper,
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
