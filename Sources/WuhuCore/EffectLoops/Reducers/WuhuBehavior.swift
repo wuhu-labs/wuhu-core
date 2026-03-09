@@ -89,8 +89,11 @@ struct WuhuBehavior: LoopBehavior {
       return persistAndDrainTurn(state: state)
     }
 
-    // 7. Inference — if needed and not already running
-    if state.inference.status == .idle, needsInference(state: state) {
+    // 7. Inference — if needed and not already running.
+    //    Block while draining: the drain effect may append user messages
+    //    to the transcript. Starting inference before the drain completes
+    //    would use a stale transcript snapshot, losing the user's message.
+    if state.inference.status == .idle, !state.queue.isDraining, needsInference(state: state) {
       state.inference.status = .running // guard token
       return runInference(state: state)
     }
