@@ -90,6 +90,7 @@ public struct WuhuServer: Sendable {
     let localRunnerSpawner = WuhuLocalRunnerSpawner(
       socketPath: config.localRunnerSocket,
       registry: runnerRegistry,
+      bashCoordinator: bashCoordinator,
       logger: logger,
     )
     try await localRunnerSpawner.start()

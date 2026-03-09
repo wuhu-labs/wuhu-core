@@ -4,4 +4,5 @@ public enum WuhuCustomMessageTypes {
   public static let agentsContext: String = "wuhu_agents_context_v1"
   public static let skillsContext: String = "wuhu_skills_context_v1"
   public static let costLimitExceeded: String = "wuhu_cost_limit_exceeded_v1"
+  public static let systemInput: String = "wuhu_system_input_v1"
 }

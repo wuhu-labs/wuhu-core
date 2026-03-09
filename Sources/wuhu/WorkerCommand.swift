@@ -108,8 +108,6 @@ struct WorkerCommand: AsyncParsableCommand {
 
     // Create a callback sender for this connection so results flow back to the runner
     let callbackSender = MuxCallbackSender(session: session)
-    await buffer.runnerConnected(callbackSender)
-    logger.info("Runner connected, draining pending results")
 
     await withTaskGroup(of: Void.self) { group in
       group.addTask { try? await session.run() }
@@ -119,6 +117,15 @@ struct WorkerCommand: AsyncParsableCommand {
         await MuxRunnerHandler.serve(session: session, runner: runner, name: name, callbacks: buffer)
         logger.info("Runner connection ended")
         await buffer.runnerDisconnected()
+      }
+      group.addTask {
+        // Wait briefly for the mux transport (session.run) and serve() to start
+        // before draining pending results. The drain sends callbacks via the
+        // MuxCallbackSender which requires the transport to be running and the
+        // peer's callback listener to be ready (started after hello exchange).
+        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+        await buffer.runnerConnected(callbackSender)
+        logger.info("Runner connected, draining pending results")
       }
     }
   }

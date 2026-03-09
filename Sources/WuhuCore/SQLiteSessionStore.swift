@@ -1178,7 +1178,7 @@ extension SQLiteSessionStore {
         if c.kind == "system" {
           let input = try WuhuJSON.decoder.decode(SystemUrgentInput.self, from: c.payload)
           let custom = WuhuCustomMessage(
-            customType: "wuhu_system_input_v1",
+            customType: WuhuCustomMessageTypes.systemInput,
             content: input.content.toContentBlocks(),
             details: .object([
               "source": .string(systemSourceString(input.source)),

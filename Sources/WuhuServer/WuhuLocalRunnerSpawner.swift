@@ -19,6 +19,7 @@ import WuhuCore
 public actor WuhuLocalRunnerSpawner {
   private let socketPath: String
   private let registry: RunnerRegistry
+  private let bashCoordinator: BashTagCoordinator
   private let logger: Logger
   private var childProcess: Process?
   private var connectionTask: Task<Void, Never>?
@@ -28,10 +29,12 @@ public actor WuhuLocalRunnerSpawner {
   public init(
     socketPath: String? = nil,
     registry: RunnerRegistry,
+    bashCoordinator: BashTagCoordinator,
     logger: Logger,
   ) {
     self.socketPath = socketPath ?? WuhuLocalRunnerSpawner.randomSocketPath()
     self.registry = registry
+    self.bashCoordinator = bashCoordinator
     self.logger = logger
   }
 
@@ -77,7 +80,7 @@ public actor WuhuLocalRunnerSpawner {
     try await waitForSocket(timeout: 10.0)
 
     // Connect to the local runner over UDS mux with reconnection
-    connectionTask = Task { [socketPath, registry, logger] in
+    connectionTask = Task { [socketPath, registry, bashCoordinator, logger] in
       var backoff: UInt64 = 100_000_000 // 100ms
       let maxBackoff: UInt64 = 5_000_000_000
 
@@ -113,10 +116,16 @@ public actor WuhuLocalRunnerSpawner {
           logger.info("Local runner connected via UDS (v\(runnerHello.version))")
 
           let client = MuxRunnerClient(name: "local", session: session)
+
+          // Wire callbacks: inbound callback streams → bashCoordinator
+          await client.setCallbacks(bashCoordinator)
+          let callbackTask = Task { await client.startCallbackListener() }
+
           await registry.register(client)
 
           // Block until session ends
           try? await runTask.value
+          callbackTask.cancel()
           await session.close()
 
           await registry.remove(.remote(name: "local"))
