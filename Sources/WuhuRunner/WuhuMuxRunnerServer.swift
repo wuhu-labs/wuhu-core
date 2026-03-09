@@ -66,7 +66,6 @@ public struct WuhuMuxRunnerServer: Sendable {
   }
 
   public func run(config: WuhuRunnerConfig) async throws {
-    let runner = LocalRunner()
     let logger = Logger(label: "WuhuRunner")
     let name = config.name
 
@@ -75,12 +74,26 @@ public struct WuhuMuxRunnerServer: Sendable {
       startParentWatchdog(logger: logger)
     }
 
+    // Create WorkerManager — all Runner calls are proxied through workers
+    let workersRoot = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".wuhu/workers")
+      .path
+    let manager = WorkerManager(
+      runnerName: name,
+      workersRoot: workersRoot,
+      lockProvider: FlockLockProvider(),
+      workerSpawner: RealWorkerSpawner(),
+      workerConnector: MuxWorkerConnector(),
+    )
+    try await manager.start()
+    logger.info("WorkerManager started for runner '\(name)'")
+
     if let socketPath = config.socket, !socketPath.isEmpty {
       // UDS mode — raw mux over Unix domain socket
-      try await runUDS(socketPath: socketPath, runner: runner, name: name, logger: logger)
+      try await runUDS(socketPath: socketPath, runner: manager, name: name, logger: logger)
     } else {
       // WebSocket mode — HTTP server with WS upgrade
-      try await runWebSocket(config: config, runner: runner, name: name, logger: logger)
+      try await runWebSocket(config: config, runner: manager, name: name, logger: logger)
     }
   }
 
