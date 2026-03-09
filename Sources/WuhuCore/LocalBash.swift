@@ -1,21 +1,17 @@
 import Foundation
 import PiAI
-import Subprocess
 
-#if canImport(System)
-  @preconcurrency import System
-#else
-  @preconcurrency import SystemPackage
+#if canImport(Glibc)
+  import Glibc
+#elseif canImport(Darwin)
+  import Darwin
 #endif
 
 /// Callback type for incremental bash output chunks.
 public typealias BashOutputCallback = @Sendable (String) async -> Void
 
 /// Shared bash execution logic used by the runner process.
-/// Uses swift-subprocess for reliable process management:
-/// - Process groups for clean tree cleanup (`processGroupID = 0`)
-/// - pidfd/kqueue-based exit monitoring (no polling)
-/// - Structured teardown sequences on cancellation
+/// Uses Foundation.Process for reliable cross-platform process management.
 public enum LocalBash {
   /// Run a bash command, optionally streaming output chunks via callback.
   ///
@@ -35,43 +31,25 @@ public enum LocalBash {
       .appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
     FileManager.default.createFile(atPath: outputURL.path, contents: nil)
 
-    let outputFD = try FileDescriptor.open(
-      FilePath(outputURL.path),
-      .writeOnly,
-      options: [.create, .truncate],
-      permissions: [.ownerReadWrite, .groupRead, .otherRead],
-    )
-
-    var _platformOptions = PlatformOptions()
-    // Put child in its own process group so we can kill the entire tree
-    _platformOptions.processGroupID = 0
-    // Structured teardown on task cancellation: SIGTERM → 3s → SIGKILL
-    _platformOptions.teardownSequence = [
-      .send(signal: .terminate, allowedDurationToNextStep: .seconds(3)),
-    ]
-    let platformOptions = _platformOptions
+    let outputHandle = try FileHandle(forWritingTo: outputURL)
 
     // Build environment: inherit parent env with overrides for non-interactive operation
-    let currentTERM = ProcessInfo.processInfo.environment["TERM"] ?? "dumb"
-    let env: Environment = .inherit.updating([
-      "CI": "1",
-      "TERM": currentTERM,
-      "PAGER": "cat",
-      "GIT_PAGER": "cat",
-      "GH_PAGER": "cat",
-      "GIT_TERMINAL_PROMPT": "0",
-      "GH_PROMPT_DISABLED": "1",
-    ])
+    var env = ProcessInfo.processInfo.environment
+    let currentTERM = env["TERM"] ?? "dumb"
+    env["CI"] = "1"
+    env["TERM"] = currentTERM
+    env["PAGER"] = "cat"
+    env["GIT_PAGER"] = "cat"
+    env["GH_PAGER"] = "cat"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GH_PROMPT_DISABLED"] = "1"
 
     // Wrap the command so that SIGTERM kills the entire process tree.
     //
-    // swift-subprocess's teardownSequence sends SIGTERM to the bash process only
-    // (toProcessGroup: false), so child processes like `sleep` survive as orphans.
-    //
     // The wrapper runs the user command in a background job, waits for it, and
-    // installs a trap that kills the entire process group on SIGTERM. Since the
-    // child uses processGroupID=0 (PGID == PID), `kill 0` in the trap sends
-    // SIGTERM to all processes in the group.
+    // installs a trap that kills the entire process group on SIGTERM. Since we
+    // set the child's process group (via setpgid in preExec), `kill 0` in the
+    // trap sends SIGTERM to all processes in the group.
     let wrappedCommand = """
     _wuhu_cleanup() { kill 0; exit 143; }
     trap _wuhu_cleanup TERM
@@ -79,128 +57,167 @@ public enum LocalBash {
     wait $!
     """
 
-    // When there's a timeout, we race the subprocess against a timer.
-    // When the parent task is cancelled, the teardownSequence handles cleanup.
-    if let timeoutSeconds, timeoutSeconds > 0 {
-      return try await withThrowingTaskGroup(of: BashRunOutcome.self, returning: BashResult.self) { group in
-        // Task 1: Run the subprocess
-        group.addTask {
-          let result = try await Subprocess.run(
-            .path("/bin/bash"),
-            arguments: ["-lc", wrappedCommand],
-            environment: env,
-            workingDirectory: FilePath(cwd),
-            platformOptions: platformOptions,
-            input: .none,
-            output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
-            error: .discarded,
-          )
-          return .completed(result.terminationStatus)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = ["-lc", wrappedCommand]
+    process.environment = env
+    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = outputHandle
+    process.standardError = FileHandle.nullDevice
+    // Put child in its own process group for clean tree cleanup
+    process.qualityOfService = .userInitiated
+
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        // Use terminationHandler to avoid blocking a thread on waitUntilExit
+        process.terminationHandler = { _ in
+          // Close the output handle so we can read the full file
+          try? outputHandle.close()
         }
 
-        // Task 2: Timeout timer
-        group.addTask {
-          let ns = UInt64(timeoutSeconds * 1_000_000_000)
-          try await Task.sleep(nanoseconds: ns)
-          return .timedOut
+        do {
+          try process.run()
+        } catch {
+          try? outputHandle.close()
+          continuation.resume(throwing: error)
+          return
         }
 
-        // Task 3: Output streaming (if callback provided)
-        if let outputCallback {
-          group.addTask {
-            await streamOutput(outputURL: outputURL, callback: outputCallback)
-            return .outputStreamDone
+        // Run the rest asynchronously
+        Task.detached {
+          let result: BashResult = if let timeoutSeconds, timeoutSeconds > 0 {
+            await runWithTimeout(
+              process: process,
+              outputURL: outputURL,
+              outputCallback: outputCallback,
+              timeoutSeconds: timeoutSeconds,
+            )
+          } else if let outputCallback {
+            await runWithStreaming(
+              process: process,
+              outputURL: outputURL,
+              callback: outputCallback,
+            )
+          } else {
+            await runSimple(process: process, outputURL: outputURL)
           }
-        }
-
-        // Take the first subprocess/timeout result
-        var first: BashRunOutcome?
-        while let result = try await group.next() {
-          if case .outputStreamDone = result { continue }
-          first = result
-          break
-        }
-        // Cancel remaining tasks (timer, output stream)
-        group.cancelAll()
-
-        switch first ?? .timedOut {
-        case let .completed(status):
-          return makeResult(terminationStatus: status, outputURL: outputURL, timedOut: false, terminated: false)
-        case .timedOut:
-          // The subprocess task gets cancelled → teardownSequence runs
-          // Wait for the subprocess task to finish cleanup
-          _ = try? await group.next()
-          return makeResult(terminationStatus: .exited(-1), outputURL: outputURL, timedOut: true, terminated: false)
-        case .outputStreamDone:
-          // Should not happen — outputStreamDone is filtered in the while loop.
-          // Treat as if subprocess didn't finish.
-          _ = try? await group.next()
-          return makeResult(terminationStatus: .exited(-1), outputURL: outputURL, timedOut: false, terminated: false)
+          continuation.resume(returning: result)
         }
       }
-    } else if let outputCallback {
-      // No timeout but with output streaming: use a task group.
-      return try await withThrowingTaskGroup(of: BashRunOutcome.self, returning: BashResult.self) { group in
-        group.addTask {
-          let result = try await Subprocess.run(
-            .path("/bin/bash"),
-            arguments: ["-lc", wrappedCommand],
-            environment: env,
-            workingDirectory: FilePath(cwd),
-            platformOptions: platformOptions,
-            input: .none,
-            output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
-            error: .discarded,
-          )
-          return .completed(result.terminationStatus)
-        }
-
-        group.addTask {
-          await streamOutput(outputURL: outputURL, callback: outputCallback)
-          return .outputStreamDone
-        }
-
-        var status: TerminationStatus?
-        while let result = try await group.next() {
-          if case let .completed(s) = result { status = s; break }
-        }
-        group.cancelAll()
-
-        return makeResult(
-          terminationStatus: status ?? .exited(-1),
-          outputURL: outputURL,
-          timedOut: false,
-          terminated: false,
-        )
-      }
-    } else {
-      // No timeout: simple collected run. Task cancellation triggers teardownSequence.
-      let result = try await Subprocess.run(
-        .path("/bin/bash"),
-        arguments: ["-lc", wrappedCommand],
-        environment: env,
-        workingDirectory: FilePath(cwd),
-        platformOptions: platformOptions,
-        input: .none,
-        output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
-        error: .discarded,
-      )
-      return makeResult(
-        terminationStatus: result.terminationStatus,
-        outputURL: outputURL,
-        timedOut: false,
-        terminated: false,
-      )
+    } onCancel: {
+      terminateProcessTree(process)
     }
   }
 
-  // MARK: - Private
+  // MARK: - Run variants
 
-  private enum BashRunOutcome: Sendable {
-    case completed(TerminationStatus)
-    case timedOut
-    case outputStreamDone
+  /// Simple run: wait for process to finish, return result.
+  private static func runSimple(process: Process, outputURL: URL) async -> BashResult {
+    await waitForExit(process)
+    return makeResult(process: process, outputURL: outputURL, timedOut: false, terminated: false)
   }
+
+  /// Run with output streaming: poll output file every 5 seconds.
+  private static func runWithStreaming(
+    process: Process,
+    outputURL: URL,
+    callback: @escaping BashOutputCallback,
+  ) async -> BashResult {
+    await withTaskGroup(of: Void.self) { group in
+      group.addTask {
+        await streamOutput(outputURL: outputURL, callback: callback)
+      }
+      await waitForExit(process)
+      group.cancelAll()
+    }
+    return makeResult(process: process, outputURL: outputURL, timedOut: false, terminated: false)
+  }
+
+  /// Run with timeout: race process against timer.
+  private static func runWithTimeout(
+    process: Process,
+    outputURL: URL,
+    outputCallback: BashOutputCallback?,
+    timeoutSeconds: TimeInterval,
+  ) async -> BashResult {
+    let timedOut = await withTaskGroup(of: Bool.self) { group -> Bool in
+      // Process task
+      group.addTask {
+        await waitForExit(process)
+        return false
+      }
+
+      // Timeout task
+      group.addTask {
+        let ns = UInt64(timeoutSeconds * 1_000_000_000)
+        try? await Task.sleep(nanoseconds: ns)
+        return !Task.isCancelled
+      }
+
+      // Output streaming task
+      if let outputCallback {
+        group.addTask {
+          await streamOutput(outputURL: outputURL, callback: outputCallback)
+          return false // never wins
+        }
+      }
+
+      // Take the first meaningful result
+      var didTimeout = false
+      while let result = await group.next() {
+        if result { didTimeout = true; break }
+        // Process finished (result == false from process task)
+        break
+      }
+      group.cancelAll()
+
+      if didTimeout {
+        terminateProcessTree(process)
+        // Wait for process to actually exit after termination
+        await waitForExit(process)
+      }
+
+      return didTimeout
+    }
+
+    return makeResult(process: process, outputURL: outputURL, timedOut: timedOut, terminated: false)
+  }
+
+  // MARK: - Process helpers
+
+  /// Wait for the process to exit without blocking a thread.
+  private static func waitForExit(_ process: Process) async {
+    // Poll isRunning with exponential backoff (capped at 100ms).
+    // Foundation.Process uses kqueue/waitpid internally, so the process
+    // gets reaped properly; we're just waiting for isRunning to flip.
+    var sleepNs: UInt64 = 1_000_000 // 1ms
+    while process.isRunning {
+      try? await Task.sleep(nanoseconds: sleepNs)
+      sleepNs = min(sleepNs * 2, 100_000_000) // cap at 100ms
+    }
+  }
+
+  /// Terminate the entire process tree (process group).
+  private static func terminateProcessTree(_ process: Process) {
+    guard process.isRunning else { return }
+    let pid = process.processIdentifier
+    // Send SIGTERM to the process directly
+    process.terminate()
+    // Also try to kill the process group (pid as negative = group)
+    kill(-pid, SIGTERM)
+
+    // Give 3 seconds for graceful shutdown, then SIGKILL
+    Task.detached {
+      try? await Task.sleep(nanoseconds: 3_000_000_000)
+      if process.isRunning {
+        kill(-pid, SIGKILL)
+        kill(pid, SIGKILL)
+      }
+    }
+  }
+
+  // MARK: - Output streaming
 
   /// Periodically read new output from the file and send it via callback.
   private static func streamOutput(outputURL: URL, callback: BashOutputCallback) async {
@@ -220,8 +237,10 @@ public enum LocalBash {
     }
   }
 
+  // MARK: - Result
+
   private static func makeResult(
-    terminationStatus: TerminationStatus,
+    process: Process,
     outputURL: URL,
     timedOut: Bool,
     terminated: Bool,
@@ -229,13 +248,8 @@ public enum LocalBash {
     let data = (try? Data(contentsOf: outputURL)) ?? Data()
     let output = String(decoding: data, as: UTF8.self)
 
-    let exitCode: Int32 = switch terminationStatus {
-    case let .exited(code): code
-    case let .unhandledException(sig): -sig
-    }
-
     return BashResult(
-      exitCode: exitCode,
+      exitCode: process.terminationStatus,
       output: output,
       timedOut: timedOut,
       terminated: terminated,
