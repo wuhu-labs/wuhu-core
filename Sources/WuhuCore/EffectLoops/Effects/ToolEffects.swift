@@ -108,7 +108,7 @@ extension WuhuBehavior {
         let argsHash = call.arguments.hashValue
         switch result {
         case let .success(.immediate(toolResult)):
-          let truncated = applyToolResultTruncation(
+          let truncated = await applyToolResultTruncation(
             result: toolResult,
             direction: truncationDirection,
             toolCallId: call.id,
@@ -240,14 +240,39 @@ extension WuhuBehavior {
         output += "\n[terminated]"
       }
 
+      // Apply truncation (tail direction — build/test output is most useful at the end).
+      let displayOutput: String
+      if output.isEmpty {
+        displayOutput = "(no output)"
+      } else {
+        let primaryMount: WuhuMount? = try? await store.getPrimaryMount(sessionID: sessionID.rawValue)
+        let sessionDir: String? = if let primaryMount, primaryMount.runnerID == .local {
+          primaryMount.path
+        } else {
+          nil
+        }
+
+        let agentResult = AgentToolResult(content: [.text(output)], details: .object([:]))
+        let truncated = await applyToolResultTruncation(
+          result: agentResult,
+          direction: .tail,
+          toolCallId: toolCallID,
+          sessionDir: sessionDir,
+        )
+        // Extract the (possibly truncated) text back out.
+        displayOutput = truncated.content.compactMap { block in
+          if case let .text(t) = block { return t.text }
+          return nil
+        }.joined()
+      }
+
       let now = Date()
       let toolResultMessage = WuhuToolResultMessage(
         toolCallId: toolCallID,
         toolName: "bash",
-        content: [.text(text: output.isEmpty ? "(no output)" : output, signature: nil)],
+        content: [.text(text: displayOutput, signature: nil)],
         details: .object([
           "exit_code": .number(Double(result.exitCode)),
-          "wuhu_recovered": .bool(true),
         ]),
         isError: result.exitCode != 0,
         timestamp: now,
@@ -383,12 +408,17 @@ private func persistToolFailure(
 
 /// Apply the shared truncation system to a tool result's text content blocks.
 /// If truncation occurs and a session directory is available, persist the full output to disk.
+///
+/// - TODO: The disk persistence (`ToolResultTruncation.persistFullOutput`) currently uses
+///   synchronous `FileManager` I/O. This should go through the runner's async file I/O
+///   interface for consistency, but is acceptable for now since it only runs when the
+///   primary mount is local (same machine as the server process).
 private func applyToolResultTruncation(
   result: AgentToolResult,
   direction: ToolResultTruncation.Direction,
   toolCallId: String,
   sessionDir: String?,
-) -> AgentToolResult {
+) async -> AgentToolResult {
   var modified = result
 
   // Find the first (and typically only) text content block.

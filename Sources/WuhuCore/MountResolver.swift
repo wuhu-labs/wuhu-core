@@ -45,11 +45,11 @@ public enum MountResolverFactory {
           }
           return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
         }
-        // Fallback: session cwd with local runner
+        // Fallback: session cwd (or "/" if no cwd) with local runner.
+        // Tools that require a real working directory (e.g. bash) gate on
+        // mount being nil. File tools with absolute paths work fine with "/".
         let session = try await store.getSession(id: sessionID)
-        guard let cwd = session.cwd else {
-          throw MountResolutionError.noCwd
-        }
+        let cwd = session.cwd ?? "/"
         guard let runner = await runnerRegistry.get(.local) else {
           throw MountResolutionError.runnerUnavailable(runnerID: .local)
         }
@@ -62,7 +62,6 @@ public enum MountResolverFactory {
 public enum MountResolutionError: Error, Sendable, CustomStringConvertible {
   case mountNotFound(name: String)
   case runnerUnavailable(runnerID: RunnerID)
-  case noCwd
 
   public var description: String {
     switch self {
@@ -70,8 +69,6 @@ public enum MountResolutionError: Error, Sendable, CustomStringConvertible {
       "Mount '\(name)' not found"
     case let .runnerUnavailable(runnerID):
       "Runner '\(runnerID.displayName)' is not connected"
-    case .noCwd:
-      "No working directory set. Call the mount tool first."
     }
   }
 }
