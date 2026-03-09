@@ -593,7 +593,12 @@ private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     let params = try Params.parse(toolName: tool.name, args: args)
 
     // All bash execution goes through a runner (local or remote) via mount resolver.
+    // When there's no mount and no session cwd, the resolver returns a fallback with
+    // cwd "/" and mount nil. Bash requires a real working directory.
     let resolved = try await mountResolver(params.mount)
+    guard resolved.mount != nil || resolved.cwd != "/" else {
+      throw ToolError.message(noCwdError)
+    }
     let runner = resolved.runner
 
     // Fire-and-forget: start bash and return immediately.
