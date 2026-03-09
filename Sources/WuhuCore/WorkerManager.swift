@@ -195,11 +195,20 @@ public actor WorkerManager: Runner {
       await state.connection.runner.setCallbacks(callbacks)
     }
 
-    // Drain buffered dead-worker results
-    let pending = pendingDeadWorkerResults
-    pendingDeadWorkerResults.removeAll()
-    for finished in pending {
-      try? await callbacks.bashFinished(tag: finished.tag, result: finished.result)
+    // Drain buffered dead-worker results asynchronously.
+    // We must not await delivery here because the caller (MuxRunnerHandler.serve)
+    // hasn't started its inbound loop yet. If we await the bashFinished RPC
+    // (which expects an ack from the server), we deadlock: the runner can't
+    // process the hello request, so the server can't start its callback
+    // listener, so the ack never arrives.
+    if !pendingDeadWorkerResults.isEmpty {
+      let pending = pendingDeadWorkerResults
+      pendingDeadWorkerResults.removeAll()
+      Task {
+        for finished in pending {
+          try? await callbacks.bashFinished(tag: finished.tag, result: finished.result)
+        }
+      }
     }
 
     // Start callback listeners for adopted workers that were waiting

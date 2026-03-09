@@ -1,5 +1,6 @@
 import Foundation
 import PiAI
+import WuhuAPI
 
 /// LoopBehavior implementation for the Wuhu agent loop.
 ///
@@ -141,7 +142,9 @@ struct WuhuBehavior: LoopBehavior {
           return true
         case .assistant:
           return false
-        case .customMessage:
+        case let .customMessage(c):
+          // System input messages (like async bash callbacks) need inference
+          if c.customType == WuhuCustomMessageTypes.systemInput { return true }
           continue
         case .unknown:
           continue

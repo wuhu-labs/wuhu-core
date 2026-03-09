@@ -500,6 +500,9 @@ struct WorkerManagerTests {
     let upstream = MockUpstreamCallbacks()
     await manager.setCallbacks(upstream)
 
+    // The drain happens in a background task, wait for it
+    try await Task.sleep(nanoseconds: 300_000_000) // 300ms
+
     let finishedCalls = await upstream.bashFinishedCalls
     #expect(finishedCalls.count == 1)
     #expect(finishedCalls[0].tag == "buffered-t1")
