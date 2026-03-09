@@ -338,10 +338,9 @@ struct WorkerManagerTests {
     let upstream = MockUpstreamCallbacks()
     await manager.setCallbacks(upstream)
 
-    // Verify the runner got a forwarder as callbacks
+    // Verify the runner got callbacks set
     let cb = await mockRunner.callbacksSet
     #expect(cb != nil)
-    #expect(cb is WorkerCallbackForwarder)
 
     await manager.stop()
   }
@@ -549,32 +548,6 @@ struct WorkerManagerTests {
         try await manager.start()
       }
     }
-  }
-}
-
-// MARK: - WorkerCallbackForwarder tests
-
-@Suite("WorkerCallbackForwarder")
-struct WorkerCallbackForwarderTests {
-  @Test func forwardsCallbacksUpstream() async throws {
-    let upstream = MockUpstreamCallbacks()
-    let forwarder = WorkerCallbackForwarder(upstream: upstream)
-
-    try await forwarder.bashOutput(tag: "t1", chunk: "hello")
-    try await forwarder.bashFinished(
-      tag: "t1",
-      result: BashResult(exitCode: 0, output: "hello", timedOut: false, terminated: false),
-    )
-
-    let outputs = await upstream.bashOutputCalls
-    #expect(outputs.count == 1)
-    #expect(outputs[0].tag == "t1")
-    #expect(outputs[0].chunk == "hello")
-
-    let finished = await upstream.bashFinishedCalls
-    #expect(finished.count == 1)
-    #expect(finished[0].tag == "t1")
-    #expect(finished[0].result.exitCode == 0)
   }
 }
 
