@@ -74,10 +74,25 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     case defaultCostLimitCents = "default_cost_limit_cents"
   }
 
+  /// Hard-coded fallback: $10 per session (100,000 hundredths-of-a-cent).
+  /// Applied when the YAML key is absent. Set `default_cost_limit_cents: 0`
+  /// in the config file to explicitly disable cost gating.
+  public static let fallbackCostLimitCents: Int64 = 100_000
+
   public static func load(path: String) throws -> WuhuServerConfig {
     let expanded = (path as NSString).expandingTildeInPath
     let text = try String(contentsOfFile: expanded, encoding: .utf8)
-    return try YAMLDecoder().decode(WuhuServerConfig.self, from: text)
+    var config = try YAMLDecoder().decode(WuhuServerConfig.self, from: text)
+    // Codable decoding leaves Optional fields nil when absent in YAML.
+    // Apply the hard-coded fallback so cost gating is always on by default.
+    if config.defaultCostLimitCents == nil {
+      config.defaultCostLimitCents = fallbackCostLimitCents
+    }
+    // Explicit 0 means "disable cost gating" — normalize to nil.
+    if config.defaultCostLimitCents == 0 {
+      config.defaultCostLimitCents = nil
+    }
+    return config
   }
 
   public static func defaultPath() -> String {

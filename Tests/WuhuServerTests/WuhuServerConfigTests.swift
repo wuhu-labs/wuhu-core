@@ -54,4 +54,50 @@ struct WuhuServerConfigTests {
     let resolved = config.resolveWorkspaceRoot(databasePath: "/data/wuhu.sqlite")
     #expect(resolved.hasSuffix("/data/workspace"))
   }
+
+  @Test func costLimitFallbackAppliedWhenMissing() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    #expect(config.defaultCostLimitCents == WuhuServerConfig.fallbackCostLimitCents)
+    #expect(config.defaultCostLimitCents == 100_000)
+  }
+
+  @Test func costLimitExplicitZeroDisablesGating() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    default_cost_limit_cents: 0
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    // 0 means "disable cost gating" — normalized to nil
+    #expect(config.defaultCostLimitCents == nil)
+  }
+
+  @Test func costLimitExplicitValuePreserved() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    default_cost_limit_cents: 500000
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    #expect(config.defaultCostLimitCents == 500_000)
+  }
 }
