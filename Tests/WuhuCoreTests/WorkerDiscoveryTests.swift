@@ -5,12 +5,12 @@ import Testing
 // MARK: - Mock WorkerConnector
 
 struct MockWorkerConnector: WorkerConnector {
-  /// Socket paths that should succeed (return a mock callbacks).
+  /// Socket paths that should succeed (return a mock connection).
   let liveSocketPaths: Set<String>
 
-  func connect(socketPath: String) async throws -> any RunnerCallbacks {
+  func connect(socketPath: String) async throws -> any WorkerConnectionHandle {
     if liveSocketPaths.contains(socketPath) {
-      return MockDiscoveryCallbacks()
+      return MockWorkerConnection()
     }
     throw MockConnectorError.connectionRefused
   }
@@ -20,9 +20,62 @@ private enum MockConnectorError: Error {
   case connectionRefused
 }
 
-private actor MockDiscoveryCallbacks: RunnerCallbacks {
-  func bashOutput(tag _: String, chunk _: String) async throws {}
-  func bashFinished(tag _: String, result _: BashResult) async throws {}
+final class MockWorkerConnection: WorkerConnectionHandle, @unchecked Sendable {
+  let runner: any Runner = MockDiscoveryRunner()
+  var callbackListenerStarted = false
+
+  func startCallbackListener() async {
+    callbackListenerStarted = true
+  }
+
+  func close() async {}
+}
+
+private actor MockDiscoveryRunner: Runner {
+  nonisolated let id: RunnerID = .local
+
+  func startBash(tag _: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
+    BashStarted(tag: "", alreadyRunning: false)
+  }
+
+  func cancelBash(tag _: String) async throws -> BashCancelResult {
+    .notFound
+  }
+
+  func readData(path _: String) async throws -> Data {
+    Data()
+  }
+
+  func readString(path _: String, encoding _: String.Encoding) async throws -> String {
+    ""
+  }
+
+  func writeData(path _: String, data _: Data, createIntermediateDirectories _: Bool) async throws {}
+  func writeString(path _: String, content _: String, createIntermediateDirectories _: Bool, encoding _: String.Encoding) async throws {}
+  func exists(path _: String) async throws -> FileExistence {
+    .notFound
+  }
+
+  func listDirectory(path _: String) async throws -> [DirectoryEntry] {
+    []
+  }
+
+  func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] {
+    []
+  }
+
+  func createDirectory(path _: String, withIntermediateDirectories _: Bool) async throws {}
+  func find(params _: FindParams) async throws -> FindResult {
+    FindResult(entries: [], totalBeforeLimit: 0)
+  }
+
+  func grep(params _: GrepParams) async throws -> GrepResult {
+    GrepResult(matches: [], matchCount: 0, limitReached: false, linesTruncated: false)
+  }
+
+  func materialize(params _: MaterializeRequest) async throws -> MaterializeResponse {
+    MaterializeResponse(workspacePath: "")
+  }
 }
 
 // MARK: - Mock LockProvider
@@ -161,7 +214,7 @@ struct WorkerDiscoveryFunctionTests {
 
     // First (epoch 100) should be alive
     #expect(results[0].directory == "local.worker.100")
-    if case .alive = results[0].result {} else {
+    if case .alive(connection: _) = results[0].result {} else {
       Issue.record("Expected alive for worker 100")
     }
 

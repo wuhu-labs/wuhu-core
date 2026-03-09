@@ -47,13 +47,27 @@ public enum WorkerDirectory {
 
 // MARK: - WorkerConnector protocol
 
+/// Handle to a connected worker, providing the `Runner` proxy and lifecycle management.
+public protocol WorkerConnectionHandle: Sendable {
+  /// The `Runner` proxy for forwarding protocol calls to this worker.
+  var runner: any Runner { get }
+
+  /// Listen for inbound callback streams from the worker.
+  /// Blocks until the connection closes. Call after setting callbacks on the runner.
+  func startCallbackListener() async
+
+  /// Close the connection and stop background tasks.
+  func close() async
+}
+
 /// Abstracts connecting to a worker's UDS mux socket.
-/// Real implementation does UDS mux connect; test implementation returns mocks.
+/// Real implementation does UDS mux connect + hello exchange;
+/// test implementation returns mocks.
 public protocol WorkerConnector: Sendable {
   /// Attempt to connect to a worker at the given socket path.
-  /// Returns a `RunnerCallbacks` that can be used to receive callbacks from the worker.
+  /// Returns a connection handle providing the full `Runner` proxy.
   /// Throws if the worker is unreachable.
-  func connect(socketPath: String) async throws -> any RunnerCallbacks
+  func connect(socketPath: String) async throws -> any WorkerConnectionHandle
 }
 
 // MARK: - LockProvider protocol
@@ -76,48 +90,49 @@ public protocol LockHandle: Sendable {
 
 #if canImport(Glibc)
   import Glibc
-
-  /// File-lock provider using `flock()` on Linux.
-  public struct FlockLockProvider: LockProvider {
-    public init() {}
-
-    public func acquireExclusive(path: String) throws -> LockHandle {
-      let fd = Glibc.open(path, O_CREAT | O_RDWR, 0o644)
-      guard fd >= 0 else {
-        throw WorkerDiscoveryError.lockOpenFailed(path: path, errno: errno)
-      }
-      // Use the C flock() function — Glibc.flock resolves to the struct, not the function.
-      let result = flock(fd, LOCK_EX | LOCK_NB)
-      if result != 0 {
-        let err = errno
-        Glibc.close(fd)
-        throw WorkerDiscoveryError.lockAlreadyHeld(path: path, errno: err)
-      }
-      return FlockHandle(fd: fd)
-    }
-  }
-
-  /// Lock handle backed by a file descriptor with `flock()`.
-  public struct FlockHandle: LockHandle, Sendable {
-    private let fd: Int32
-
-    init(fd: Int32) {
-      self.fd = fd
-    }
-
-    public func release() {
-      flock(fd, LOCK_UN)
-      Glibc.close(fd)
-    }
-  }
+#elseif canImport(Darwin)
+  import Darwin
 #endif
+
+/// File-lock provider using `flock()`.
+public struct FlockLockProvider: LockProvider {
+  public init() {}
+
+  public func acquireExclusive(path: String) throws -> LockHandle {
+    let fd = open(path, O_CREAT | O_RDWR, 0o644)
+    guard fd >= 0 else {
+      throw WorkerDiscoveryError.lockOpenFailed(path: path, errno: errno)
+    }
+    let result = flock(fd, LOCK_EX | LOCK_NB)
+    if result != 0 {
+      let err = errno
+      close(fd)
+      throw WorkerDiscoveryError.lockAlreadyHeld(path: path, errno: err)
+    }
+    return FlockHandle(fd: fd)
+  }
+}
+
+/// Lock handle backed by a file descriptor with `flock()`.
+public struct FlockHandle: LockHandle, Sendable {
+  private let fd: Int32
+
+  init(fd: Int32) {
+    self.fd = fd
+  }
+
+  public func release() {
+    flock(fd, LOCK_UN)
+    close(fd)
+  }
+}
 
 // MARK: - Worker discovery
 
 /// Result of scanning a single worker directory.
 public enum WorkerProbeResult: Sendable {
-  /// Worker is alive and reachable.
-  case alive(callbacks: any RunnerCallbacks)
+  /// Worker is alive and reachable via the connection handle.
+  case alive(connection: any WorkerConnectionHandle)
   /// Worker is dead. Contains parsed results from disk.
   case dead(results: [BashFinished])
 }
@@ -152,8 +167,8 @@ public func discoverWorkers(
 
     // Try to connect
     do {
-      let callbacks = try await connector.connect(socketPath: socketPath)
-      results.append((directory: dirName, result: .alive(callbacks: callbacks)))
+      let connection = try await connector.connect(socketPath: socketPath)
+      results.append((directory: dirName, result: .alive(connection: connection)))
     } catch {
       // Dead worker — collect results from disk
       let outputDir = WorkerDirectory.outputPath(workerDir: dirPath)
