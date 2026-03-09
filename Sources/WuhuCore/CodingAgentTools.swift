@@ -164,58 +164,25 @@ private func readTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
       throw ToolError.message("Offset \(params.offset ?? 1) is beyond end of file (\(totalLines) lines total)")
     }
 
-    var selected: [String]
-    var userLimitedLines: Int?
-    if let limit = params.limit {
-      let end = min(startLine + max(0, limit), totalLines)
-      selected = Array(allLines[startLine ..< end])
-      userLimitedLines = end - startLine
-    } else {
-      selected = Array(allLines[startLine...])
-    }
+    // Apply a default page size when no explicit limit is set.
+    let effectiveLimit = params.limit ?? ToolTruncation.defaultMaxLines
+    let end = min(startLine + max(0, effectiveLimit), totalLines)
+    let selected = Array(allLines[startLine ..< end])
+    let shownLines = end - startLine
 
-    let selectedContent = selected.joined(separator: "\n")
-    let truncation = ToolTruncation.truncateHead(selectedContent)
+    var outputText = selected.joined(separator: "\n")
 
-    let startDisplay = startLine + 1
-    let endDisplay = startDisplay + max(0, truncation.outputLines - 1)
-
-    var outputText: String
-    var details: JSONValue = .object([:])
-
-    if truncation.firstLineExceedsLimit {
-      let firstLineSize = ToolTruncation.formatSize(allLines[startLine].utf8.count)
-      outputText =
-        "[Line \(startDisplay) is \(firstLineSize), exceeds \(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit. Use bash: sed -n '\(startDisplay)p' \(params.path) | head -c \(ToolTruncation.defaultMaxBytes)]"
-      details = .object(["truncation": truncation.toJSON()])
-    } else if truncation.truncated {
-      outputText = truncation.content
-      let nextOffset = endDisplay + 1
-      if truncation.truncatedBy == "lines" {
-        outputText += "\n\n[Showing lines \(startDisplay)-\(endDisplay) of \(totalLines). Use offset=\(nextOffset) to continue.]"
-      } else {
-        outputText +=
-          "\n\n[Showing lines \(startDisplay)-\(endDisplay) of \(totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit). Use offset=\(nextOffset) to continue.]"
-      }
-      details = .object(["truncation": truncation.toJSON()])
-    } else if let userLimitedLines, startLine + userLimitedLines < totalLines {
-      outputText = truncation.content
-      let remaining = totalLines - (startLine + userLimitedLines)
-      let nextOffset = startLine + userLimitedLines + 1
+    // Add pagination continuation notice when there are more lines.
+    if startLine + shownLines < totalLines {
+      let remaining = totalLines - (startLine + shownLines)
+      let nextOffset = startLine + shownLines + 1
       outputText += "\n\n[\(remaining) more lines in file. Use offset=\(nextOffset) to continue.]"
-    } else {
-      outputText = truncation.content
-      details = .null
     }
 
-    let resultDetails: JSONValue =
-      (details == .null || (details.object?.isEmpty ?? false))
-        ? .object([:])
-        : details
-
+    // Content truncation is handled by the execution layer (ToolResultTruncation).
     return AgentToolResult(
       content: [.text(outputText)],
-      details: resultDetails,
+      details: .object([:]),
     )
   }
 }
@@ -406,30 +373,16 @@ private func lsTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
       return AgentToolResult(content: [.text("(empty directory)")], details: .object([:]))
     }
 
-    let rawOutput = results.joined(separator: "\n")
-    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
-    var output = truncation.content
-
-    var notices: [String] = []
-    var details: [String: JSONValue] = [:]
+    var output = results.joined(separator: "\n")
 
     if entryLimitReached {
-      notices.append("\(effectiveLimit) entries limit reached. Use limit=\(effectiveLimit * 2) for more")
-      details["entryLimitReached"] = .number(Double(effectiveLimit))
-    }
-    if truncation.truncated {
-      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
-      details["truncation"] = truncation.toJSON()
+      output += "\n\n[\(effectiveLimit) entries limit reached. Use limit=\(effectiveLimit * 2) for more]"
     }
 
-    if !notices.isEmpty {
-      output += "\n\n[\(notices.joined(separator: ". "))]"
-    }
-
-    return AgentToolResult(
-      content: [.text(output)],
-      details: details.isEmpty ? .object([:]) : .object(details),
-    )
+    let details: JSONValue = entryLimitReached
+      ? .object(["entryLimitReached": .number(Double(effectiveLimit))])
+      : .object([:])
+    return AgentToolResult(content: [.text(output)], details: details)
   }
 }
 
@@ -480,26 +433,16 @@ private func findTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     }
 
     let resultLimitReached = findResult.totalBeforeLimit > effectiveLimit
-    let rawOutput = limited.joined(separator: "\n")
-    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
-    var output = truncation.content
-
-    var notices: [String] = []
-    var details: [String: JSONValue] = [:]
+    var output = limited.joined(separator: "\n")
 
     if resultLimitReached {
-      notices.append("\(effectiveLimit) results limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern")
-      details["resultLimitReached"] = .number(Double(effectiveLimit))
-    }
-    if truncation.truncated {
-      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
-      details["truncation"] = truncation.toJSON()
-    }
-    if !notices.isEmpty {
-      output += "\n\n[\(notices.joined(separator: ". "))]"
+      output += "\n\n[\(effectiveLimit) results limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern]"
     }
 
-    return AgentToolResult(content: [.text(output)], details: details.isEmpty ? .object([:]) : .object(details))
+    let details: JSONValue = resultLimitReached
+      ? .object(["resultLimitReached": .number(Double(effectiveLimit))])
+      : .object([:])
+    return AgentToolResult(content: [.text(output)], details: details)
   }
 }
 
@@ -589,9 +532,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
       }
     }
 
-    let rawOutput = outputLines.joined(separator: "\n")
-    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
-    var output = truncation.content
+    var output = outputLines.joined(separator: "\n")
 
     var notices: [String] = []
     var details: [String: JSONValue] = [:]
@@ -599,10 +540,6 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     if grepResult.limitReached {
       notices.append("\(effectiveLimit) matches limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern")
       details["matchLimitReached"] = .number(Double(effectiveLimit))
-    }
-    if truncation.truncated {
-      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
-      details["truncation"] = truncation.toJSON()
     }
     if grepResult.linesTruncated {
       notices.append("Some lines truncated to \(ToolTruncation.grepMaxLineLength) chars. Use read tool to see full lines")
@@ -653,7 +590,7 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
     parameters: schema,
   )
 
-  return AnyAgentTool(tool: tool, label: "bash") { toolCallId, args in
+  return AnyAgentTool(tool: tool, label: "bash", truncationDirection: .tail) { toolCallId, args in
     let params = try Params.parse(toolName: tool.name, args: args)
 
     // All bash execution goes through a runner (local or remote) via mount resolver.
@@ -686,60 +623,30 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
   }
 }
 
-/// Format a BashResult into an AgentToolResult with truncation handling.
+/// Format a BashResult into an AgentToolResult.
+/// Returns raw output — truncation is applied by the execution layer in ToolEffects.
 private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
-  let exitCode = run.exitCode
   let output = run.output
-  let timedOut = run.timedOut
-  let terminated = run.terminated
+  let outputText = output.isEmpty ? "(no output)" : output
   let fullOutputPath = run.fullOutputPath ?? ""
 
-  let truncation = ToolTruncation.truncateTail(output)
-  var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
-
-  var details: [String: JSONValue] = [:]
-  if truncation.truncated {
-    details["truncation"] = truncation.toJSON()
-    if !fullOutputPath.isEmpty {
-      details["fullOutputPath"] = .string(fullOutputPath)
-    }
-
-    let startLine = truncation.totalLines - truncation.outputLines + 1
-    let endLine = truncation.totalLines
-    if truncation.lastLinePartial {
-      let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
-      let lastSize = ToolTruncation.formatSize(last.utf8.count)
-      if !outputText.isEmpty { outputText += "\n\n" }
-      outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize))."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    } else if truncation.truncatedBy == "lines" {
-      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines)."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    } else {
-      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit)."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    }
-  }
-
-  if timedOut {
+  if run.timedOut {
     if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
     throw ToolError.message(outputText + "\n\nCommand timed out")
   }
-  if terminated {
+  if run.terminated {
     if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
     throw ToolError.message(outputText + "\n\nCommand aborted")
   }
-  if exitCode != 0 {
-    throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
+  if run.exitCode != 0 {
+    throw ToolError.message(outputText + "\n\nCommand exited with code \(run.exitCode)")
   }
 
-  if !truncation.truncated, !fullOutputPath.isEmpty {
+  // Clean up temp file — disk persistence is now handled by the execution layer.
+  if !fullOutputPath.isEmpty {
     try? FileManager.default.removeItem(atPath: fullOutputPath)
   }
-  return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
+  return AgentToolResult(content: [.text(outputText)], details: .object([:]))
 }
 
 // MARK: - async_bash

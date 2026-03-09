@@ -75,7 +75,7 @@ public enum LocalBash {
     let wrappedCommand = """
     _wuhu_cleanup() { kill 0; exit 143; }
     trap _wuhu_cleanup TERM
-    { \(command); } &
+    { \(command); } 2>&1 &
     wait $!
     """
 

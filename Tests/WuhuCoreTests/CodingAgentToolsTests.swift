@@ -84,7 +84,7 @@ struct CodingAgentToolsTests {
     }
   }
 
-  @Test func readToolTruncatesByByteLimit() async throws {
+  @Test func readToolReturnsAllLinesWithinPageSize() async throws {
     let io = makeIO()
     let lines = (1 ... 500).map { "Line \($0): " + String(repeating: "x", count: 200) }.joined(separator: "\n")
     io.seedFile(path: "\(cwd)/large-bytes.txt", content: lines)
@@ -96,8 +96,10 @@ struct CodingAgentToolsTests {
       let result = try await t.execute(toolCallId: "t4", args: .object(["path": .string("large-bytes.txt")]))
       let out = textOutput(result)
       #expect(out.contains("Line 1:"))
-      #expect(out.contains("limit"))
-      #expect(out.contains("Use offset="))
+      #expect(out.contains("Line 500:"))
+      // All 500 lines fit within the default 2000-line page size.
+      // Byte-level truncation is now handled by the execution layer (ToolResultTruncation).
+      #expect(!out.contains("Use offset="))
     }
   }
 
