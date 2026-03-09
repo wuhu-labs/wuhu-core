@@ -62,14 +62,20 @@ struct WuhuBehavior: LoopBehavior {
     // Only do work when the session is running.
     guard state.status.snapshot.status == .running else { return nil }
 
-    // 3. Stale tool recovery — orphaned tool calls with no result
+    // 3. Pending bash results — delivered from worker after restart
+    if let (toolCallID, result) = state.tools.pendingBashResults.first {
+      state.tools.pendingBashResults.removeValue(forKey: toolCallID)
+      return persistDeliveredBashResult(toolCallID: toolCallID, result: result, state: state)
+    }
+
+    // 4. Stale tool recovery — orphaned tool calls with no result
     let staleIDs = staleToolCallIDs(in: state)
     if let firstStale = staleIDs.first {
       state.tools.recoveringIDs.insert(firstStale) // guard token
       return recoverStaleToolCall(id: firstStale, state: state)
     }
 
-    // 4. Drain interrupts — system + steer queues
+    // 5. Drain interrupts — system + steer queues
     if !state.queue.isDraining,
        !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty
     {
@@ -77,30 +83,30 @@ struct WuhuBehavior: LoopBehavior {
       return persistAndDrainInterrupts(state: state)
     }
 
-    // 5. Drain turn items — followUp queue (only if no interrupts pending)
+    // 6. Drain turn items — followUp queue (only if no interrupts pending)
     if !state.queue.isDraining, !state.queue.followUp.pending.isEmpty {
       state.queue.isDraining = true // guard token
       return persistAndDrainTurn(state: state)
     }
 
-    // 6. Inference — if needed and not already running
+    // 7. Inference — if needed and not already running
     if state.inference.status == .idle, needsInference(state: state) {
       state.inference.status = .running // guard token
       return runInference(state: state)
     }
 
-    // 7. Tool execution — pending tool calls
+    // 8. Tool execution — pending tool calls
     let pendingCalls = pendingToolCalls(in: state)
     if !pendingCalls.isEmpty {
       // Mark all as started (guard token) and track as executing
       for call in pendingCalls {
-        state.tools.statuses[call.id] = .started
+        state.tools.statuses[call.id] = ToolCallRecord(status: .started)
         state.tools.executingIDs.insert(call.id)
       }
       return executeToolCalls(pendingCalls, state: state)
     }
 
-    // 8. Compaction — if transcript exceeds threshold
+    // 9. Compaction — if transcript exceeds threshold
     if !state.transcript.isCompacting, shouldCompact(state: state) {
       state.transcript.isCompacting = true // guard token
       return runCompaction(state: state)
@@ -111,9 +117,21 @@ struct WuhuBehavior: LoopBehavior {
 
   // MARK: - State Queries
 
-  /// Tool call IDs stuck in `.started` with no result in transcript.
+  /// Deadline for stale tool call detection (matches worker orphan deadline).
+  /// Tool calls are only considered stale after this duration has passed
+  /// since they were started, giving the worker time to deliver results
+  /// after a server restart.
+  static let staleToolCallDeadline: TimeInterval = 3600 // 1 hour
+
+  /// Tool call IDs stuck in `.started` with no result in transcript,
+  /// AND past the stale deadline.
+  ///
   /// `.pending` tools are not stale — they haven't been picked up yet.
+  /// `.started` tools within the deadline are not stale — the worker
+  /// may still deliver the result.
   func staleToolCallIDs(in state: WuhuState) -> [String] {
+    let now = Date()
+
     var finished: Set<String> = []
     for entry in state.transcript.entries {
       guard case let .message(m) = entry.payload else { continue }
@@ -121,11 +139,13 @@ struct WuhuBehavior: LoopBehavior {
       finished.insert(t.toolCallId)
     }
 
-    return state.tools.statuses.compactMap { id, status in
-      guard status == .started else { return nil }
+    return state.tools.statuses.compactMap { id, record in
+      guard record.status == .started else { return nil }
       guard !finished.contains(id) else { return nil }
       guard !state.tools.recoveringIDs.contains(id) else { return nil }
       guard !state.tools.executingIDs.contains(id) else { return nil }
+      // Only stale if past deadline
+      guard now.timeIntervalSince(record.updatedAt) > Self.staleToolCallDeadline else { return nil }
       return id
     }.sorted()
   }
@@ -158,7 +178,7 @@ struct WuhuBehavior: LoopBehavior {
 
   /// Find tool calls in `.pending` status (not yet started).
   private func pendingToolCalls(in state: WuhuState) -> [ToolCall] {
-    let pendingIDs = state.tools.statuses.filter { $0.value == .pending }.map(\.key)
+    let pendingIDs = state.tools.statuses.filter { $0.value.status == .pending }.map(\.key)
     guard !pendingIDs.isEmpty else { return [] }
 
     var calls: [ToolCall] = []

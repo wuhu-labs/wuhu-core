@@ -26,7 +26,10 @@ struct ReadToolImageTests {
       $0.fileIO = io
     } operation: {
       let t = try #require(tools()["read"])
-      let result = try await t.execute(toolCallId: "t1", args: .object(["path": .string("screenshot.png")]))
+      let execResult = try await t.execute(toolCallId: "t1", args: .object(["path": .string("screenshot.png")]))
+      guard case let .immediate(result) = execResult else {
+        Issue.record("Expected immediate result"); return
+      }
 
       // Should have exactly one image content block.
       #expect(result.content.count == 1)
@@ -54,7 +57,10 @@ struct ReadToolImageTests {
       $0.fileIO = io
     } operation: {
       let t = try #require(tools()["read"])
-      let result = try await t.execute(toolCallId: "t2", args: .object(["path": .string("photo.jpg")]))
+      let execResult = try await t.execute(toolCallId: "t2", args: .object(["path": .string("photo.jpg")]))
+      guard case let .immediate(result) = execResult else {
+        Issue.record("Expected immediate result"); return
+      }
 
       #expect(result.content.count == 1)
       guard case let .image(img) = result.content.first else {
@@ -73,7 +79,10 @@ struct ReadToolImageTests {
       $0.fileIO = io
     } operation: {
       let t = try #require(tools()["read"])
-      let result = try await t.execute(toolCallId: "t3", args: .object(["path": .string("hello.txt")]))
+      let execResult = try await t.execute(toolCallId: "t3", args: .object(["path": .string("hello.txt")]))
+      guard case let .immediate(result) = execResult else {
+        Issue.record("Expected immediate result"); return
+      }
 
       guard case let .text(t) = result.content.first else {
         Issue.record("Expected text content block")

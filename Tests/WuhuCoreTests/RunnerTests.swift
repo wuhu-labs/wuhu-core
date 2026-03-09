@@ -362,13 +362,17 @@ struct LocalRunnerTests {
     try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: tmpDir) }
 
-    let result = try await coordinator.runBash(
-      tag: "local-test-1",
-      command: "echo hello",
-      runner: runner,
-      cwd: tmpDir,
-      timeout: 5,
-    )
+    let capture = LocalBashCapture()
+    await coordinator.setResultHandler { _, result in
+      await capture.set(result: result)
+    }
+
+    _ = try await runner.startBash(tag: "local-test-1", command: "echo hello", cwd: tmpDir, timeout: 5)
+
+    // Wait for callback
+    try await Task.sleep(for: .seconds(2))
+
+    let result = try #require(await capture.get())
     #expect(result.exitCode == 0)
     #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello")
     #expect(!result.timedOut)
@@ -755,5 +759,19 @@ struct RunnerRegistryTests {
     let names = await registry.listRunnerNames()
     #expect(names.contains("local"))
     #expect(names.contains("alpha"))
+  }
+}
+
+// MARK: - Test Helpers
+
+private actor LocalBashCapture {
+  var result: BashResult?
+
+  func set(result: BashResult) {
+    self.result = result
+  }
+
+  func get() -> BashResult? {
+    result
   }
 }

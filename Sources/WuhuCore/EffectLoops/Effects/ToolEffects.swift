@@ -79,9 +79,9 @@ extension WuhuBehavior {
         nil
       }
 
-      let results: [(ToolCall, Result<AgentToolResult, any Error>)] =
+      let results: [(ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction)] =
         await withTaskGroup(
-          of: (ToolCall, Result<AgentToolResult, any Error>).self,
+          of: (ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction).self,
         ) { group in
           for call in allowed {
             group.addTask {
@@ -90,19 +90,13 @@ extension WuhuBehavior {
                   throw PiAIError.unsupported("Unknown tool: \(call.name)")
                 }
                 let rawResult = try await tool.execute(toolCallId: call.id, args: call.arguments)
-                let truncated = applyToolResultTruncation(
-                  result: rawResult,
-                  direction: tool.truncationDirection,
-                  toolCallId: call.id,
-                  sessionDir: sessionDir,
-                )
-                return (call, .success(truncated))
+                return (call, .success(rawResult), tool.truncationDirection)
               } catch {
-                return (call, .failure(error))
+                return (call, .failure(error), .head)
               }
             }
           }
-          var outputs: [(ToolCall, Result<AgentToolResult, any Error>)] = []
+          var outputs: [(ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction)] = []
           for await output in group {
             outputs.append(output)
           }
@@ -110,14 +104,20 @@ extension WuhuBehavior {
         }
 
       // Record results
-      for (call, result) in results {
+      for (call, result, truncationDirection) in results {
         let argsHash = call.arguments.hashValue
         switch result {
-        case let .success(toolResult):
-          let resultHash = toolResult.hashValue
+        case let .success(.immediate(toolResult)):
+          let truncated = applyToolResultTruncation(
+            result: toolResult,
+            direction: truncationDirection,
+            toolCallId: call.id,
+            sessionDir: sessionDir,
+          )
+          let resultHash = truncated.hashValue
           await persistToolSuccess(
             call: call,
-            toolResult: toolResult,
+            toolResult: truncated,
             argsHash: argsHash,
             resultHash: resultHash,
             tracker: tracker,
@@ -126,6 +126,11 @@ extension WuhuBehavior {
             blobStore: blobStore,
             send: send,
           )
+
+        case .success(.pending):
+          // Fire-and-forget tool (e.g., bash). Result will arrive via callback.
+          // Tool call stays in .started status. Just clear the executing guard.
+          await send(WuhuAction.tools(.statusSet(id: call.id, status: .started)))
 
         case let .failure(error):
           await persistToolFailure(
@@ -195,6 +200,71 @@ extension WuhuBehavior {
 
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
       await send(WuhuAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
+
+      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+      await send(WuhuAction.status(.updated(status)))
+    }
+  }
+
+  /// Persist a bash result that was delivered from the worker (typically after server restart).
+  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: WuhuState) -> Effect<WuhuAction> {
+    let sessionID = sessionID
+    let store = store
+
+    return Effect { send in
+      // Check if result already exists in transcript (avoid double-persist).
+      let hasResult = state.transcript.entries.contains { entry in
+        guard case let .message(m) = entry.payload else { return false }
+        guard case let .toolResult(t) = m else { return false }
+        return t.toolCallId == toolCallID
+      }
+
+      if hasResult {
+        // Already have a result — just update status and clear recovering flag
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
+        await send(WuhuAction.tools(.completed(
+          id: toolCallID, status: .completed,
+          toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
+        )))
+        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+        await send(WuhuAction.status(.updated(status)))
+        return
+      }
+
+      // Format the bash output similar to how the bash tool does
+      var output = result.output
+      if result.timedOut {
+        output += "\n[timed out]"
+      }
+      if result.terminated {
+        output += "\n[terminated]"
+      }
+
+      let now = Date()
+      let toolResultMessage = WuhuToolResultMessage(
+        toolCallId: toolCallID,
+        toolName: "bash",
+        content: [.text(text: output.isEmpty ? "(no output)" : output, signature: nil)],
+        details: .object([
+          "exit_code": .number(Double(result.exitCode)),
+          "wuhu_recovered": .bool(true),
+        ]),
+        isError: result.exitCode != 0,
+        timestamp: now,
+      )
+
+      let (_, entry) = try await store.appendEntryWithSession(
+        sessionID: sessionID,
+        payload: .message(.toolResult(toolResultMessage)),
+        createdAt: now,
+      )
+      await send(WuhuAction.transcript(.append(entry)))
+
+      _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
+      await send(WuhuAction.tools(.completed(
+        id: toolCallID, status: .completed,
+        toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
+      )))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
       await send(WuhuAction.status(.updated(status)))

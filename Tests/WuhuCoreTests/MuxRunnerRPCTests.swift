@@ -207,16 +207,17 @@ struct MuxRunnerRPCTests {
       #expect(names.contains("hello.txt"))
       #expect(names.contains("new.txt"))
 
-      // Test bash via coordinator (startBash + callback)
-      let bashResult = try await coordinator.runBash(
-        tag: "rpc-bash-1",
-        command: "echo test",
-        runner: client,
-        cwd: "/workspace",
-        timeout: nil,
-      )
-      #expect(bashResult.exitCode == 0)
-      #expect(bashResult.output == "test output\n")
+      // Test bash via fire-and-forget pattern (startBash + callback)
+      let capture = BashResultCapture()
+      await coordinator.setResultHandler { _, result in
+        await capture.set(result: result)
+      }
+      _ = try await client.startBash(tag: "rpc-bash-1", command: "echo test", cwd: "/workspace", timeout: nil)
+      // Wait for callback
+      try await Task.sleep(for: .seconds(1))
+      let receivedResult = await capture.get()
+      #expect(receivedResult?.exitCode == 0)
+      #expect(receivedResult?.output == "test output\n")
 
       // Test createDirectory
       try await client.createDirectory(path: "/workspace/subdir/nested", withIntermediateDirectories: true)
@@ -538,5 +539,17 @@ private actor ErrorHolder {
 
   func get() -> (any Error)? {
     error
+  }
+}
+
+private actor BashResultCapture {
+  var result: BashResult?
+
+  func set(result: BashResult) {
+    self.result = result
+  }
+
+  func get() -> BashResult? {
+    result
   }
 }

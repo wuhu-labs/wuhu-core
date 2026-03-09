@@ -217,7 +217,8 @@ struct NextEffectPriorityTests {
     var state = makeState()
     state.status.snapshot = .init(status: .stopped)
     state.transcript.entries.append(makeUserEntry())
-    state.tools.statuses["tc-1"] = .started
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect == nil)
@@ -254,8 +255,9 @@ struct NextEffectPriorityTests {
     let behavior = try makeBehavior()
     var state = makeRunningState()
 
-    // Set up a stale tool call (started, no result in transcript)
-    state.tools.statuses["tc-1"] = .started
+    // Set up a stale tool call (started, no result in transcript, past deadline)
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     // Also add pending queue items (lower priority)
     state.queue.system = .init(
@@ -274,7 +276,8 @@ struct NextEffectPriorityTests {
   func staleRecoveryGuardToken() throws {
     let behavior = try makeBehavior()
     var state = makeRunningState()
-    state.tools.statuses["tc-1"] = .started
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     let effect1 = behavior.nextEffect(state: &state)
     #expect(effect1 != nil)
@@ -285,7 +288,43 @@ struct NextEffectPriorityTests {
     #expect(effect2 == nil)
   }
 
-  // MARK: - Drain Interrupts (Priority 4)
+  // MARK: - Pending Bash Results (Priority 3)
+
+  @Test("pending bash results processed before stale recovery")
+  func pendingBashResultsProcessed() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+
+    // Add a pending bash result
+    let result = BashResult(exitCode: 0, output: "hello", timedOut: false, terminated: false)
+    state.tools.pendingBashResults["tc-1"] = result
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect != nil)
+    // The pending result should be removed (consumed)
+    #expect(state.tools.pendingBashResults["tc-1"] == nil)
+  }
+
+  @Test("pending bash results take priority over stale recovery")
+  func pendingBashPriorityOverStale() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+
+    // Add both a pending bash result and a stale tool call
+    let result = BashResult(exitCode: 0, output: "hello", timedOut: false, terminated: false)
+    state.tools.pendingBashResults["tc-1"] = result
+
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-2"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
+
+    // First call should handle the pending bash result, not the stale tool
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect != nil)
+    #expect(state.tools.pendingBashResults["tc-1"] == nil) // consumed
+    #expect(!state.tools.recoveringIDs.contains("tc-2")) // not yet started recovering
+  }
+
+  // MARK: - Drain Interrupts (Priority 5)
 
   @Test("drain interrupts when system queue has items")
   func drainInterrupts() throws {
@@ -408,12 +447,12 @@ struct NextEffectPriorityTests {
       ))),
     )
     state.transcript.entries.append(assistantEntry)
-    state.tools.statuses["tc-1"] = .pending
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .pending)
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)
     // Guard token: tool should be marked as started
-    #expect(state.tools.statuses["tc-1"] == .started)
+    #expect(state.tools.statuses["tc-1"]?.status == .started)
   }
 
   // MARK: - Priority Ordering
@@ -425,7 +464,8 @@ struct NextEffectPriorityTests {
     state.cost.isPaused = true
     state.cost.exceededEntryEmitted = true // Already emitted
     state.inference.retryAfter = .now + .seconds(5) // Priority 2
-    state.tools.statuses["tc-1"] = .started // Priority 3 (stale)
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp) // Priority 3 (stale)
     state.transcript.entries.append(makeUserEntry()) // Priority 6
 
     let effect = behavior.nextEffect(state: &state)
@@ -438,7 +478,8 @@ struct NextEffectPriorityTests {
     var state = makeRunningState()
     state.inference.retryAfter = .now + .seconds(5)
     state.inference.status = .waitingRetry
-    state.tools.statuses["tc-1"] = .started // Stale tool
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp) // Stale tool
 
     let effect = behavior.nextEffect(state: &state)
     #expect(effect != nil)

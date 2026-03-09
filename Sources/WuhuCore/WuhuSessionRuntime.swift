@@ -161,6 +161,15 @@ actor WuhuSessionRuntime {
     await loop.send(.cost(.limitCleared))
   }
 
+  /// Deliver a bash result from the worker to the session.
+  /// Called when the coordinator receives a result for a tool call with no waiting continuation
+  /// (typically after server restart when the worker delivers buffered results).
+  func deliverBashResult(toolCallID: String, result: BashResult) async {
+    await ensureStarted()
+    guard let loop else { return }
+    await loop.send(.tools(.bashResultDelivered(toolCallID: toolCallID, result: result)))
+  }
+
   func inProcessExecutionInfo() -> WuhuInProcessExecutionInfo {
     let queued = observedState.queue.followUp.pending.count
     let active = streaming ? 1 : 0

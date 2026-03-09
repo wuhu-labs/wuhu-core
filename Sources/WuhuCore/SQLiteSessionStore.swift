@@ -884,7 +884,7 @@ extension SQLiteSessionStore {
   struct LoopStateParts: Sendable {
     var session: WuhuSession
     var entries: [WuhuSessionEntry]
-    var toolCallStatus: [String: ToolCallStatus]
+    var toolCallStatus: [String: ToolCallRecord]
     var settings: SessionSettingsSnapshot
     var status: SessionStatusSnapshot
     var systemUrgent: SystemUrgentQueueBackfill
@@ -1357,17 +1357,30 @@ extension SQLiteSessionStore {
     }
   }
 
-  func loadToolCallStatus(sessionID: SessionID) async throws -> [String: ToolCallStatus] {
+  func loadToolCallStatus(sessionID: SessionID) async throws -> [String: ToolCallRecord] {
     try await dbQueue.read { db in
       let rows = try ToolCallStatusRow
         .filter(Column("sessionID") == sessionID.rawValue)
         .fetchAll(db)
-      var out: [String: ToolCallStatus] = [:]
+      var out: [String: ToolCallRecord] = [:]
       out.reserveCapacity(rows.count)
       for r in rows {
-        out[r.toolCallID] = ToolCallStatus(rawValue: r.status) ?? .pending
+        let status = ToolCallStatus(rawValue: r.status) ?? .pending
+        out[r.toolCallID] = ToolCallRecord(status: status, updatedAt: r.updatedAt)
       }
       return out
+    }
+  }
+
+  /// Look up which session a tool call belongs to.
+  /// Returns nil if the tool call ID is not found.
+  func lookupSessionForToolCall(toolCallID: String) async throws -> String? {
+    try await dbQueue.read { db in
+      try String.fetchOne(
+        db,
+        sql: "SELECT sessionID FROM tool_call_status WHERE toolCallID = ?",
+        arguments: [toolCallID],
+      )
     }
   }
 
