@@ -43,6 +43,12 @@ public actor WorkerManager: Runner {
   /// Task monitoring the current worker's callback listener.
   private var currentWorkerListenerTask: Task<Void, Never>?
 
+  /// Buffered results from dead workers discovered before upstream is available.
+  private var pendingDeadWorkerResults: [BashFinished] = []
+
+  /// Adopted workers waiting for upstream before starting callback listeners.
+  private var pendingAdoptedWorkers: [(directory: String, connection: any WorkerConnectionHandle)] = []
+
   // MARK: - Init
 
   public init(
@@ -52,7 +58,7 @@ public actor WorkerManager: Runner {
     workerSpawner: any WorkerSpawner,
     workerConnector: any WorkerConnector,
     orphanDeadline: Int = 3600,
-    epochProvider: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970) },
+    epochProvider: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970 * 1000) },
   ) {
     self.runnerName = runnerName
     id = .remote(name: runnerName)
@@ -92,39 +98,43 @@ public actor WorkerManager: Runner {
 
       switch item.result {
       case let .alive(connection):
-        // Adopt alive previous-gen worker for draining
-        let forwarder: WorkerCallbackForwarder? = if let upstream = upstreamCallbacks {
-          WorkerCallbackForwarder(upstream: upstream)
-        } else {
-          nil
-        }
-        if let forwarder {
+        if let upstream = upstreamCallbacks {
+          // Upstream available — wire up and start listening immediately
+          let forwarder = WorkerCallbackForwarder(upstream: upstream)
           await connection.runner.setCallbacks(forwarder)
+          let listenerTask = Task {
+            await connection.startCallbackListener()
+            await self.previousGenWorkerDrained(directory: item.directory)
+          }
+          let state = DrainingWorkerState(
+            connection: connection,
+            forwarder: forwarder,
+            listenerTask: listenerTask,
+            directory: item.directory,
+          )
+          drainingWorkers[item.directory] = state
+        } else {
+          // No upstream yet — defer listener start until setCallbacks
+          pendingAdoptedWorkers.append((directory: item.directory, connection: connection))
         }
-        let listenerTask = Task {
-          await connection.startCallbackListener()
-          // Connection closed — worker is done
-          await self.previousGenWorkerDrained(directory: item.directory)
-        }
-        let state = DrainingWorkerState(
-          connection: connection,
-          forwarder: forwarder,
-          listenerTask: listenerTask,
-          directory: item.directory,
-        )
-        drainingWorkers[item.directory] = state
         logger.info("Adopted worker \(item.directory)")
 
       case let .dead(results):
-        // Deliver dead worker results upstream and clean up
         logger.info("Cleaned up dead worker \(item.directory) (collected \(results.count) results from disk)")
         if let upstream = upstreamCallbacks {
           for finished in results {
             try? await upstream.bashFinished(tag: finished.tag, result: finished.result)
           }
+          // Safe to remove — results delivered
+          try? FileManager.default.removeItem(atPath: dirPath)
+        } else {
+          // Buffer results until upstream connects; keep directory until then
+          pendingDeadWorkerResults.append(contentsOf: results)
+          if results.isEmpty {
+            // No results to buffer — safe to clean up now
+            try? FileManager.default.removeItem(atPath: dirPath)
+          }
         }
-        // Remove the dead worker directory
-        try? FileManager.default.removeItem(atPath: dirPath)
       }
     }
 
@@ -148,6 +158,12 @@ public actor WorkerManager: Runner {
       await state.connection.close()
     }
     drainingWorkers.removeAll()
+
+    for item in pendingAdoptedWorkers {
+      await item.connection.close()
+    }
+    pendingAdoptedWorkers.removeAll()
+    pendingDeadWorkerResults.removeAll()
 
     livenessPipe?.fileHandleForWriting.closeFile()
     livenessPipe = nil
@@ -177,7 +193,7 @@ public actor WorkerManager: Runner {
       await connection.runner.setCallbacks(forwarder)
     }
 
-    // Wire up forwarders for draining workers
+    // Wire up forwarders for already-draining workers
     for (key, state) in drainingWorkers {
       let forwarder = WorkerCallbackForwarder(upstream: callbacks)
       await state.connection.runner.setCallbacks(forwarder)
@@ -187,6 +203,32 @@ public actor WorkerManager: Runner {
         listenerTask: state.listenerTask,
         directory: state.directory,
       )
+    }
+
+    // Drain buffered dead-worker results
+    let pending = pendingDeadWorkerResults
+    pendingDeadWorkerResults.removeAll()
+    for finished in pending {
+      try? await callbacks.bashFinished(tag: finished.tag, result: finished.result)
+    }
+
+    // Start callback listeners for adopted workers that were waiting
+    let adopted = pendingAdoptedWorkers
+    pendingAdoptedWorkers.removeAll()
+    for item in adopted {
+      let forwarder = WorkerCallbackForwarder(upstream: callbacks)
+      await item.connection.runner.setCallbacks(forwarder)
+      let listenerTask = Task {
+        await item.connection.startCallbackListener()
+        await self.previousGenWorkerDrained(directory: item.directory)
+      }
+      let state = DrainingWorkerState(
+        connection: item.connection,
+        forwarder: forwarder,
+        listenerTask: listenerTask,
+        directory: item.directory,
+      )
+      drainingWorkers[item.directory] = state
     }
   }
 
@@ -263,7 +305,7 @@ public actor WorkerManager: Runner {
       socketPath: socketPath,
       outputDir: outputDir,
       orphanDeadline: orphanDeadline,
-      livenessWriteEnd: pipe.fileHandleForWriting,
+      livenessReadEnd: pipe.fileHandleForReading,
     )
 
     logger.info("Spawned worker \(WorkerDirectory.directoryName(runnerName: runnerName, epoch: epoch))")

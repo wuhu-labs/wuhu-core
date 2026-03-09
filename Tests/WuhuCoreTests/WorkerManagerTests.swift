@@ -14,7 +14,7 @@ actor MockWorkerSpawner: WorkerSpawner {
     socketPath: String,
     outputDir: String,
     orphanDeadline: Int,
-    livenessWriteEnd _: FileHandle,
+    livenessReadEnd _: FileHandle,
   ) async throws -> WorkerProcessHandle {
     await recordSpawn(socketPath: socketPath, outputDir: outputDir, orphanDeadline: orphanDeadline)
     return MockProcessHandle()
@@ -390,9 +390,18 @@ struct WorkerManagerTests {
     #expect(connectCalls.contains("\(prevDir)/socket"))
     #expect(connectCalls.contains(expectedCurrentSocket))
 
-    // Verify callback listener started on previous-gen
-    let started = await prevConn.callbackListenerStarted
-    #expect(started)
+    // Before setCallbacks, the adopted worker's listener should NOT have started
+    let startedBefore = await prevConn.callbackListenerStarted
+    #expect(!startedBefore)
+
+    // After setCallbacks, the adopted worker should be wired up and listening
+    let upstream = MockUpstreamCallbacks()
+    await manager.setCallbacks(upstream)
+
+    // Give the listener task a moment to start
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    let startedAfter = await prevConn.callbackListenerStarted
+    #expect(startedAfter)
 
     await manager.stop()
   }
@@ -445,6 +454,57 @@ struct WorkerManagerTests {
     #expect(finishedCalls.count == 1)
     #expect(finishedCalls[0].tag == "dead-t1")
     #expect(finishedCalls[0].result.output == "done")
+
+    await manager.stop()
+  }
+
+  @Test func deadWorkerResultsBufferedUntilCallbacksSet() async throws {
+    let io = InMemoryFileIO()
+    let lockProvider = MockLockProvider()
+    let spawner = MockWorkerSpawner()
+    await spawner.setMockFileIO(io)
+    let connector = MockManagerConnector()
+
+    // Set up a dead previous-gen worker with results
+    let deadDir = "\(workersRoot)/test.worker.400"
+    io.seedDirectory(path: workersRoot)
+    io.seedDirectory(path: deadDir)
+    io.seedFile(path: "\(deadDir)/socket", content: "")
+    io.seedDirectory(path: "\(deadDir)/output")
+    let finished = BashFinished(
+      tag: "buffered-t1",
+      result: BashResult(exitCode: 0, output: "buffered", timedOut: false, terminated: false),
+    )
+    try io.seedFile(path: "\(deadDir)/output/buffered-t1.result", data: JSONEncoder().encode(finished))
+
+    // Current-gen worker
+    let currRunner = MockForwardingRunner()
+    let currConn = MockManagerConnection(runner: currRunner)
+
+    let epochCounter = AtomicEpochCounter(start: 1000)
+    let manager = makeManager(
+      workersRoot: workersRoot, io: io, lockProvider: lockProvider,
+      spawner: spawner, connector: connector, epochCounter: epochCounter,
+    )
+
+    let expectedCurrentSocket = "\(workersRoot)/test.worker.1000/socket"
+    await connector.setConnection(currConn, for: expectedCurrentSocket)
+
+    // Do NOT set callbacks before start — results should be buffered
+    try await withDependencies {
+      $0.fileIO = io
+    } operation: {
+      try await manager.start()
+    }
+
+    // Now set callbacks — buffered results should drain
+    let upstream = MockUpstreamCallbacks()
+    await manager.setCallbacks(upstream)
+
+    let finishedCalls = await upstream.bashFinishedCalls
+    #expect(finishedCalls.count == 1)
+    #expect(finishedCalls[0].tag == "buffered-t1")
+    #expect(finishedCalls[0].result.output == "buffered")
 
     await manager.stop()
   }

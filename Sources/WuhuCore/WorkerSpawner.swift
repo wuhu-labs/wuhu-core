@@ -10,7 +10,7 @@ public protocol WorkerSpawner: Sendable {
     socketPath: String,
     outputDir: String,
     orphanDeadline: Int,
-    livenessWriteEnd: FileHandle,
+    livenessReadEnd: FileHandle,
   ) async throws -> WorkerProcessHandle
 }
 
@@ -30,7 +30,7 @@ public struct RealWorkerSpawner: WorkerSpawner {
     socketPath: String,
     outputDir: String,
     orphanDeadline: Int,
-    livenessWriteEnd: FileHandle,
+    livenessReadEnd: FileHandle,
   ) async throws -> WorkerProcessHandle {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
@@ -41,8 +41,9 @@ public struct RealWorkerSpawner: WorkerSpawner {
       "--orphan-deadline", String(orphanDeadline),
     ]
     process.currentDirectoryURL = URL(fileURLWithPath: "/")
-    // The worker reads stdin for liveness — pipe the write end so EOF = runner gone
-    process.standardInput = livenessWriteEnd
+    // The worker reads stdin for liveness — pass the read end; runner holds write end.
+    // When runner dies, write end closes → worker sees EOF.
+    process.standardInput = livenessReadEnd
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.standardError
 
