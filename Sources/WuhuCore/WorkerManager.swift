@@ -100,15 +100,13 @@ public actor WorkerManager: Runner {
       case let .alive(connection):
         if let upstream = upstreamCallbacks {
           // Upstream available — wire up and start listening immediately
-          let forwarder = WorkerCallbackForwarder(upstream: upstream)
-          await connection.runner.setCallbacks(forwarder)
+          await connection.runner.setCallbacks(upstream)
           let listenerTask = Task {
             await connection.startCallbackListener()
             await self.previousGenWorkerDrained(directory: item.directory)
           }
           let state = DrainingWorkerState(
             connection: connection,
-            forwarder: forwarder,
             listenerTask: listenerTask,
             directory: item.directory,
           )
@@ -187,22 +185,14 @@ public actor WorkerManager: Runner {
   public func setCallbacks(_ callbacks: any RunnerCallbacks) async {
     upstreamCallbacks = callbacks
 
-    // Wire up forwarder for current-gen worker
+    // Wire up callbacks for current-gen worker
     if let worker = currentWorker, let connection = worker.connection {
-      let forwarder = WorkerCallbackForwarder(upstream: callbacks)
-      await connection.runner.setCallbacks(forwarder)
+      await connection.runner.setCallbacks(callbacks)
     }
 
-    // Wire up forwarders for already-draining workers
-    for (key, state) in drainingWorkers {
-      let forwarder = WorkerCallbackForwarder(upstream: callbacks)
-      await state.connection.runner.setCallbacks(forwarder)
-      drainingWorkers[key] = DrainingWorkerState(
-        connection: state.connection,
-        forwarder: forwarder,
-        listenerTask: state.listenerTask,
-        directory: state.directory,
-      )
+    // Wire up callbacks for already-draining workers
+    for (_, state) in drainingWorkers {
+      await state.connection.runner.setCallbacks(callbacks)
     }
 
     // Drain buffered dead-worker results
@@ -216,15 +206,13 @@ public actor WorkerManager: Runner {
     let adopted = pendingAdoptedWorkers
     pendingAdoptedWorkers.removeAll()
     for item in adopted {
-      let forwarder = WorkerCallbackForwarder(upstream: callbacks)
-      await item.connection.runner.setCallbacks(forwarder)
+      await item.connection.runner.setCallbacks(callbacks)
       let listenerTask = Task {
         await item.connection.startCallbackListener()
         await self.previousGenWorkerDrained(directory: item.directory)
       }
       let state = DrainingWorkerState(
         connection: item.connection,
-        forwarder: forwarder,
         listenerTask: listenerTask,
         directory: item.directory,
       )
@@ -318,8 +306,7 @@ public actor WorkerManager: Runner {
 
     // Set callbacks if we have an upstream
     if let upstream = upstreamCallbacks {
-      let forwarder = WorkerCallbackForwarder(upstream: upstream)
-      await connection.runner.setCallbacks(forwarder)
+      await connection.runner.setCallbacks(upstream)
     }
 
     currentWorker = WorkerState(
@@ -405,7 +392,6 @@ private struct WorkerState: Sendable {
 
 private struct DrainingWorkerState: Sendable {
   let connection: any WorkerConnectionHandle
-  let forwarder: WorkerCallbackForwarder?
   let listenerTask: Task<Void, Never>
   let directory: String
 }
