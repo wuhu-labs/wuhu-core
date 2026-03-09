@@ -135,6 +135,8 @@ let package = Package(
         "WuhuRunner",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
+        .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxSocket", package: "wuhu-yamux"),
       ],
       swiftSettings: strictConcurrency,
     ),
