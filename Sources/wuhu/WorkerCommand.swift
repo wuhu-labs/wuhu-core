@@ -62,30 +62,37 @@ struct WorkerCommand: AsyncParsableCommand {
     let orphanMode = OrphanMonitor()
     startLivenessMonitor(orphanMonitor: orphanMode, logger: logger)
 
-    // 8. Start orphan deadline watcher
+    // 8. Set up orphan deadline tracking
     let deadlineSeconds = orphanDeadline
-    Task {
-      await orphanMode.waitForOrphan()
-      logger.info("Runner gone — orphan deadline in \(deadlineSeconds)s")
-      try? await Task.sleep(nanoseconds: UInt64(deadlineSeconds) * 1_000_000_000)
-      let drained = await buffer.allDrained()
-      if drained {
-        logger.info("All results drained, exiting")
-      } else {
-        let remaining = await buffer.pendingCount()
-        logger.warning("Orphan deadline reached with \(remaining) pending results, exiting")
-      }
-      Foundation.exit(0)
-    }
+    let shutdownTracker = OrphanShutdownTracker()
+
+    // Start the initial orphan deadline watcher
+    await shutdownTracker.startDeadline(
+      seconds: deadlineSeconds, orphanMonitor: orphanMode, buffer: buffer, logger: logger,
+      waitForOrphan: true,
+    )
 
     // 9. Accept connections from the runner
     for await connection in listener.connections {
+      // Cancel any pending orphan shutdown — a runner has reconnected
+      await shutdownTracker.cancelDeadline()
+
       let runner = runner
       let name = "worker"
       let logger = logger
       let buffer = buffer
+      let orphanMonitor = orphanMode
       Task {
         await handleConnection(connection, runner: runner, buffer: buffer, name: name, logger: logger)
+
+        // Connection ended — if we're in orphan mode, restart the deadline
+        let isOrphan = await orphanMonitor.isOrphaned()
+        if isOrphan {
+          await shutdownTracker.startDeadline(
+            seconds: deadlineSeconds, orphanMonitor: orphanMonitor, buffer: buffer, logger: logger,
+            waitForOrphan: false,
+          )
+        }
       }
     }
   }
@@ -107,10 +114,50 @@ struct WorkerCommand: AsyncParsableCommand {
     await withTaskGroup(of: Void.self) { group in
       group.addTask { try? await session.run() }
       group.addTask {
-        await MuxRunnerHandler.serve(session: session, runner: runner, name: name)
+        // Pass buffer as callbacks so serve() does NOT call runner.setCallbacks(),
+        // keeping the WorkerCallbackBuffer as the permanent callbacks target.
+        await MuxRunnerHandler.serve(session: session, runner: runner, name: name, callbacks: buffer)
         logger.info("Runner connection ended")
         await buffer.runnerDisconnected()
       }
+    }
+  }
+}
+
+// MARK: - Orphan shutdown tracker
+
+/// Manages the cancellable orphan shutdown task so reconnection can cancel it.
+private actor OrphanShutdownTracker {
+  private var task: Task<Void, Never>?
+
+  func cancelDeadline() {
+    task?.cancel()
+    task = nil
+  }
+
+  func startDeadline(
+    seconds: Int,
+    orphanMonitor: OrphanMonitor,
+    buffer: WorkerCallbackBuffer,
+    logger: Logger,
+    waitForOrphan: Bool,
+  ) {
+    task?.cancel()
+    task = Task {
+      if waitForOrphan {
+        await orphanMonitor.waitForOrphan()
+      }
+      logger.info("Runner gone — orphan deadline in \(seconds)s")
+      try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+      guard !Task.isCancelled else { return }
+      let drained = await buffer.allDrained()
+      if drained {
+        logger.info("All results drained, exiting")
+      } else {
+        let remaining = await buffer.pendingCount()
+        logger.warning("Orphan deadline reached with \(remaining) pending results, exiting")
+      }
+      Foundation.exit(0)
     }
   }
 }
@@ -128,6 +175,10 @@ actor OrphanMonitor {
       waiter.resume()
     }
     waiters.removeAll()
+  }
+
+  func isOrphaned() -> Bool {
+    isOrphan
   }
 
   func waitForOrphan() async {

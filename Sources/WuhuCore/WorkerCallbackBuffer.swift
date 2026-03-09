@@ -1,5 +1,6 @@
 import Dependencies
 import Foundation
+import Logging
 
 /// Disk-backed buffered ``RunnerCallbacks`` for use inside a worker process.
 ///
@@ -17,6 +18,8 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
   /// Root directory for persisted output (e.g. `~/.wuhu/workers/<name>/output/`).
   private let outputDir: String
 
+  private let logger = Logger(label: "WorkerCallbackBuffer")
+
   @Dependency(\.fileIO) private var fileIO
 
   public init(outputDir: String) {
@@ -32,12 +35,23 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
     try? await connection?.bashOutput(tag: tag, chunk: chunk)
   }
 
+  /// Errors thrown when disk persistence fails and there is no live connection
+  /// to fall back on.
+  public enum PersistenceError: Error {
+    case diskWriteFailed(tag: String, underlying: any Error)
+  }
+
   public func bashFinished(tag: String, result: BashResult) async throws {
     let finished = BashFinished(tag: tag, result: result)
+
     // Always persist atomically to disk first
-    persistResultToDisk(finished)
+    let persistError = persistResultToDisk(finished)
 
     if let conn = connection {
+      if let persistError {
+        // Disk failed but we have a live connection — log warning but still forward
+        logger.warning("Disk persist failed for tag \(tag), forwarding to live connection: \(persistError)")
+      }
       do {
         try await conn.bashFinished(tag: tag, result: result)
         // Ack received — clean up disk files
@@ -47,6 +61,10 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
         pending.append(finished)
       }
     } else {
+      if let persistError {
+        // No connection AND disk failed — durability is lost, propagate error
+        throw PersistenceError.diskWriteFailed(tag: tag, underlying: persistError)
+      }
       pending.append(finished)
     }
   }
@@ -113,13 +131,25 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
     let path = (outputDir as NSString).appendingPathComponent("\(tag).out")
     let existing = (try? fileIO.readData(path: path)) ?? Data()
     let appended = existing + Data(chunk.utf8)
-    try? fileIO.writeData(path: path, data: appended, atomically: false)
+    do {
+      try fileIO.writeData(path: path, data: appended, atomically: false)
+    } catch {
+      logger.warning("Failed to append output to disk for tag \(tag): \(error)")
+    }
   }
 
-  private func persistResultToDisk(_ finished: BashFinished) {
+  /// Persist a bash result to disk. Returns the error if persistence failed, nil on success.
+  @discardableResult
+  private func persistResultToDisk(_ finished: BashFinished) -> (any Error)? {
     let path = (outputDir as NSString).appendingPathComponent("\(finished.tag).result")
-    guard let data = try? JSONEncoder().encode(finished) else { return }
-    try? fileIO.writeData(path: path, data: data, atomically: true)
+    do {
+      let data = try JSONEncoder().encode(finished)
+      try fileIO.writeData(path: path, data: data, atomically: true)
+      return nil
+    } catch {
+      logger.warning("Failed to persist result to disk for tag \(finished.tag): \(error)")
+      return error
+    }
   }
 
   private func cleanupDiskFiles(tag: String) {

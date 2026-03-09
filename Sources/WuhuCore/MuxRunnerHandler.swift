@@ -15,12 +15,25 @@ import Mux
 public enum MuxRunnerHandler {
   /// Run the handler loop: accept inbound streams and dispatch them.
   /// Returns when the session closes or is cancelled.
-  public static func serve(session: MuxSession, runner: any Runner, name: String) async {
+  ///
+  /// - Parameter callbacks: Optional pre-configured callbacks. When provided,
+  ///   `setCallbacks` is **not** called on the runner — the caller is responsible
+  ///   for routing callbacks (e.g. through a `WorkerCallbackBuffer`).
+  ///   When `nil` (the default), a `MuxCallbackSender` is created and installed
+  ///   as usual.
+  public static func serve(
+    session: MuxSession,
+    runner: any Runner,
+    name: String,
+    callbacks: (any RunnerCallbacks)? = nil,
+  ) async {
     let handler = RunnerServerHandler(runner: runner, name: name)
 
-    // Set up callback sender so the runner can push bash results back to the server
-    let callbackSender = MuxCallbackSender(session: session)
-    await runner.setCallbacks(callbackSender)
+    if callbacks == nil {
+      // Set up callback sender so the runner can push bash results back to the server
+      let callbackSender = MuxCallbackSender(session: session)
+      await runner.setCallbacks(callbackSender)
+    }
 
     for await stream in session.inbound {
       let handler = handler
