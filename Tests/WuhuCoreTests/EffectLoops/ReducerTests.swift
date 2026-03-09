@@ -392,6 +392,154 @@ struct CostReducerTests {
     reduceCost(state: &state, action: .resume)
     #expect(state.cost.isPaused == false)
   }
+
+  @Test("limitUpdated recomputes budgetRemaining")
+  func limitUpdated() {
+    var state = makeState()
+    state.cost.totalSpent = 50000
+
+    // Set limit to 100_000 → remaining = 50_000
+    reduceCost(state: &state, action: .limitUpdated(100_000))
+    #expect(state.cost.budgetRemaining == 50000)
+    #expect(state.cost.isPaused == false)
+  }
+
+  @Test("limitUpdated pauses when limit is below spent")
+  func limitUpdatedPauses() {
+    var state = makeState()
+    state.cost.totalSpent = 200_000
+
+    reduceCost(state: &state, action: .limitUpdated(100_000))
+    #expect(state.cost.budgetRemaining == -100_000)
+    #expect(state.cost.isPaused == true)
+  }
+
+  @Test("limitUpdated unpauses and clears exceededEntryEmitted")
+  func limitUpdatedUnpauses() {
+    var state = makeState()
+    state.cost.totalSpent = 100_000
+    state.cost.budgetRemaining = -10000
+    state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true
+
+    reduceCost(state: &state, action: .limitUpdated(200_000))
+    #expect(state.cost.budgetRemaining == 100_000)
+    #expect(state.cost.isPaused == false)
+    #expect(state.cost.exceededEntryEmitted == false)
+  }
+
+  @Test("limitCleared removes budget constraint and unpauses")
+  func limitCleared() {
+    var state = makeState()
+    state.cost.totalSpent = 100_000
+    state.cost.budgetRemaining = -10000
+    state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true
+
+    reduceCost(state: &state, action: .limitCleared)
+    #expect(state.cost.budgetRemaining == nil)
+    #expect(state.cost.isPaused == false)
+    #expect(state.cost.exceededEntryEmitted == false)
+    // totalSpent is preserved
+    #expect(state.cost.totalSpent == 100_000)
+  }
+
+  @Test("approved clears exceededEntryEmitted")
+  func approvedClearsExceeded() {
+    var state = makeState()
+    state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true
+    state.cost.budgetRemaining = -10
+
+    reduceCost(state: &state, action: .approved(200))
+    #expect(state.cost.isPaused == false)
+    #expect(state.cost.exceededEntryEmitted == false)
+  }
+}
+
+// MARK: - Pricing Table Tests
+
+@Suite("WuhuPricingTable")
+struct PricingTableTests {
+  @Test("known Anthropic models return expected prices")
+  func knownAnthropicModels() {
+    let opus = WuhuPricingTable.price(provider: .anthropic, model: "claude-opus-4-5")
+    #expect(opus.inputPricePerMTok == 1500)
+    #expect(opus.outputPricePerMTok == 7500)
+
+    let sonnet = WuhuPricingTable.price(provider: .anthropic, model: "claude-sonnet-4-6")
+    #expect(sonnet.inputPricePerMTok == 300)
+    #expect(sonnet.outputPricePerMTok == 1500)
+
+    let haiku = WuhuPricingTable.price(provider: .anthropic, model: "claude-haiku-4-5")
+    #expect(haiku.inputPricePerMTok == 80)
+    #expect(haiku.outputPricePerMTok == 400)
+  }
+
+  @Test("known OpenAI models return expected prices")
+  func knownOpenAIModels() {
+    let gpt5 = WuhuPricingTable.price(provider: .openai, model: "gpt-5")
+    #expect(gpt5.inputPricePerMTok == 200)
+    #expect(gpt5.outputPricePerMTok == 800)
+
+    let codex = WuhuPricingTable.price(provider: .openaiCodex, model: "gpt-5-codex")
+    #expect(codex.inputPricePerMTok == 200)
+    #expect(codex.outputPricePerMTok == 800)
+  }
+
+  @Test("unknown model falls back to Opus pricing")
+  func unknownFallback() {
+    let price = WuhuPricingTable.price(provider: .openai, model: "unknown-model-xyz")
+    #expect(price.inputPricePerMTok == WuhuPricingTable.fallbackPrice.inputPricePerMTok)
+    #expect(price.outputPricePerMTok == WuhuPricingTable.fallbackPrice.outputPricePerMTok)
+  }
+
+  @Test("computeEntryCost calculates correctly")
+  func computeEntryCost() {
+    // 1000 input tokens * 1500 + 500 output tokens * 7500
+    // = 1_500_000 + 3_750_000 = 5_250_000
+    // / 1_000_000 = 5 (integer division)
+    let cost = WuhuPricingTable.computeEntryCost(
+      provider: .anthropic,
+      model: "claude-opus-4-5",
+      usage: WuhuUsage(inputTokens: 1000, outputTokens: 500, totalTokens: 1500),
+    )
+    #expect(cost == 5)
+  }
+
+  @Test("computeCost sums across multiple assistant entries")
+  func computeCostMultipleEntries() {
+    let entries: [WuhuSessionEntry] = [
+      // User message — should be skipped
+      WuhuSessionEntry(
+        id: 1, sessionID: "test", parentEntryID: nil, createdAt: Date(),
+        payload: .message(.user(.init(content: [.text(text: "hi", signature: nil)], timestamp: Date()))),
+      ),
+      // Assistant with usage
+      WuhuSessionEntry(
+        id: 2, sessionID: "test", parentEntryID: nil, createdAt: Date(),
+        payload: .message(.assistant(.init(
+          provider: .anthropic, model: "claude-sonnet-4-5",
+          content: [], usage: WuhuUsage(inputTokens: 10_000_000, outputTokens: 1_000_000, totalTokens: 11_000_000),
+          stopReason: "stop", errorMessage: nil, timestamp: Date(),
+        ))),
+      ),
+      // Assistant without usage — should be skipped
+      WuhuSessionEntry(
+        id: 3, sessionID: "test", parentEntryID: nil, createdAt: Date(),
+        payload: .message(.assistant(.init(
+          provider: .openai, model: "gpt-5",
+          content: [], usage: nil,
+          stopReason: "stop", errorMessage: nil, timestamp: Date(),
+        ))),
+      ),
+    ]
+
+    let cost = WuhuPricingTable.computeCost(entries: entries)
+    // 10M input tokens * 300 + 1M output tokens * 1500 = 3_000_000_000 + 1_500_000_000 = 4_500_000_000
+    // Divided by 1_000_000 = 4_500
+    #expect(cost == 4500)
+  }
 }
 
 // MARK: - Transcript Reducer Tests

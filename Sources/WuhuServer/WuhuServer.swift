@@ -106,8 +106,10 @@ public struct WuhuServer: Sendable {
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
       bashCoordinator: bashCoordinator,
+      defaultCostLimitCents: config.defaultCostLimitCents,
     )
     await service.startAgentLoopManager()
+    await service.resumeRunningSessions()
 
     let router = Router(context: WuhuRequestContext.self)
 
@@ -392,6 +394,14 @@ public struct WuhuServer: Sendable {
       let stopRequest = await (try? request.decode(as: WuhuStopSessionRequest.self, context: context)) ?? WuhuStopSessionRequest()
       let response = try await service.stopSession(sessionID: id, user: stopRequest.user)
       return try context.responseEncoder.encode(response, from: request, context: context)
+    }
+
+    router.post("v1/sessions/:id/cost-limit") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      struct Body: Decodable { var costLimitCents: Int64? }
+      let body = try await request.decode(as: Body.self, context: context)
+      try await service.updateCostLimit(sessionID: id, costLimitCents: body.costLimitCents)
+      return Response(status: .ok)
     }
 
     router.post("v1/sessions/:id/archive") { request, context async throws -> Response in
