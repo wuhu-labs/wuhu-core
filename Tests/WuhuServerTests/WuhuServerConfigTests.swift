@@ -66,6 +66,7 @@ struct WuhuServerConfigTests {
     defer { try? FileManager.default.removeItem(at: tmp) }
 
     let config = try WuhuServerConfig.load(path: tmp.path)
+    // Key absent → $10 fallback (100,000 hundredths-of-a-cent)
     #expect(config.defaultCostLimitCents == WuhuServerConfig.fallbackCostLimitCents)
     #expect(config.defaultCostLimitCents == 100_000)
   }
@@ -73,7 +74,7 @@ struct WuhuServerConfigTests {
   @Test func costLimitExplicitZeroDisablesGating() throws {
     let yaml = """
     databasePath: /tmp/wuhu.sqlite
-    default_cost_limit_cents: 0
+    default_cost_limit: 0
     """
 
     let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -82,14 +83,14 @@ struct WuhuServerConfigTests {
     defer { try? FileManager.default.removeItem(at: tmp) }
 
     let config = try WuhuServerConfig.load(path: tmp.path)
-    // 0 means "disable cost gating" — normalized to nil
+    // 0 means "disable cost gating" → nil
     #expect(config.defaultCostLimitCents == nil)
   }
 
-  @Test func costLimitExplicitValuePreserved() throws {
+  @Test func costLimitExplicitDollarValue() throws {
     let yaml = """
     databasePath: /tmp/wuhu.sqlite
-    default_cost_limit_cents: 500000
+    default_cost_limit: 50
     """
 
     let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -98,6 +99,23 @@ struct WuhuServerConfigTests {
     defer { try? FileManager.default.removeItem(at: tmp) }
 
     let config = try WuhuServerConfig.load(path: tmp.path)
+    // $50 = 500,000 hundredths-of-a-cent
     #expect(config.defaultCostLimitCents == 500_000)
+  }
+
+  @Test func costLimitFractionalDollars() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    default_cost_limit: 2.50
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    // $2.50 = 25,000 hundredths-of-a-cent
+    #expect(config.defaultCostLimitCents == 25000)
   }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import Yams
 
-public struct WuhuServerConfig: Sendable, Hashable, Codable {
+public struct WuhuServerConfig: Sendable, Hashable {
   public struct LLM: Sendable, Hashable, Codable {
     public var openai: String?
     public var anthropic: String?
@@ -33,8 +33,13 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   /// Unix domain socket path for the local runner. If nil, a random
   /// temporary path is used.
   public var localRunnerSocket: String?
-  /// Server-wide default per-session cost limit in hundredths-of-a-cent.
-  /// $10 = 100,000. NULL disables cost gating.
+
+  /// Server-wide default per-session cost limit in hundredths-of-a-cent
+  /// (internal unit). nil = no cost gating.
+  ///
+  /// In the YAML config file, set `default_cost_limit` in **dollars**
+  /// (e.g. `10` or `2.50`). `load()` converts to this internal unit.
+  /// Set to `0` in YAML to explicitly disable cost gating.
   public var defaultCostLimitCents: Int64?
 
   public init(
@@ -61,37 +66,38 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     self.defaultCostLimitCents = defaultCostLimitCents
   }
 
-  enum CodingKeys: String, CodingKey {
-    case llm
-    case databasePath
-    case llmRequestLogDir = "llm_request_log_dir"
-    case workspacePath
-    case host
-    case port
-    case braveSearchAPIKey = "brave_search_api_key"
-    case runners
-    case localRunnerSocket = "local_runner_socket"
-    case defaultCostLimitCents = "default_cost_limit_cents"
-  }
-
   /// Hard-coded fallback: $10 per session (100,000 hundredths-of-a-cent).
-  /// Applied when the YAML key is absent. Set `default_cost_limit_cents: 0`
+  /// Applied when the YAML key is absent. Set `default_cost_limit: 0`
   /// in the config file to explicitly disable cost gating.
   public static let fallbackCostLimitCents: Int64 = 100_000
 
   public static func load(path: String) throws -> WuhuServerConfig {
     let expanded = (path as NSString).expandingTildeInPath
     let text = try String(contentsOfFile: expanded, encoding: .utf8)
-    var config = try YAMLDecoder().decode(WuhuServerConfig.self, from: text)
-    // Codable decoding leaves Optional fields nil when absent in YAML.
-    // Apply the hard-coded fallback so cost gating is always on by default.
-    if config.defaultCostLimitCents == nil {
+    let raw = try YAMLDecoder().decode(RawYAML.self, from: text)
+
+    var config = WuhuServerConfig(
+      llm: raw.llm,
+      databasePath: raw.databasePath,
+      llmRequestLogDir: raw.llmRequestLogDir,
+      workspacePath: raw.workspacePath,
+      host: raw.host,
+      port: raw.port,
+      braveSearchAPIKey: raw.braveSearchAPIKey,
+      runners: raw.runners,
+      localRunnerSocket: raw.localRunnerSocket,
+    )
+
+    // Convert dollars → hundredths-of-a-cent, apply fallback.
+    if let dollars = raw.defaultCostLimit {
+      let cents = Int64((dollars * 10000).rounded())
+      // Explicit 0 means "disable cost gating" → nil.
+      config.defaultCostLimitCents = cents == 0 ? nil : cents
+    } else {
+      // Key absent → apply safety-net fallback.
       config.defaultCostLimitCents = fallbackCostLimitCents
     }
-    // Explicit 0 means "disable cost gating" — normalize to nil.
-    if config.defaultCostLimitCents == 0 {
-      config.defaultCostLimitCents = nil
-    }
+
     return config
   }
 
@@ -110,5 +116,37 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
       .deletingLastPathComponent()
       .appendingPathComponent("workspace", isDirectory: true)
       .path
+  }
+}
+
+// MARK: - Raw YAML representation
+
+/// Intermediate Codable type matching the YAML key names.
+/// `WuhuServerConfig` is not itself Codable — it uses dollars in YAML
+/// but hundredths-of-a-cent in memory, so the mapping is manual.
+private struct RawYAML: Codable {
+  var llm: WuhuServerConfig.LLM?
+  var databasePath: String?
+  var llmRequestLogDir: String?
+  var workspacePath: String?
+  var host: String?
+  var port: Int?
+  var braveSearchAPIKey: String?
+  var runners: [WuhuServerConfig.Runner]?
+  var localRunnerSocket: String?
+  /// Cost limit in dollars (e.g. 10, 2.50). 0 = disable.
+  var defaultCostLimit: Double?
+
+  enum CodingKeys: String, CodingKey {
+    case llm
+    case databasePath
+    case llmRequestLogDir = "llm_request_log_dir"
+    case workspacePath
+    case host
+    case port
+    case braveSearchAPIKey = "brave_search_api_key"
+    case runners
+    case localRunnerSocket = "local_runner_socket"
+    case defaultCostLimit = "default_cost_limit"
   }
 }
