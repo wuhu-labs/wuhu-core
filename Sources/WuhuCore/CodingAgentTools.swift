@@ -376,7 +376,7 @@ private func lsTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     var output = results.joined(separator: "\n")
 
     if entryLimitReached {
-      output += "\n\n[\(effectiveLimit) entries limit reached. Use limit=\(effectiveLimit * 2) for more]"
+      output = "[\(effectiveLimit) entries limit reached. Use limit=\(effectiveLimit * 2) for more]\n\n" + output
     }
 
     let details: JSONValue = entryLimitReached
@@ -436,7 +436,7 @@ private func findTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     var output = limited.joined(separator: "\n")
 
     if resultLimitReached {
-      output += "\n\n[\(effectiveLimit) results limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern]"
+      output = "[\(effectiveLimit) results limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern]\n\n" + output
     }
 
     let details: JSONValue = resultLimitReached
@@ -547,7 +547,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
     }
 
     if !notices.isEmpty {
-      output += "\n\n[\(notices.joined(separator: ". "))]"
+      output = "[\(notices.joined(separator: ". "))]\n\n" + output
     }
 
     return AgentToolResult(content: [.text(output)], details: details.isEmpty ? .object([:]) : .object(details))
@@ -625,6 +625,11 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
 
 /// Format a BashResult into an AgentToolResult.
 /// Returns raw output — truncation is applied by the execution layer in ToolEffects.
+///
+/// For error paths (non-zero exit, timeout, abort), the output is truncated
+/// before throwing so that large build/test logs don't blow up the transcript.
+/// The execution layer's `applyToolResultTruncation` only runs on successful
+/// results, so error output must be truncated here.
 private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
   let output = run.output
   let outputText = output.isEmpty ? "(no output)" : output
@@ -632,14 +637,17 @@ private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
 
   if run.timedOut {
     if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    throw ToolError.message(outputText + "\n\nCommand timed out")
+    let truncated = truncateBashErrorOutput(outputText)
+    throw ToolError.message(truncated + "\n\nCommand timed out")
   }
   if run.terminated {
     if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    throw ToolError.message(outputText + "\n\nCommand aborted")
+    let truncated = truncateBashErrorOutput(outputText)
+    throw ToolError.message(truncated + "\n\nCommand aborted")
   }
   if run.exitCode != 0 {
-    throw ToolError.message(outputText + "\n\nCommand exited with code \(run.exitCode)")
+    let truncated = truncateBashErrorOutput(outputText)
+    throw ToolError.message(truncated + "\n\nCommand exited with code \(run.exitCode)")
   }
 
   // Clean up temp file — disk persistence is now handled by the execution layer.
@@ -647,6 +655,19 @@ private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
     try? FileManager.default.removeItem(atPath: fullOutputPath)
   }
   return AgentToolResult(content: [.text(outputText)], details: .object([:]))
+}
+
+/// Truncate bash error output using tail direction (build/test output is most
+/// useful at the tail). Does not persist to disk — the error path doesn't have
+/// access to the session directory.
+private func truncateBashErrorOutput(_ text: String) -> String {
+  let result = ToolResultTruncation.truncate(text, direction: .tail)
+  guard result.wasTruncated else { return text }
+  var truncated = result.content
+  if let notice = ToolResultTruncation.renderNotice(for: result) {
+    truncated += notice
+  }
+  return truncated
 }
 
 // MARK: - async_bash

@@ -67,7 +67,17 @@ extension WuhuBehavior {
       let tools = await runtimeConfig.tools()
 
       // Resolve the session directory for disk persistence of truncated output.
-      let sessionDir: String? = try? await store.getPrimaryMount(sessionID: sessionID.rawValue)?.path
+      // NOTE: We only persist full output to disk when the primary mount is on the
+      // local runner. ToolEffects runs on the server process, so FileManager writes
+      // target the server filesystem. If the mount belongs to a remote runner, the
+      // persisted path would not be accessible from the agent's active mount, so we
+      // skip disk persistence and omit the path from the truncation notice.
+      let primaryMount: WuhuMount? = try? await store.getPrimaryMount(sessionID: sessionID.rawValue)
+      let sessionDir: String? = if let primaryMount, primaryMount.runnerID == .local {
+        primaryMount.path
+      } else {
+        nil
+      }
 
       let results: [(ToolCall, Result<AgentToolResult, any Error>)] =
         await withTaskGroup(
