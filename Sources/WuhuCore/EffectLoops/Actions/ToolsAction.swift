@@ -8,4 +8,7 @@ enum ToolsAction: Sendable {
   /// Set a tool call status without recording repetition data (e.g., from inference registering pending calls).
   case statusSet(id: String, status: ToolCallStatus)
   case resetRepetitions
+  /// A bash result was delivered for a tool call (typically after server restart recovery).
+  /// The effect loop should persist this result to the transcript.
+  case bashResultDelivered(toolCallID: String, result: BashResult)
 }

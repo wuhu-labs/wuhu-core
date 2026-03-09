@@ -200,6 +200,71 @@ extension WuhuBehavior {
       await send(WuhuAction.status(.updated(status)))
     }
   }
+
+  /// Persist a bash result that was delivered from the worker (typically after server restart).
+  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: WuhuState) -> Effect<WuhuAction> {
+    let sessionID = sessionID
+    let store = store
+
+    return Effect { send in
+      // Check if result already exists in transcript (avoid double-persist).
+      let hasResult = state.transcript.entries.contains { entry in
+        guard case let .message(m) = entry.payload else { return false }
+        guard case let .toolResult(t) = m else { return false }
+        return t.toolCallId == toolCallID
+      }
+
+      if hasResult {
+        // Already have a result — just update status and clear recovering flag
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
+        await send(WuhuAction.tools(.completed(
+          id: toolCallID, status: .completed,
+          toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
+        )))
+        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+        await send(WuhuAction.status(.updated(status)))
+        return
+      }
+
+      // Format the bash output similar to how the bash tool does
+      var output = result.output
+      if result.timedOut {
+        output += "\n[timed out]"
+      }
+      if result.terminated {
+        output += "\n[terminated]"
+      }
+
+      let now = Date()
+      let toolResultMessage = WuhuToolResultMessage(
+        toolCallId: toolCallID,
+        toolName: "bash",
+        content: [.text(text: output.isEmpty ? "(no output)" : output, signature: nil)],
+        details: .object([
+          "exit_code": .number(Double(result.exitCode)),
+          "wuhu_recovered": .bool(true),
+        ]),
+        isError: result.exitCode != 0,
+        timestamp: now,
+      )
+
+      let (_, entry) = try await store.appendEntryWithSession(
+        sessionID: sessionID,
+        payload: .message(.toolResult(toolResultMessage)),
+        createdAt: now,
+      )
+      await send(WuhuAction.transcript(.append(entry)))
+
+      _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
+      await send(WuhuAction.tools(.completed(
+        id: toolCallID, status: .completed,
+        toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
+      )))
+
+      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+      await send(WuhuAction.status(.updated(status)))
+    }
+  }
 }
 
 // MARK: - Tool result persistence helpers

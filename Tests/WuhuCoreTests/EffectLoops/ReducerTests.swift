@@ -282,27 +282,27 @@ struct ToolsReducerTests {
     var state = makeState()
     let call = ToolCall(id: "tc-1", name: "bash", arguments: .object([:]))
     reduceTools(state: &state, action: .willExecute(call))
-    #expect(state.tools.statuses["tc-1"] == .started)
+    #expect(state.tools.statuses["tc-1"]?.status == .started)
   }
 
   @Test("completed updates status and records repetition")
   func completed() {
     var state = makeState()
-    state.tools.statuses["tc-1"] = .started
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started)
     reduceTools(state: &state, action: .completed(
       id: "tc-1", status: .completed,
       toolName: "bash", argsHash: 42, resultHash: 99,
     ))
-    #expect(state.tools.statuses["tc-1"] == .completed)
+    #expect(state.tools.statuses["tc-1"]?.status == .completed)
     #expect(state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42) == 1)
   }
 
   @Test("failed updates status to errored and records repetition")
   func failed() {
     var state = makeState()
-    state.tools.statuses["tc-1"] = .started
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started)
     reduceTools(state: &state, action: .failed(id: "tc-1", status: .errored, toolName: "bash", argsHash: 42))
-    #expect(state.tools.statuses["tc-1"] == .errored)
+    #expect(state.tools.statuses["tc-1"]?.status == .errored)
     #expect(state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42) == 1)
   }
 
@@ -333,6 +333,15 @@ struct ToolsReducerTests {
 
     reduceTools(state: &state, action: .resetRepetitions)
     #expect(state.tools.repetitionTracker.preflightCount(toolName: "bash", argsHash: 42) == 0)
+  }
+
+  @Test("bashResultDelivered stores pending result and sets recovering")
+  func bashResultDelivered() {
+    var state = makeState()
+    let result = BashResult(exitCode: 0, output: "hello", timedOut: false, terminated: false)
+    reduceTools(state: &state, action: .bashResultDelivered(toolCallID: "tc-1", result: result))
+    #expect(state.tools.pendingBashResults["tc-1"] == result)
+    #expect(state.tools.recoveringIDs.contains("tc-1"))
   }
 }
 
@@ -643,23 +652,38 @@ struct WuhuBehaviorStateQueryTests {
     #expect(behavior.needsInference(state: state) == false)
   }
 
-  @Test("staleToolCallIDs finds orphaned tool calls")
+  @Test("staleToolCallIDs finds orphaned tool calls past deadline")
   func staleToolCallIDs() throws {
     let behavior = try makeBehavior()
     var state = makeState()
-    state.tools.statuses["tc-1"] = .started
-    state.tools.statuses["tc-2"] = .pending // pending is not stale — it hasn't been picked up yet
-    state.tools.statuses["tc-3"] = .completed
+    // Use a timestamp in the distant past to simulate a stale tool call
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
+    state.tools.statuses["tc-2"] = ToolCallRecord(status: .pending, updatedAt: oldTimestamp) // pending is not stale — it hasn't been picked up yet
+    state.tools.statuses["tc-3"] = ToolCallRecord(status: .completed, updatedAt: oldTimestamp)
 
     let stale = behavior.staleToolCallIDs(in: state)
     #expect(stale == ["tc-1"]) // Only started (not pending) is stale
+  }
+
+  @Test("staleToolCallIDs does not mark recent tool calls as stale")
+  func staleToolCallRecentNotStale() throws {
+    let behavior = try makeBehavior()
+    var state = makeState()
+    // Recent timestamp — within the deadline
+    let recentTimestamp = Date()
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: recentTimestamp)
+
+    let stale = behavior.staleToolCallIDs(in: state)
+    #expect(stale.isEmpty) // Not stale yet — within deadline
   }
 
   @Test("staleToolCallIDs excludes tool calls currently recovering")
   func staleExcludesRecovering() throws {
     let behavior = try makeBehavior()
     var state = makeState()
-    state.tools.statuses["tc-1"] = .started
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
     state.tools.recoveringIDs.insert("tc-1")
 
     let stale = behavior.staleToolCallIDs(in: state)
@@ -670,7 +694,8 @@ struct WuhuBehaviorStateQueryTests {
   func staleExcludesWithResults() throws {
     let behavior = try makeBehavior()
     var state = makeState()
-    state.tools.statuses["tc-1"] = .started
+    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
     state.transcript.entries.append(makeEntry(payload: .message(.toolResult(.init(
       toolCallId: "tc-1", toolName: "bash", content: [], details: .object([:]), isError: false, timestamp: Date(),
     )))))

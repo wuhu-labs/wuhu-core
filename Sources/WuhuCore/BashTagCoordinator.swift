@@ -1,5 +1,15 @@
 import Foundation
 
+/// Callback for bash results that arrive without a waiting continuation.
+///
+/// This happens when a server restarts and the worker delivers buffered results
+/// for tool calls that were in-flight when the server died. The callback should
+/// route the result to the appropriate session.
+public typealias OrphanedBashResultHandler = @Sendable (
+  _ tag: String,
+  _ result: BashResult,
+) async -> Void
+
 /// Server-side actor that bridges the gap between the fire-and-forget
 /// `startBash` RPC and the tool code that needs to `await` a `BashResult`.
 ///
@@ -17,6 +27,9 @@ import Foundation
 ///   `.cancelled` state; when `runBash` arrives it returns terminated immediately.
 /// - **Result before continuation**: `bashFinished` can arrive before `runBash`
 ///   registers its continuation. The result is buffered in `.resultReady`.
+/// - **Orphaned result**: If `onOrphanedResult` is set and `bashFinished` arrives
+///   with no waiting continuation, the result is routed via the callback instead
+///   of being buffered. This handles server restart recovery.
 /// - **Cancel after result**: `cancel(tag:)` after `bashFinished` is a no-op.
 public actor BashTagCoordinator: RunnerCallbacks {
   /// Per-tag state machine.
@@ -34,7 +47,18 @@ public actor BashTagCoordinator: RunnerCallbacks {
   /// Collected output chunks per tag (optional, for tests/logging).
   private var outputChunks: [String: [String]] = [:]
 
+  /// Handler for bash results that arrive without a waiting continuation.
+  private var onOrphanedResult: OrphanedBashResultHandler?
+
   public init() {}
+
+  /// Set the handler for orphaned bash results.
+  ///
+  /// Call this during server startup to enable routing of recovered results
+  /// to their sessions after a server restart.
+  public func setOrphanedResultHandler(_ handler: @escaping OrphanedBashResultHandler) {
+    onOrphanedResult = handler
+  }
 
   // MARK: - Tool-facing API
 
@@ -123,8 +147,15 @@ public actor BashTagCoordinator: RunnerCallbacks {
 
     case nil:
       // Result arrived before runBash registered its continuation.
-      // Buffer it so runBash can pick it up.
-      tags[tag] = .resultReady(result)
+      // This happens during server restart recovery when the worker delivers
+      // buffered results for tool calls that were in-flight.
+      if let handler = onOrphanedResult {
+        // Route to the session via the handler
+        await handler(tag, result)
+      } else {
+        // No handler — buffer it so runBash can pick it up (legacy behavior)
+        tags[tag] = .resultReady(result)
+      }
     }
   }
 }
