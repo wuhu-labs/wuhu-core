@@ -66,6 +66,19 @@ extension WuhuBehavior {
       // Execute allowed calls in parallel.
       let tools = await runtimeConfig.tools()
 
+      // Resolve the session directory for disk persistence of truncated output.
+      // NOTE: We only persist full output to disk when the primary mount is on the
+      // local runner. ToolEffects runs on the server process, so FileManager writes
+      // target the server filesystem. If the mount belongs to a remote runner, the
+      // persisted path would not be accessible from the agent's active mount, so we
+      // skip disk persistence and omit the path from the truncation notice.
+      let primaryMount: WuhuMount? = try? await store.getPrimaryMount(sessionID: sessionID.rawValue)
+      let sessionDir: String? = if let primaryMount, primaryMount.runnerID == .local {
+        primaryMount.path
+      } else {
+        nil
+      }
+
       let results: [(ToolCall, Result<AgentToolResult, any Error>)] =
         await withTaskGroup(
           of: (ToolCall, Result<AgentToolResult, any Error>).self,
@@ -76,8 +89,14 @@ extension WuhuBehavior {
                 guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
                   throw PiAIError.unsupported("Unknown tool: \(call.name)")
                 }
-                let result = try await tool.execute(toolCallId: call.id, args: call.arguments)
-                return (call, .success(result))
+                let rawResult = try await tool.execute(toolCallId: call.id, args: call.arguments)
+                let truncated = applyToolResultTruncation(
+                  result: rawResult,
+                  direction: tool.truncationDirection,
+                  toolCallId: call.id,
+                  sessionDir: sessionDir,
+                )
+                return (call, .success(truncated))
               } catch {
                 return (call, .failure(error))
               }
@@ -288,4 +307,52 @@ private func persistToolFailure(
     // Best-effort: if even error persistence fails, just send the failure action.
     await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
   }
+}
+
+// MARK: - Tool result truncation
+
+/// Apply the shared truncation system to a tool result's text content blocks.
+/// If truncation occurs and a session directory is available, persist the full output to disk.
+private func applyToolResultTruncation(
+  result: AgentToolResult,
+  direction: ToolResultTruncation.Direction,
+  toolCallId: String,
+  sessionDir: String?,
+) -> AgentToolResult {
+  var modified = result
+
+  // Find the first (and typically only) text content block.
+  guard let textIndex = modified.content.firstIndex(where: {
+    if case .text = $0 { return true }
+    return false
+  }) else {
+    return modified
+  }
+
+  guard case let .text(textBlock) = modified.content[textIndex] else {
+    return modified
+  }
+  let rawText = textBlock.text
+
+  let truncResult = ToolResultTruncation.truncate(rawText, direction: direction)
+  guard truncResult.wasTruncated else { return modified }
+
+  // Persist full output to disk if we have a session directory.
+  var fullOutputPath: String?
+  if let sessionDir {
+    fullOutputPath = ToolResultTruncation.persistFullOutput(
+      content: rawText,
+      sessionDir: sessionDir,
+      toolCallId: toolCallId,
+    )
+  }
+
+  // Build the truncated text with notice.
+  var truncatedText = truncResult.content
+  if let notice = ToolResultTruncation.renderNotice(for: truncResult, fullOutputPath: fullOutputPath) {
+    truncatedText += notice
+  }
+
+  modified.content[textIndex] = .text(.init(text: truncatedText))
+  return modified
 }
