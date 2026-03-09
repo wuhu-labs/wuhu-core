@@ -17,6 +17,7 @@ public actor WuhuService {
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
   public let bashCoordinator: BashTagCoordinator
+  private let defaultCostLimitCents: Int64?
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
@@ -31,6 +32,7 @@ public actor WuhuService {
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry,
     bashCoordinator: BashTagCoordinator = BashTagCoordinator(),
+    defaultCostLimitCents: Int64? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -42,6 +44,7 @@ public actor WuhuService {
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry
     self.bashCoordinator = bashCoordinator
+    self.defaultCostLimitCents = defaultCostLimitCents
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -56,6 +59,25 @@ public actor WuhuService {
 
   public func startAgentLoopManager() async {
     await ensureAsyncBashRouter()
+  }
+
+  /// Resume sessions that were running when the server last stopped.
+  /// Called on server startup after the agent loop manager is ready.
+  public func resumeRunningSessions() async {
+    do {
+      let sessions = try await store.queryRecentlyRunningSessions()
+      for session in sessions {
+        let rt = runtime(for: session.id)
+        await rt.ensureStarted()
+      }
+      if !sessions.isEmpty {
+        let line = "[WuhuService] Resumed \(sessions.count) previously-running session(s)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+      }
+    } catch {
+      let line = "[WuhuService] ERROR: failed to resume running sessions: \(String(describing: error))\n"
+      FileHandle.standardError.write(Data(line.utf8))
+    }
   }
 
   private func ensureAsyncBashRouter() async {
@@ -86,6 +108,7 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
+      defaultCostLimitCents: defaultCostLimitCents,
       onIdle: nil,
     )
     runtimes[sessionID] = runtime
@@ -134,6 +157,19 @@ public actor WuhuService {
 
   public func renameSession(sessionID: String, title: String) async throws -> WuhuSession {
     try await store.renameSession(id: sessionID, title: title)
+  }
+
+  public func updateCostLimit(sessionID: String, costLimitCents: Int64?) async throws {
+    _ = try await store.getSession(id: sessionID)
+    try await store.setCostLimitCents(sessionID: .init(rawValue: sessionID), costLimitCents: costLimitCents)
+
+    // If the session has a running loop, dispatch the new limit
+    if let runtime = runtimes[sessionID] {
+      let effectiveLimit = costLimitCents ?? defaultCostLimitCents
+      if let limit = effectiveLimit {
+        await runtime.dispatchCostLimitUpdated(limit)
+      }
+    }
   }
 
   public func archiveSession(sessionID: String) async throws -> WuhuSession {

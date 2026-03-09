@@ -4,6 +4,11 @@ import PiAI
 actor WuhuSessionRuntimeConfig {
   private var _tools: [AnyAgentTool] = []
   private var _streamFn: StreamFn = PiAI.streamSimple
+  let defaultCostLimitCents: Int64?
+
+  init(defaultCostLimitCents: Int64? = nil) {
+    self.defaultCostLimitCents = defaultCostLimitCents
+  }
 
   func setTools(_ tools: [AnyAgentTool]) {
     _tools = tools

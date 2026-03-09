@@ -32,6 +32,7 @@ actor WuhuSessionRuntime {
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
+    defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
   ) {
     self.sessionID = sessionID
@@ -39,7 +40,7 @@ actor WuhuSessionRuntime {
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
-    runtimeConfig = WuhuSessionRuntimeConfig()
+    runtimeConfig = WuhuSessionRuntimeConfig(defaultCostLimitCents: defaultCostLimitCents)
     behavior = WuhuBehavior(
       sessionID: sessionID, store: store,
       runtimeConfig: runtimeConfig, blobStore: blobStore,
@@ -52,17 +53,26 @@ actor WuhuSessionRuntime {
     let behavior = behavior
     let store = store
     let sessionID = sessionID
+    let runtimeConfig = runtimeConfig
 
     startTask = Task { [weak self] in
       while !Task.isCancelled {
         do {
           let parts = try await store.loadLoopStateParts(sessionID: sessionID)
+          let defaultLimit = await runtimeConfig.defaultCostLimitCents
+
+          // Compute cost from transcript and populate CostState
+          let totalSpent = WuhuPricingTable.computeCost(entries: parts.entries)
+          let costLimit = parts.costLimitCents ?? defaultLimit
+          let budgetRemaining: Int64? = costLimit.map { $0 - totalSpent }
+          let isPaused = budgetRemaining.map { $0 <= 0 } ?? false
+
           let initialState = WuhuState(
             transcript: .init(entries: parts.entries),
             queue: .init(system: parts.systemUrgent, steer: parts.steer, followUp: parts.followUp),
             inference: .empty,
             tools: .init(statuses: parts.toolCallStatus, repetitionTracker: ToolCallRepetitionTracker()),
-            cost: .empty,
+            cost: .init(budgetRemaining: budgetRemaining, totalSpent: totalSpent, isPaused: isPaused, exceededEntryEmitted: false),
             settings: .init(snapshot: parts.settings),
             status: .init(snapshot: parts.status),
           )
@@ -139,6 +149,11 @@ actor WuhuSessionRuntime {
   func currentInflightText() -> String? {
     guard streaming else { return nil }
     return inflightText
+  }
+
+  func dispatchCostLimitUpdated(_ newLimit: Int64) async {
+    guard let loop else { return }
+    await loop.send(.cost(.limitUpdated(newLimit)))
   }
 
   func inProcessExecutionInfo() -> WuhuInProcessExecutionInfo {

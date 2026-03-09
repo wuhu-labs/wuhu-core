@@ -512,6 +512,7 @@ private struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   var updatedAt: Date
   var headEntryID: Int64?
   var tailEntryID: Int64?
+  var costLimitCents: Int64?
 
   func toModel() throws -> WuhuSession {
     guard let provider = WuhuProvider(rawValue: provider) else {
@@ -866,6 +867,13 @@ extension SQLiteSessionStore {
       }
     }
 
+    // ── v8: per-session cost limit ──────────────────────────────────
+    migrator.registerMigration("wuhu_v8_cost_limit") { db in
+      try db.alter(table: "sessions") { t in
+        t.add(column: "costLimitCents", .integer)
+      }
+    }
+
     return migrator
   }()
 }
@@ -882,6 +890,7 @@ extension SQLiteSessionStore {
     var systemUrgent: SystemUrgentQueueBackfill
     var steer: UserQueueBackfill
     var followUp: UserQueueBackfill
+    var costLimitCents: Int64?
   }
 
   struct DrainResult: Sendable {
@@ -900,6 +909,7 @@ extension SQLiteSessionStore {
 
   func loadLoopStateParts(sessionID: SessionID) async throws -> LoopStateParts {
     let session = try await getSession(id: sessionID.rawValue)
+    let costLimitCents = try await loadCostLimitCents(sessionID: sessionID)
     let entries = try await getEntries(sessionID: sessionID.rawValue)
     let toolCallStatus = try await loadToolCallStatus(sessionID: sessionID)
     let settings = try await loadSettingsSnapshot(sessionID: sessionID)
@@ -916,7 +926,40 @@ extension SQLiteSessionStore {
       systemUrgent: systemUrgent,
       steer: steer,
       followUp: followUp,
+      costLimitCents: costLimitCents,
     )
+  }
+
+  func loadCostLimitCents(sessionID: SessionID) async throws -> Int64? {
+    try await dbQueue.read { db in
+      guard let row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
+        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+      }
+      return row.costLimitCents
+    }
+  }
+
+  func setCostLimitCents(sessionID: SessionID, costLimitCents: Int64?) async throws {
+    try await dbQueue.write { db in
+      guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
+        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+      }
+      row.costLimitCents = costLimitCents
+      row.updatedAt = Date()
+      try row.update(db)
+    }
+  }
+
+  func queryRecentlyRunningSessions() async throws -> [WuhuSession] {
+    try await dbQueue.read { db in
+      let cutoff = Date().addingTimeInterval(-24 * 3600)
+      return try SessionRow
+        .filter(Column("executionStatus") == SessionExecutionStatus.running.rawValue)
+        .filter(Column("isArchived") == false)
+        .filter(Column("updatedAt") > cutoff)
+        .fetchAll(db)
+        .map { try $0.toModel() }
+    }
   }
 
   func loadSettingsSnapshot(sessionID: SessionID) async throws -> SessionSettingsSnapshot {

@@ -33,6 +33,9 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   /// Unix domain socket path for the local runner. If nil, a random
   /// temporary path is used.
   public var localRunnerSocket: String?
+  /// Server-wide default per-session cost limit in hundredths-of-a-cent.
+  /// $10 = 100,000. NULL disables cost gating.
+  public var defaultCostLimitCents: Int64?
 
   public init(
     llm: LLM? = nil,
@@ -44,6 +47,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     braveSearchAPIKey: String? = nil,
     runners: [Runner]? = nil,
     localRunnerSocket: String? = nil,
+    defaultCostLimitCents: Int64? = 100_000,
   ) {
     self.llm = llm
     self.databasePath = databasePath
@@ -54,6 +58,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runners = runners
     self.localRunnerSocket = localRunnerSocket
+    self.defaultCostLimitCents = defaultCostLimitCents
   }
 
   enum CodingKeys: String, CodingKey {
@@ -66,6 +71,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     case braveSearchAPIKey = "brave_search_api_key"
     case runners
     case localRunnerSocket = "local_runner_socket"
+    case defaultCostLimitCents = "default_cost_limit_cents"
   }
 
   public static func load(path: String) throws -> WuhuServerConfig {

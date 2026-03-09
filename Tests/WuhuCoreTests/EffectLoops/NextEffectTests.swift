@@ -90,15 +90,22 @@ struct NextEffectPriorityTests {
 
   // MARK: - Cost Gate (Priority 1)
 
-  @Test("cost gate: isPaused returns nil")
+  @Test("cost gate: isPaused emits exceeded entry then returns nil")
   func costGatePaused() throws {
     let behavior = try makeBehavior()
     var state = makeRunningState()
     state.cost.isPaused = true
     // Even with work pending, cost gate blocks
     state.transcript.entries.append(makeUserEntry())
-    let effect = behavior.nextEffect(state: &state)
-    #expect(effect == nil)
+
+    // First call emits the cost-exceeded entry
+    let effect1 = behavior.nextEffect(state: &state)
+    #expect(effect1 != nil) // Emits cost-exceeded entry
+    #expect(state.cost.exceededEntryEmitted == true)
+
+    // Second call returns nil (entry already emitted)
+    let effect2 = behavior.nextEffect(state: &state)
+    #expect(effect2 == nil)
   }
 
   @Test("cost gate: approved resumes, nextEffect proceeds")
@@ -106,10 +113,12 @@ struct NextEffectPriorityTests {
     let behavior = try makeBehavior()
     var state = makeState()
     state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true
 
     // Send approved action to resume
     reduceCost(state: &state, action: .approved(1000))
     #expect(state.cost.isPaused == false)
+    #expect(state.cost.exceededEntryEmitted == false)
 
     // Now nextEffect should not be blocked by cost gate
     // (may still return nil if no other work)
@@ -414,6 +423,7 @@ struct NextEffectPriorityTests {
     let behavior = try makeBehavior()
     var state = makeRunningState()
     state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true // Already emitted
     state.inference.retryAfter = .now + .seconds(5) // Priority 2
     state.tools.statuses["tc-1"] = .started // Priority 3 (stale)
     state.transcript.entries.append(makeUserEntry()) // Priority 6

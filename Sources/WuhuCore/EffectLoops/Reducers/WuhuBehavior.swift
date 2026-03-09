@@ -43,8 +43,14 @@ struct WuhuBehavior: LoopBehavior {
   // MARK: - Next Effect (Priority Ladder)
 
   func nextEffect(state: inout WuhuState) -> Effect<WuhuAction>? {
-    // 1. Cost gate — if paused, idle until .cost(.approved)
-    if state.cost.isPaused { return nil }
+    // 1. Cost gate — if paused, emit exceeded entry then idle
+    if state.cost.isPaused {
+      if !state.cost.exceededEntryEmitted {
+        state.cost.exceededEntryEmitted = true
+        return emitCostExceededEntry(state: state)
+      }
+      return nil
+    }
 
     // 2. Retry backoff — if retryAfter is set, clear guard token and sleep
     if let retryAfter = state.inference.retryAfter {

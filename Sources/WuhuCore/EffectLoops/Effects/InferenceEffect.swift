@@ -72,6 +72,18 @@ extension WuhuBehavior {
         )
         await send(WuhuAction.transcript(.append(entry)))
 
+        // Track cost for this inference
+        if let usage = message.usage {
+          let entryCost = WuhuPricingTable.computeEntryCost(
+            provider: session.provider,
+            model: session.model,
+            usage: WuhuUsage.fromPi(usage),
+          )
+          if entryCost > 0 {
+            await send(WuhuAction.cost(.spent(entryCost)))
+          }
+        }
+
         // Upsert tool call statuses for any tool calls in the response
         let calls = message.content.compactMap { block -> ToolCall? in
           if case let .toolCall(c) = block { return c }
