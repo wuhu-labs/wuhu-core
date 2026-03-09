@@ -28,14 +28,18 @@ enum WuhuPricingTable {
     let haiku = ModelPrice(inputPricePerMTok: 80, outputPricePerMTok: 400)
     table["anthropic:claude-haiku-4-5"] = haiku
 
+    // Anthropic 1M context aliases (same pricing as base model)
+    table["anthropic:claude-opus-4-6[1m]"] = opus
+    table["anthropic:claude-sonnet-4-6[1m]"] = sonnet
+
     // OpenAI
     let gpt5 = ModelPrice(inputPricePerMTok: 200, outputPricePerMTok: 800)
-    for model in ["gpt-5", "gpt-5.1", "gpt-5.2"] {
+    for model in ["gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5-codex", "gpt-5.1-codex", "gpt-5.2-codex"] {
       table["openai:\(model)"] = gpt5
     }
 
     // OpenAI Codex
-    for model in ["gpt-5-codex", "gpt-5.1-codex", "gpt-5.2-codex"] {
+    for model in ["codex-mini-latest", "gpt-5-codex", "gpt-5.1", "gpt-5.1-codex", "gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex"] {
       table["openai-codex:\(model)"] = gpt5
     }
 

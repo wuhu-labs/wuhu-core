@@ -68,6 +68,28 @@ public actor WuhuService {
       let sessions = try await store.queryRecentlyRunningSessions()
       for session in sessions {
         let rt = runtime(for: session.id)
+
+        // Configure runtime with tools + stream fn before starting,
+        // same as enqueue(...) does for new messages.
+        let sid = session.id
+        let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sid, ownerID: instanceID)
+        let mountResolver = MountResolverFactory.make(
+          sessionID: sid,
+          store: store,
+          runnerRegistry: runnerRegistry,
+        )
+        let baseTools = WuhuTools.codingAgentTools(
+          cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
+          mountResolver: mountResolver,
+          asyncBash: asyncBash,
+          braveSearchAPIKey: braveSearchAPIKey,
+          bashCoordinator: bashCoordinator,
+        )
+        let resolvedTools = agentToolset(session: session, baseTools: baseTools)
+        let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sid, purpose: .agent) ?? baseStreamFn
+
+        await rt.setTools(resolvedTools)
+        await rt.setStreamFn(streamFn)
         await rt.ensureStarted()
       }
       if !sessions.isEmpty {
@@ -168,6 +190,8 @@ public actor WuhuService {
       let effectiveLimit = costLimitCents ?? defaultCostLimitCents
       if let limit = effectiveLimit {
         await runtime.dispatchCostLimitUpdated(limit)
+      } else {
+        await runtime.dispatchCostLimitCleared()
       }
     }
   }

@@ -22,6 +22,11 @@ func reduceCost(state: inout WuhuState, action: CostAction) {
       state.cost.exceededEntryEmitted = false
     }
 
+  case .limitCleared:
+    state.cost.budgetRemaining = nil
+    state.cost.isPaused = false
+    state.cost.exceededEntryEmitted = false
+
   case .pause:
     state.cost.isPaused = true
 

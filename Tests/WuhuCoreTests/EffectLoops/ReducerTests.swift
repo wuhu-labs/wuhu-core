@@ -428,6 +428,22 @@ struct CostReducerTests {
     #expect(state.cost.exceededEntryEmitted == false)
   }
 
+  @Test("limitCleared removes budget constraint and unpauses")
+  func limitCleared() {
+    var state = makeState()
+    state.cost.totalSpent = 100_000
+    state.cost.budgetRemaining = -10000
+    state.cost.isPaused = true
+    state.cost.exceededEntryEmitted = true
+
+    reduceCost(state: &state, action: .limitCleared)
+    #expect(state.cost.budgetRemaining == nil)
+    #expect(state.cost.isPaused == false)
+    #expect(state.cost.exceededEntryEmitted == false)
+    // totalSpent is preserved
+    #expect(state.cost.totalSpent == 100_000)
+  }
+
   @Test("approved clears exceededEntryEmitted")
   func approvedClearsExceeded() {
     var state = makeState()

@@ -156,6 +156,11 @@ actor WuhuSessionRuntime {
     await loop.send(.cost(.limitUpdated(newLimit)))
   }
 
+  func dispatchCostLimitCleared() async {
+    guard let loop else { return }
+    await loop.send(.cost(.limitCleared))
+  }
+
   func inProcessExecutionInfo() -> WuhuInProcessExecutionInfo {
     let queued = observedState.queue.followUp.pending.count
     let active = streaming ? 1 : 0

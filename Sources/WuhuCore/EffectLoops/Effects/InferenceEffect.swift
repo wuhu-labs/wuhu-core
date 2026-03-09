@@ -72,11 +72,11 @@ extension WuhuBehavior {
         )
         await send(WuhuAction.transcript(.append(entry)))
 
-        // Track cost for this inference
+        // Track cost for this inference (use resolved model from the response, not the session alias)
         if let usage = message.usage {
           let entryCost = WuhuPricingTable.computeEntryCost(
             provider: session.provider,
-            model: session.model,
+            model: message.model,
             usage: WuhuUsage.fromPi(usage),
           )
           if entryCost > 0 {

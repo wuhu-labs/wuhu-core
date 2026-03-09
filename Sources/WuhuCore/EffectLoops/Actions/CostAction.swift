@@ -5,6 +5,7 @@ enum CostAction: Sendable {
   case spent(Int64)
   case approved(Int64)
   case limitUpdated(Int64)
+  case limitCleared
   case pause
   case resume
 }
