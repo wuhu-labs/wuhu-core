@@ -17,8 +17,9 @@ struct CodingAgentToolsTests {
     return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
   }
 
-  private func textOutput(_ result: AgentToolResult) -> String {
-    result.content.compactMap { block in
+  private func textOutput(_ result: ToolExecutionResult) throws -> String {
+    let agentResult = try result.unwrapImmediate()
+    return agentResult.content.compactMap { block in
       if case let .text(t) = block { return t.text }
       return nil
     }.joined(separator: "\n")
@@ -50,7 +51,7 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "t1", args: .object(["path": .string("test.txt")]))
-      #expect(textOutput(result) == content)
+      #expect(try textOutput(result) == content)
     }
   }
 
@@ -76,7 +77,7 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "t3", args: .object(["path": .string("large.txt")]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(out.contains("Line 1"))
       #expect(out.contains("Line 2000"))
       #expect(!out.contains("Line 2001"))
@@ -94,7 +95,7 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "t4", args: .object(["path": .string("large-bytes.txt")]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(out.contains("Line 1:"))
       #expect(out.contains("Line 500:"))
       // All 500 lines fit within the default 2000-line page size.
@@ -113,7 +114,7 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "t5", args: .object(["path": .string("offset.txt"), "offset": .number(51)]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(!out.contains("Line 50"))
       #expect(out.contains("Line 51"))
       #expect(out.contains("Line 100"))
@@ -131,7 +132,7 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "t6", args: .object(["path": .string("limit.txt"), "limit": .number(10)]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(out.contains("Line 1"))
       #expect(out.contains("Line 10"))
       #expect(!out.contains("Line 11"))
@@ -153,7 +154,7 @@ struct CodingAgentToolsTests {
         toolCallId: "t7",
         args: .object(["path": .string("offset-limit.txt"), "offset": .number(41), "limit": .number(20)]),
       )
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(!out.contains("Line 40"))
       #expect(out.contains("Line 41"))
       #expect(out.contains("Line 60"))
@@ -233,7 +234,7 @@ struct CodingAgentToolsTests {
       let t = try #require(tools()["write"])
       let rel = "nested/dir/file.txt"
       let result = try await t.execute(toolCallId: "w1", args: .object(["path": .string(rel), "content": .string("hello")]))
-      #expect(textOutput(result).contains("Successfully wrote"))
+      #expect(try textOutput(result).contains("Successfully wrote"))
       #expect(io.storedString(path: "\(cwd)/nested/dir/file.txt") == "hello")
     }
   }
@@ -345,7 +346,7 @@ struct CodingAgentToolsTests {
         "limit": .number(1),
         "context": .number(1),
       ]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(out.contains("context.txt-1- before"))
       #expect(out.contains("context.txt:2: match one"))
       #expect(out.contains("context.txt-3- after"))
@@ -371,7 +372,7 @@ struct CodingAgentToolsTests {
         "pattern": .string("**/*.txt"),
         "path": .string(cwd),
       ]))
-      let out = textOutput(result).split(separator: "\n").map { String($0) }
+      let out = try textOutput(result).split(separator: "\n").map { String($0) }
       #expect(out.contains("visible.txt"))
       #expect(out.contains(".secret/hidden.txt"))
       #expect(!out.contains("ignored.txt"))
@@ -390,89 +391,64 @@ struct CodingAgentToolsTests {
     } operation: {
       let t = try #require(tools()["ls"])
       let result = try await t.execute(toolCallId: "l1", args: .object(["path": .string(cwd)]))
-      let out = textOutput(result)
+      let out = try textOutput(result)
       #expect(out.contains(".hidden-file"))
       #expect(out.contains(".hidden-dir/"))
     }
   }
 
-  // MARK: - bash tool (real filesystem — process execution)
+  // MARK: - bash tool (fire-and-forget pattern)
 
-  @Test func bashToolExecutesCommand() async throws {
+  //
+  // The bash tool now returns `.pending` immediately after starting the command.
+  // Results arrive via callback. These tests verify the tool starts commands correctly.
+
+  @Test func bashToolReturnsPending() async throws {
     let dir = try makeTempDir(prefix: "wuhu-bash")
     let t = try #require(realTools(cwd: dir)["bash"])
     let result = try await t.execute(toolCallId: "b1", args: .object(["command": .string("echo 'test output'")]))
-    #expect(textOutput(result).contains("test output"))
+    // Bash tool now returns .pending (fire-and-forget)
+    guard case .pending = result else {
+      Issue.record("Expected .pending, got \(result)")
+      return
+    }
+    // The command will complete asynchronously via callback
   }
 
-  @Test func bashToolTimeoutThrows() async throws {
+  @Test func bashToolTimeoutPassedToRunner() async throws {
+    // When timeout is specified, it's passed to the runner
+    // The actual timeout behavior is tested in BashCancelTests
     let dir = try makeTempDir(prefix: "wuhu-bash-timeout")
     let t = try #require(realTools(cwd: dir)["bash"])
 
-    await #expect(throws: Error.self) {
-      _ = try await t.execute(toolCallId: "b2", args: .object(["command": .string("sleep 5"), "timeout": .number(1)]))
+    // Just verify we can call with timeout (no error during setup)
+    let result = try await t.execute(toolCallId: "b2", args: .object(["command": .string("echo hi"), "timeout": .number(60)]))
+    guard case .pending = result else {
+      Issue.record("Expected .pending, got \(result)")
+      return
     }
   }
 
-  /// Regression test: commands that exit instantly (e.g. `true`, `false`,
-  /// nonexistent binaries) must still produce a tool result. Previously
-  /// `process.waitUntilExit()` could hang when Foundation's dispatch source
-  /// missed the exit notification for fast-exiting processes.
-  @Test func bashToolFastExitingCommandReturns() async throws {
-    let dir = try makeTempDir(prefix: "wuhu-bash-fast-exit")
-    let t = try #require(realTools(cwd: dir)["bash"])
-
-    // `true` exits immediately with code 0
-    let result = try await t.execute(toolCallId: "fast1", args: .object(["command": .string("true")]))
-    let out = textOutput(result)
-    #expect(out == "(no output)" || out.isEmpty || !out.isEmpty) // just needs to return
-
-    // `false` exits immediately with code 1 → should throw ToolError, not hang
-    await #expect(throws: Error.self) {
-      _ = try await t.execute(toolCallId: "fast2", args: .object(["command": .string("false")]))
-    }
-  }
-
-  /// Stress test: run many fast-exiting bash commands concurrently to expose
-  /// any Foundation Process notification races.
-  @Test func bashToolConcurrentFastExits() async throws {
+  /// Test: multiple concurrent bash commands all return pending.
+  @Test func bashToolConcurrentStartsAllReturnPending() async throws {
     let dir = try makeTempDir(prefix: "wuhu-bash-concurrent")
     let t = try #require(realTools(cwd: dir)["bash"])
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      for i in 0 ..< 20 {
+    try await withThrowingTaskGroup(of: ToolExecutionResult.self) { group in
+      for i in 0 ..< 5 {
         group.addTask {
-          let result = try await t.execute(
+          try await t.execute(
             toolCallId: "conc-\(i)",
             args: .object(["command": .string("echo 'run \(i)'")]),
           )
-          let out = textOutput(result)
-          #expect(out.contains("run \(i)"))
         }
       }
-      try await group.waitForAll()
+      for try await result in group {
+        guard case .pending = result else {
+          Issue.record("Expected .pending, got \(result)")
+          return
+        }
+      }
     }
-  }
-
-  /// Test: if swiftformat is installed (Homebrew), running `swiftformat --version`
-  /// should return quickly and produce a result.
-  @Test func bashToolSwiftformatVersionIfInstalled() async throws {
-    let dir = try makeTempDir(prefix: "wuhu-bash-swiftformat")
-    let t = try #require(realTools(cwd: dir)["bash"])
-
-    // Skip if swiftformat isn't installed
-    let whichResult = try? await t.execute(
-      toolCallId: "which-sf",
-      args: .object(["command": .string("which swiftformat")]),
-    )
-    let whichOut = whichResult.map { textOutput($0) } ?? ""
-    guard whichOut.contains("swiftformat") else { return }
-
-    let result = try await t.execute(
-      toolCallId: "sf-version",
-      args: .object(["command": .string("swiftformat --version")]),
-    )
-    let out = textOutput(result)
-    #expect(!out.isEmpty)
   }
 }

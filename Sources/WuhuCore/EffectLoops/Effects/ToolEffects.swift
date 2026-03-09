@@ -79,9 +79,9 @@ extension WuhuBehavior {
         nil
       }
 
-      let results: [(ToolCall, Result<AgentToolResult, any Error>)] =
+      let results: [(ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction)] =
         await withTaskGroup(
-          of: (ToolCall, Result<AgentToolResult, any Error>).self,
+          of: (ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction).self,
         ) { group in
           for call in allowed {
             group.addTask {
@@ -90,19 +90,13 @@ extension WuhuBehavior {
                   throw PiAIError.unsupported("Unknown tool: \(call.name)")
                 }
                 let rawResult = try await tool.execute(toolCallId: call.id, args: call.arguments)
-                let truncated = applyToolResultTruncation(
-                  result: rawResult,
-                  direction: tool.truncationDirection,
-                  toolCallId: call.id,
-                  sessionDir: sessionDir,
-                )
-                return (call, .success(truncated))
+                return (call, .success(rawResult), tool.truncationDirection)
               } catch {
-                return (call, .failure(error))
+                return (call, .failure(error), .head)
               }
             }
           }
-          var outputs: [(ToolCall, Result<AgentToolResult, any Error>)] = []
+          var outputs: [(ToolCall, Result<ToolExecutionResult, any Error>, ToolResultTruncation.Direction)] = []
           for await output in group {
             outputs.append(output)
           }
@@ -110,14 +104,20 @@ extension WuhuBehavior {
         }
 
       // Record results
-      for (call, result) in results {
+      for (call, result, truncationDirection) in results {
         let argsHash = call.arguments.hashValue
         switch result {
-        case let .success(toolResult):
-          let resultHash = toolResult.hashValue
+        case let .success(.immediate(toolResult)):
+          let truncated = applyToolResultTruncation(
+            result: toolResult,
+            direction: truncationDirection,
+            toolCallId: call.id,
+            sessionDir: sessionDir,
+          )
+          let resultHash = truncated.hashValue
           await persistToolSuccess(
             call: call,
-            toolResult: toolResult,
+            toolResult: truncated,
             argsHash: argsHash,
             resultHash: resultHash,
             tracker: tracker,
@@ -126,6 +126,11 @@ extension WuhuBehavior {
             blobStore: blobStore,
             send: send,
           )
+
+        case .success(.pending):
+          // Fire-and-forget tool (e.g., bash). Result will arrive via callback.
+          // Tool call stays in .started status. Just clear the executing guard.
+          await send(WuhuAction.tools(.statusSet(id: call.id, status: .started)))
 
         case let .failure(error):
           await persistToolFailure(

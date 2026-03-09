@@ -72,58 +72,68 @@ struct BashCancelTests {
     }
   }
 
-  /// Test BashTagCoordinator cancel flow: start → cancel → result is terminated.
-  @Test func coordinatorCancelBeforeResult() async throws {
-    let runner = SlowBashRunner(delay: .seconds(60))
+  /// Test that coordinator routes bashFinished from runner to handler.
+  @Test func coordinatorRoutesBashFinished() async throws {
+    let runner = SlowBashRunner(delay: .milliseconds(10))
     let coordinator = BashTagCoordinator()
     await runner.setCallbacks(coordinator)
 
-    let tag = "coord-cancel-1"
-
-    // Start runBash in background — it will wait for bashFinished
-    let bashTask = Task {
-      try await coordinator.runBash(
-        tag: tag,
-        command: "sleep 60",
-        runner: runner,
-        cwd: "/tmp",
-        timeout: nil,
-      )
+    let capture = ResultCapture()
+    await coordinator.setResultHandler { tag, result in
+      await capture.set(tag: tag, result: result)
     }
 
-    // Give it time to enter the continuation
-    try await Task.sleep(for: .milliseconds(50))
+    // Start bash — it will complete after 10ms delay
+    _ = try await runner.startBash(tag: "coord-1", command: "echo", cwd: "/tmp", timeout: nil)
 
-    // Cancel via coordinator
-    await coordinator.cancel(tag: tag, runner: runner)
+    // Wait for the delayed completion
+    try await Task.sleep(for: .seconds(1))
 
-    // Should return terminated
-    let result = try await bashTask.value
-    #expect(result.terminated == true)
-    #expect(result.exitCode == -15)
+    let (receivedTag, receivedResult) = await capture.get()
+    #expect(receivedTag == "coord-1")
+    #expect(receivedResult?.exitCode == 0)
   }
 
-  /// Test BashTagCoordinator pre-cancel: cancel before start.
-  @Test func coordinatorPreCancel() async throws {
+  /// Test that cancelled bash delivers terminated result to coordinator.
+  @Test func coordinatorReceivesCancelledResult() async throws {
     let runner = SlowBashRunner(delay: .seconds(60))
     let coordinator = BashTagCoordinator()
     await runner.setCallbacks(coordinator)
 
-    let tag = "pre-cancel-1"
+    let capture = ResultCapture()
+    await coordinator.setResultHandler { tag, result in
+      await capture.set(tag: tag, result: result)
+    }
 
-    // Cancel before start
-    await coordinator.cancel(tag: tag, runner: runner)
+    // Start bash
+    _ = try await runner.startBash(tag: "cancel-1", command: "sleep 60", cwd: "/tmp", timeout: nil)
 
-    // Now start — should return terminated immediately
-    let result = try await coordinator.runBash(
-      tag: tag,
-      command: "sleep 60",
-      runner: runner,
-      cwd: "/tmp",
-      timeout: nil,
-    )
-    #expect(result.terminated == true)
-    #expect(result.exitCode == -15)
+    // Cancel it
+    _ = try await runner.cancelBash(tag: "cancel-1")
+
+    // Wait for the cancellation result to be delivered
+    try await Task.sleep(for: .seconds(1))
+
+    let (receivedTag, receivedResult) = await capture.get()
+    #expect(receivedTag == "cancel-1")
+    #expect(receivedResult?.terminated == true)
+    #expect(receivedResult?.exitCode == -15)
+  }
+}
+
+// MARK: - ResultCapture
+
+private actor ResultCapture {
+  var tag: String?
+  var result: BashResult?
+
+  func set(tag: String, result: BashResult) {
+    self.tag = tag
+    self.result = result
+  }
+
+  func get() -> (String?, BashResult?) {
+    (tag, result)
   }
 }
 

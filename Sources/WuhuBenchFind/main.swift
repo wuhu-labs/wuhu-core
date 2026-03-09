@@ -175,7 +175,10 @@ private func runWuhuFind(options: Options) async throws -> [String] {
   }
 
   let result = try await tool.execute(toolCallId: "bench_find", args: .object(args))
-  let text = result.content.compactMap { block -> String? in
+  guard case let .immediate(agentResult) = result else {
+    fatalError("Expected immediate result from find tool")
+  }
+  let text = agentResult.content.compactMap { block -> String? in
     if case let .text(part) = block { return part.text }
     return nil
   }.joined(separator: "\n")

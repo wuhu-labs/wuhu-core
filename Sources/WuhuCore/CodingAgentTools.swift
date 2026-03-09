@@ -11,7 +11,6 @@ public extension WuhuTools {
     mountResolver: @escaping MountResolver,
     asyncBash: WuhuAsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
-    bashCoordinator: BashTagCoordinator? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
       readTool(mountResolver: mountResolver),
@@ -20,7 +19,7 @@ public extension WuhuTools {
       lsTool(mountResolver: mountResolver),
       findTool(mountResolver: mountResolver),
       grepTool(mountResolver: mountResolver),
-      bashTool(mountResolver: mountResolver, bashCoordinator: bashCoordinator),
+      bashTool(mountResolver: mountResolver),
       asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
       asyncBashStatusTool(context: asyncBash),
     ]
@@ -556,7 +555,7 @@ private func grepTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
 // MARK: - bash
 
-private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: BashTagCoordinator?) -> AnyAgentTool {
+private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -597,77 +596,17 @@ private func bashTool(mountResolver: @escaping MountResolver, bashCoordinator: B
     let resolved = try await mountResolver(params.mount)
     let runner = resolved.runner
 
-    // Use the tool call ID as the cancellation tag.
-    let tag = toolCallId
+    // Fire-and-forget: start bash and return immediately.
+    // Result will arrive via bashFinished callback → bashResultDelivered action.
+    _ = try await runner.startBash(
+      tag: toolCallId,
+      command: params.command,
+      cwd: resolved.cwd,
+      timeout: params.timeout,
+    )
 
-    let run: BashResult = if let coordinator = bashCoordinator {
-      // v3 protocol: fire-and-forget start + await callback via coordinator.
-      try await withTaskCancellationHandler {
-        try await coordinator.runBash(
-          tag: tag,
-          command: params.command,
-          runner: runner,
-          cwd: resolved.cwd,
-          timeout: params.timeout,
-        )
-      } onCancel: {
-        Task {
-          await coordinator.cancel(tag: tag, runner: runner)
-        }
-      }
-    } else {
-      // Fallback for tests without coordinator: use LocalBash directly.
-      try await LocalBash.run(command: params.command, cwd: resolved.cwd, timeoutSeconds: params.timeout)
-    }
-    return try formatBashResult(run)
+    return .pending
   }
-}
-
-/// Format a BashResult into an AgentToolResult.
-/// Returns raw output — truncation is applied by the execution layer in ToolEffects.
-///
-/// For error paths (non-zero exit, timeout, abort), the output is truncated
-/// before throwing so that large build/test logs don't blow up the transcript.
-/// The execution layer's `applyToolResultTruncation` only runs on successful
-/// results, so error output must be truncated here.
-private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
-  let output = run.output
-  let outputText = output.isEmpty ? "(no output)" : output
-  let fullOutputPath = run.fullOutputPath ?? ""
-
-  if run.timedOut {
-    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    let truncated = truncateBashErrorOutput(outputText)
-    throw ToolError.message(truncated + "\n\nCommand timed out")
-  }
-  if run.terminated {
-    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    let truncated = truncateBashErrorOutput(outputText)
-    throw ToolError.message(truncated + "\n\nCommand aborted")
-  }
-  if run.exitCode != 0 {
-    let truncated = truncateBashErrorOutput(outputText)
-    throw ToolError.message(truncated + "\n\nCommand exited with code \(run.exitCode)")
-  }
-
-  // Clean up temp file — disk persistence is now handled by the execution layer.
-  if !fullOutputPath.isEmpty {
-    try? FileManager.default.removeItem(atPath: fullOutputPath)
-  }
-  return AgentToolResult(content: [.text(outputText)], details: .object([:]))
-}
-
-/// Truncate bash error output using tail direction (build/test output is most
-/// useful at the tail). Does not persist to disk — the error path doesn't have
-/// access to the session directory.
-private func truncateBashErrorOutput(_ text: String) -> String {
-  let result = ToolResultTruncation.truncate(text, direction: .tail)
-  guard result.wasTruncated else { return text }
-  var truncated = result.content
-  if let notice = ToolResultTruncation.renderNotice(for: result) {
-    truncated += notice
-  }
-  return truncated
 }
 
 // MARK: - async_bash

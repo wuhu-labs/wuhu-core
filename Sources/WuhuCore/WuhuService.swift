@@ -59,30 +59,30 @@ public actor WuhuService {
 
   public func startAgentLoopManager() async {
     await ensureAsyncBashRouter()
-    await setupOrphanedBashResultHandler()
+    await setupBashResultHandler()
   }
 
-  /// Set up the handler for bash results that arrive without a waiting continuation.
-  /// This routes recovered results to the appropriate session after server restart.
-  private func setupOrphanedBashResultHandler() async {
-    await bashCoordinator.setOrphanedResultHandler { [weak self] tag, result in
+  /// Set up the handler for bash results from the worker.
+  /// Routes results to the appropriate session.
+  private func setupBashResultHandler() async {
+    await bashCoordinator.setResultHandler { [weak self] tag, result in
       guard let self else { return }
-      await handleOrphanedBashResult(toolCallID: tag, result: result)
+      await handleBashResult(toolCallID: tag, result: result)
     }
   }
 
-  /// Route an orphaned bash result to the session that owns the tool call.
-  private func handleOrphanedBashResult(toolCallID: String, result: BashResult) async {
+  /// Route a bash result to the session that owns the tool call.
+  private func handleBashResult(toolCallID: String, result: BashResult) async {
     do {
       guard let sessionID = try await store.lookupSessionForToolCall(toolCallID: toolCallID) else {
-        let line = "[WuhuService] WARNING: orphaned bash result for unknown tool call '\(toolCallID)'\n"
+        let line = "[WuhuService] WARNING: bash result for unknown tool call '\(toolCallID)'\n"
         FileHandle.standardError.write(Data(line.utf8))
         return
       }
       let rt = runtime(for: sessionID)
       await rt.deliverBashResult(toolCallID: toolCallID, result: result)
     } catch {
-      let line = "[WuhuService] ERROR: failed to route orphaned bash result: \(String(describing: error))\n"
+      let line = "[WuhuService] ERROR: failed to route bash result: \(String(describing: error))\n"
       FileHandle.standardError.write(Data(line.utf8))
     }
   }
@@ -109,7 +109,6 @@ public actor WuhuService {
           mountResolver: mountResolver,
           asyncBash: asyncBash,
           braveSearchAPIKey: braveSearchAPIKey,
-          bashCoordinator: bashCoordinator,
         )
         let resolvedTools = agentToolset(session: session, baseTools: baseTools)
         let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sid, purpose: .agent) ?? baseStreamFn
@@ -664,7 +663,6 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       mountResolver: mountResolver,
       asyncBash: asyncBash,
       braveSearchAPIKey: braveSearchAPIKey,
-      bashCoordinator: bashCoordinator,
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
