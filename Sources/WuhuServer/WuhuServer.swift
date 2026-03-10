@@ -13,6 +13,8 @@ public struct WuhuServer: Sendable {
   public init() {}
 
   public func run(configPath: String?, llmRequestLogDir: String? = nil) async throws {
+    WuhuDebugLogger.bootstrapIfNeeded()
+
     let path = (configPath?.isEmpty == false) ? configPath! : WuhuServerConfig.defaultPath()
     let config = try WuhuServerConfig.load(path: path)
 

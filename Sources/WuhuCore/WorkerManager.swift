@@ -3,6 +3,8 @@ import Foundation
 import Logging
 import WuhuAPI
 
+private let debugLogger = WuhuDebugLogger.logger("WorkerManager")
+
 /// Manages runner workers: owns the flock, spawns the current-gen worker,
 /// drains previous-gen workers, and handles crash/respawn.
 ///
@@ -173,13 +175,55 @@ public actor WorkerManager: Runner {
   // MARK: - Runner protocol (forwarded to current-gen worker)
 
   public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    let commandPreview = String(command.prefix(50))
+    debugLogger.debug(
+      "runner forwarding startBash to worker",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "cwd": "\(cwd)",
+        "timeout": "\(timeout.map { String($0) } ?? "none")",
+        "commandPreview": "\(commandPreview)",
+      ],
+    )
+
     let runner = try currentRunner()
-    return try await runner.startBash(tag: tag, command: command, cwd: cwd, timeout: timeout)
+    let result = try await runner.startBash(tag: tag, command: command, cwd: cwd, timeout: timeout)
+
+    debugLogger.debug(
+      "runner received startBash response from worker",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "alreadyRunning": "\(result.alreadyRunning)",
+      ],
+    )
+
+    return result
   }
 
   public func cancelBash(tag: String) async throws -> BashCancelResult {
+    debugLogger.debug(
+      "runner forwarding cancelBash to worker",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+      ],
+    )
+
     let runner = try currentRunner()
-    return try await runner.cancelBash(tag: tag)
+    let result = try await runner.cancelBash(tag: tag)
+
+    debugLogger.debug(
+      "runner received cancelBash response from worker",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "result": "\(result.rawValue)",
+      ],
+    )
+
+    return result
   }
 
   public func setCallbacks(_ callbacks: any RunnerCallbacks) async {

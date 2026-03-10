@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import PiAI
 import Subprocess
 
@@ -7,6 +8,8 @@ import Subprocess
 #else
   @preconcurrency import SystemPackage
 #endif
+
+private let logger = WuhuDebugLogger.logger("LocalBash")
 
 /// Callback type for incremental bash output chunks.
 public typealias BashOutputCallback = @Sendable (String) async -> Void
@@ -23,12 +26,14 @@ public enum LocalBash {
   ///   - command: The bash command to execute
   ///   - cwd: Working directory for the process
   ///   - timeoutSeconds: Optional timeout in seconds
+  ///   - tag: Optional tag for log correlation (from tool call ID)
   ///   - outputCallback: Optional callback for incremental output chunks (~5s intervals)
   /// - Returns: The final `BashResult`
   public static func run(
     command: String,
     cwd: String,
     timeoutSeconds: TimeInterval?,
+    tag: String? = nil,
     outputCallback: BashOutputCallback? = nil,
   ) async throws -> BashResult {
     let outputURL = FileManager.default.temporaryDirectory
@@ -79,11 +84,14 @@ public enum LocalBash {
     wait $!
     """
 
+    let commandPreview = String(command.prefix(50))
+    let tagForLog = tag ?? "none"
+
     // When there's a timeout, we race the subprocess against a timer.
     // When the parent task is cancelled, the teardownSequence handles cleanup.
     if let timeoutSeconds, timeoutSeconds > 0 {
       return try await withThrowingTaskGroup(of: BashRunOutcome.self, returning: BashResult.self) { group in
-        // Task 1: Run the subprocess
+        // Task 1: Run the subprocess with closure to get PID immediately
         group.addTask {
           let result = try await Subprocess.run(
             .path("/bin/bash"),
@@ -94,8 +102,38 @@ public enum LocalBash {
             input: .none,
             output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
             error: .discarded,
+          ) { execution -> Int32 in
+            let pid = execution.processIdentifier.value
+            logger.debug(
+              "process started",
+              metadata: [
+                "tag": "\(tagForLog)",
+                "pid": "\(pid)",
+                "cwd": "\(cwd)",
+                "timeout": "\(timeoutSeconds)",
+                "commandPreview": "\(commandPreview)",
+              ],
+            )
+            // Return PID from closure so we can access it after completion
+            return pid
+          }
+
+          let pid = result.value
+          let exitCode: Int32 = switch result.terminationStatus {
+          case let .exited(code): code
+          case let .unhandledException(sig): -sig
+          }
+
+          logger.debug(
+            "process exited",
+            metadata: [
+              "tag": "\(tagForLog)",
+              "pid": "\(pid)",
+              "exitCode": "\(exitCode)",
+            ],
           )
-          return .completed(result.terminationStatus)
+
+          return .completed(result.terminationStatus, pid: pid)
         }
 
         // Task 2: Timeout timer
@@ -124,9 +162,16 @@ public enum LocalBash {
         group.cancelAll()
 
         switch first ?? .timedOut {
-        case let .completed(status):
+        case let .completed(status, _):
           return makeResult(terminationStatus: status, outputURL: outputURL, timedOut: false, terminated: false)
         case .timedOut:
+          logger.debug(
+            "process timed out",
+            metadata: [
+              "tag": "\(tagForLog)",
+              "timeout": "\(timeoutSeconds)",
+            ],
+          )
           // The subprocess task gets cancelled → teardownSequence runs
           // Wait for the subprocess task to finish cleanup
           _ = try? await group.next()
@@ -151,8 +196,36 @@ public enum LocalBash {
             input: .none,
             output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
             error: .discarded,
+          ) { execution -> Int32 in
+            let pid = execution.processIdentifier.value
+            logger.debug(
+              "process started",
+              metadata: [
+                "tag": "\(tagForLog)",
+                "pid": "\(pid)",
+                "cwd": "\(cwd)",
+                "commandPreview": "\(commandPreview)",
+              ],
+            )
+            return pid
+          }
+
+          let pid = result.value
+          let exitCode: Int32 = switch result.terminationStatus {
+          case let .exited(code): code
+          case let .unhandledException(sig): -sig
+          }
+
+          logger.debug(
+            "process exited",
+            metadata: [
+              "tag": "\(tagForLog)",
+              "pid": "\(pid)",
+              "exitCode": "\(exitCode)",
+            ],
           )
-          return .completed(result.terminationStatus)
+
+          return .completed(result.terminationStatus, pid: pid)
         }
 
         group.addTask {
@@ -162,7 +235,10 @@ public enum LocalBash {
 
         var status: TerminationStatus?
         while let result = try await group.next() {
-          if case let .completed(s) = result { status = s; break }
+          if case let .completed(s, _) = result {
+            status = s
+            break
+          }
         }
         group.cancelAll()
 
@@ -174,7 +250,7 @@ public enum LocalBash {
         )
       }
     } else {
-      // No timeout: simple collected run. Task cancellation triggers teardownSequence.
+      // No timeout: simple run with closure to log PID at start.
       let result = try await Subprocess.run(
         .path("/bin/bash"),
         arguments: ["-lc", wrappedCommand],
@@ -184,7 +260,35 @@ public enum LocalBash {
         input: .none,
         output: .fileDescriptor(outputFD, closeAfterSpawningProcess: true),
         error: .discarded,
+      ) { execution -> Int32 in
+        let pid = execution.processIdentifier.value
+        logger.debug(
+          "process started",
+          metadata: [
+            "tag": "\(tagForLog)",
+            "pid": "\(pid)",
+            "cwd": "\(cwd)",
+            "commandPreview": "\(commandPreview)",
+          ],
+        )
+        return pid
+      }
+
+      let pid = result.value
+      let exitCode: Int32 = switch result.terminationStatus {
+      case let .exited(code): code
+      case let .unhandledException(sig): -sig
+      }
+
+      logger.debug(
+        "process exited",
+        metadata: [
+          "tag": "\(tagForLog)",
+          "pid": "\(pid)",
+          "exitCode": "\(exitCode)",
+        ],
       )
+
       return makeResult(
         terminationStatus: result.terminationStatus,
         outputURL: outputURL,
@@ -197,7 +301,7 @@ public enum LocalBash {
   // MARK: - Private
 
   private enum BashRunOutcome: Sendable {
-    case completed(TerminationStatus)
+    case completed(TerminationStatus, pid: Int32)
     case timedOut
     case outputStreamDone
   }

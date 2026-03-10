@@ -2,6 +2,8 @@ import Dependencies
 import Foundation
 import Logging
 
+private let debugLogger = WuhuDebugLogger.logger("WorkerCallbackBuffer")
+
 /// Disk-backed buffered ``RunnerCallbacks`` for use inside a worker process.
 ///
 /// Always persists bash results to disk before acknowledging. When a runner
@@ -29,6 +31,14 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
   // MARK: - RunnerCallbacks
 
   public func bashOutput(tag: String, chunk: String) async throws {
+    debugLogger.debug(
+      "worker buffer received bashOutput",
+      metadata: [
+        "tag": "\(tag)",
+        "chunkSize": "\(chunk.count)",
+        "hasConnection": "\(connection != nil)",
+      ],
+    )
     // Always append to disk
     appendOutputToDisk(tag: tag, chunk: chunk)
     // Forward to live connection (best-effort)
@@ -42,6 +52,18 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
   }
 
   public func bashFinished(tag: String, result: BashResult) async throws {
+    debugLogger.debug(
+      "worker buffer received bashFinished",
+      metadata: [
+        "tag": "\(tag)",
+        "exitCode": "\(result.exitCode)",
+        "timedOut": "\(result.timedOut)",
+        "terminated": "\(result.terminated)",
+        "outputSize": "\(result.output.count)",
+        "hasConnection": "\(connection != nil)",
+      ],
+    )
+
     let finished = BashFinished(tag: tag, result: result)
 
     // Always persist atomically to disk first
@@ -53,11 +75,30 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
         logger.warning("Disk persist failed for tag \(tag), forwarding to live connection: \(persistError)")
       }
       do {
+        debugLogger.debug(
+          "worker buffer forwarding bashFinished to runner",
+          metadata: [
+            "tag": "\(tag)",
+          ],
+        )
         try await conn.bashFinished(tag: tag, result: result)
         // Ack received — clean up disk files
+        debugLogger.debug(
+          "worker buffer received ack, cleaning up disk",
+          metadata: [
+            "tag": "\(tag)",
+          ],
+        )
         cleanupDiskFiles(tag: tag)
       } catch {
         // Forward failed — queue for later drain
+        debugLogger.debug(
+          "worker buffer forward failed, queuing",
+          metadata: [
+            "tag": "\(tag)",
+            "error": "\(error)",
+          ],
+        )
         pending.append(finished)
       }
     } else {
@@ -65,6 +106,13 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
         // No connection AND disk failed — durability is lost, propagate error
         throw PersistenceError.diskWriteFailed(tag: tag, underlying: persistError)
       }
+      debugLogger.debug(
+        "worker buffer queued result (no connection)",
+        metadata: [
+          "tag": "\(tag)",
+          "pendingCount": "\(pending.count + 1)",
+        ],
+      )
       pending.append(finished)
     }
   }
@@ -73,15 +121,34 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
 
   /// Called when a runner connects (or reconnects). Drains all pending results.
   public func runnerConnected(_ callbacks: any RunnerCallbacks) async {
+    debugLogger.debug(
+      "worker buffer runner connected, draining pending",
+      metadata: [
+        "pendingCount": "\(pending.count)",
+      ],
+    )
     connection = callbacks
     var failed: [BashFinished] = []
     let current = pending
     pending = []
     for item in current {
       do {
+        debugLogger.debug(
+          "worker buffer draining pending result",
+          metadata: [
+            "tag": "\(item.tag)",
+          ],
+        )
         try await callbacks.bashFinished(tag: item.tag, result: item.result)
         cleanupDiskFiles(tag: item.tag)
       } catch {
+        debugLogger.debug(
+          "worker buffer drain failed, re-queuing",
+          metadata: [
+            "tag": "\(item.tag)",
+            "error": "\(error)",
+          ],
+        )
         failed.append(item)
       }
     }
@@ -90,6 +157,7 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
 
   /// Called when the runner disconnects.
   public func runnerDisconnected() {
+    debugLogger.debug("worker buffer runner disconnected")
     connection = nil
   }
 
@@ -110,6 +178,12 @@ public actor WorkerCallbackBuffer: RunnerCallbacks {
       else { continue }
       guard let finished = try? JSONDecoder().decode(BashFinished.self, from: data) else { continue }
       if !pendingTags.contains(finished.tag) {
+        debugLogger.debug(
+          "worker buffer recovered result from disk",
+          metadata: [
+            "tag": "\(finished.tag)",
+          ],
+        )
         pending.append(finished)
       }
     }

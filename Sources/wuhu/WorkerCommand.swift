@@ -26,6 +26,8 @@ struct WorkerCommand: AsyncParsableCommand {
   var orphanDeadline: Int = 3600
 
   func run() async throws {
+    WuhuDebugLogger.bootstrapIfNeeded()
+
     let logger = Logger(label: "WuhuWorker")
 
     // 1. Detach from the runner's session

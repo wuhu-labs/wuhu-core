@@ -1,5 +1,8 @@
 import Dependencies
 import Foundation
+import Logging
+
+private let logger = WuhuDebugLogger.logger("LocalRunner")
 
 /// Local runner — executes everything on the local machine.
 /// Uses the `FileIO` dependency for filesystem operations, preserving
@@ -27,8 +30,26 @@ public actor LocalRunner: Runner {
   public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
     // Idempotent: if already running for this tag, return existing
     if activeBashTasks[tag] != nil {
+      logger.debug(
+        "worker bash already running",
+        metadata: [
+          "tag": "\(tag)",
+          "cwd": "\(cwd)",
+        ],
+      )
       return BashStarted(tag: tag, alreadyRunning: true)
     }
+
+    let commandPreview = String(command.prefix(50))
+    logger.debug(
+      "worker starting bash",
+      metadata: [
+        "tag": "\(tag)",
+        "cwd": "\(cwd)",
+        "timeout": "\(timeout.map { String($0) } ?? "none")",
+        "commandPreview": "\(commandPreview)",
+      ],
+    )
 
     let callbacks = callbacks
 
@@ -39,12 +60,34 @@ public actor LocalRunner: Runner {
         result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout) { chunk in
           try? await callbacks?.bashOutput(tag: tag, chunk: chunk)
         }
+        logger.debug(
+          "worker bash completed",
+          metadata: [
+            "tag": "\(tag)",
+            "exitCode": "\(result.exitCode)",
+            "timedOut": "\(result.timedOut)",
+            "outputSize": "\(result.output.count)",
+          ],
+        )
       } catch is CancellationError {
+        logger.debug(
+          "worker bash cancelled",
+          metadata: [
+            "tag": "\(tag)",
+          ],
+        )
         let terminated = BashResult(exitCode: -15, output: "", timedOut: false, terminated: true)
         try? await callbacks?.bashFinished(tag: tag, result: terminated)
         await self?.unregisterBashTask(tag: tag)
         return
       } catch {
+        logger.debug(
+          "worker bash error",
+          metadata: [
+            "tag": "\(tag)",
+            "error": "\(error)",
+          ],
+        )
         let errResult = BashResult(exitCode: -1, output: "Error: \(error)", timedOut: false, terminated: false)
         try? await callbacks?.bashFinished(tag: tag, result: errResult)
         await self?.unregisterBashTask(tag: tag)
@@ -60,8 +103,20 @@ public actor LocalRunner: Runner {
 
   public func cancelBash(tag: String) async throws -> BashCancelResult {
     guard let task = activeBashTasks.removeValue(forKey: tag) else {
+      logger.debug(
+        "worker cancelBash: not found",
+        metadata: [
+          "tag": "\(tag)",
+        ],
+      )
       return .notFound
     }
+    logger.debug(
+      "worker cancelling bash",
+      metadata: [
+        "tag": "\(tag)",
+      ],
+    )
     task.cancel()
     return .cancelled
   }
