@@ -67,16 +67,30 @@ private func resolvePathViaMountOrCwd(
 // MARK: - read
 
 private func readTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
-  // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
-  // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
-  // See https://github.com/wuhu-labs/wuhu/issues/12
   struct Params: Sendable {
     var path: String
     var offset: Int?
     var limit: Int?
 
     static func parse(toolName: String, args: JSONValue) throws -> Params {
-      let a = try ToolArgs(toolName: toolName, args: args)
+      // HACK: Silently drop boolean values for offset/limit instead of throwing.
+      //
+      // We have observed this behavior from both OpenAI GPT-5.2 family (since Wuhu's
+      // beginning) and Opus 4.6 (starting from March). In the case of Opus 4.6, the model
+      // could poison the context to the point of no return, burning a lot of tokens. Before
+      // we ship a proper tool-fix tool, let's do this hack to suppress it.
+      let sanitized: JSONValue = if case var .object(obj) = args {
+        {
+          for key in ["offset", "limit"] {
+            if case .bool = obj[key] { obj.removeValue(forKey: key) }
+          }
+          return JSONValue.object(obj)
+        }()
+      } else {
+        args
+      }
+
+      let a = try ToolArgs(toolName: toolName, args: sanitized)
       let path = try a.requireString("path")
       let offset = try a.optionalInt("offset")
       let limit = try a.optionalInt("limit")

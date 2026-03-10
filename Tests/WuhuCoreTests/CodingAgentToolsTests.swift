@@ -178,7 +178,7 @@ struct CodingAgentToolsTests {
     }
   }
 
-  @Test func readToolOffsetBoolTrueThrowsHelpfulError() async throws {
+  @Test func readToolOffsetBoolTrueSilentlyDropped() async throws {
     let io = makeIO()
     io.seedFile(path: "\(cwd)/test.txt", content: "Line 1\nLine 2\nLine 3")
 
@@ -186,18 +186,13 @@ struct CodingAgentToolsTests {
       $0.fileIO = io
     } operation: {
       let t = try #require(tools()["read"])
-      do {
-        _ = try await t.execute(toolCallId: "t-bool-offset", args: .object([
-          "path": .string("test.txt"),
-          "offset": .bool(true),
-        ]))
-        #expect(Bool(false))
-      } catch {
-        #expect(
-          String(describing: error)
-            == "read tool expects integer for key path \"offset\", but value \"true\" of boolean received.",
-        )
-      }
+      // Boolean offset is silently dropped — the tool reads from line 1 instead of throwing.
+      let result = try await t.execute(toolCallId: "t-bool-offset", args: .object([
+        "path": .string("test.txt"),
+        "offset": .bool(true),
+      ]))
+      let text = try textOutput(result)
+      #expect(text.contains("Line 1"))
     }
   }
 
