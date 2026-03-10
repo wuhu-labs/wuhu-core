@@ -104,10 +104,13 @@ public actor EffectLoop<B: LoopBehavior> {
       let sendFn = Send<B.Action> { [weak self] action in
         await self?.send(action)
       }
+      let behavior = behavior
       let task = Task { [weak self] in
         defer { Task { [weak self] in await self?.removeInflightTask(taskID) } }
         do {
-          try await work(sendFn)
+          try await behavior.run {
+            try await work(sendFn)
+          }
         } catch is CancellationError {
           // Silently ignore cancellation.
         } catch {

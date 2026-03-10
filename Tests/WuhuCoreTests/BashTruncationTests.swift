@@ -53,10 +53,9 @@ struct BashOutputTruncationTests {
     let service = WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: mock.streamFn,
       runnerRegistry: registry,
       bashCoordinator: bashCoordinator,
-    )
+    ) { $0.streamFn = mock.streamFn }
     await service.startAgentLoopManager()
 
     // Create a session with a real cwd (mount).

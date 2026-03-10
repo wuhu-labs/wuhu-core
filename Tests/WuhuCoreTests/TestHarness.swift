@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -37,10 +36,9 @@ struct TestHarness {
     service = WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: mockLLM.streamFn,
       workspaceRoot: workspaceRoot,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    ) { $0.streamFn = mockLLM.streamFn }
   }
 
   /// Init with a raw `StreamFn` instead of `MockStreamFn`.
@@ -58,10 +56,9 @@ struct TestHarness {
     service = WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: streamFn,
       workspaceRoot: workspaceRoot,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    ) { $0.streamFn = streamFn }
   }
 
   /// Create a new harness re-using the same store (simulates server restart).
@@ -69,9 +66,8 @@ struct TestHarness {
     WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: newMock.streamFn,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    ) { $0.streamFn = newMock.streamFn }
   }
 
   // MARK: - Session creation

@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -5,10 +6,9 @@ import WuhuAPI
 public actor WuhuService {
   let store: SQLiteSessionStore
   let blobStore: WuhuBlobStore
-  private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
-  private let baseStreamFn: StreamFn
+  private let dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
   private let instanceID: String
@@ -24,27 +24,25 @@ public actor WuhuService {
   public init(
     store: SQLiteSessionStore,
     blobStore: WuhuBlobStore,
-    llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
-    baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry,
     bashCoordinator: BashTagCoordinator = BashTagCoordinator(),
     defaultCostLimitCents: Int64? = nil,
+    dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
-    self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
-    self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry
     self.bashCoordinator = bashCoordinator
     self.defaultCostLimitCents = defaultCostLimitCents
+    self.dependencyOverrides = dependencyOverrides
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -111,10 +109,8 @@ public actor WuhuService {
           braveSearchAPIKey: braveSearchAPIKey,
         )
         let resolvedTools = agentToolset(session: session, baseTools: baseTools)
-        let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sid, purpose: .agent) ?? baseStreamFn
 
         await rt.setTools(resolvedTools)
-        await rt.setStreamFn(streamFn)
         await rt.ensureStarted()
       }
       if !sessions.isEmpty {
@@ -155,6 +151,7 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
+      dependencyOverrides: dependencyOverrides,
       defaultCostLimitCents: defaultCostLimitCents,
       onIdle: nil,
     )
@@ -666,11 +663,8 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
-    let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
-
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.setTools(resolvedTools)
-    await runtime.setStreamFn(streamFn)
     await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }

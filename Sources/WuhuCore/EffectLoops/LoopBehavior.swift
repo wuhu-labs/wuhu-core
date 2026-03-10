@@ -35,4 +35,16 @@ public protocol LoopBehavior<State, Action>: Sendable {
   ///   (e.g. `state.isGenerating = true`) to prevent re-entry
   ///   on the next call.
   func nextEffect(state: inout State) -> Effect<Action>?
+
+  /// Wraps the execution of an effect's async work.
+  ///
+  /// The default implementation calls through directly. Override to
+  /// inject context (e.g. dependency overrides) around effect execution.
+  func run(_ work: @escaping @Sendable () async throws -> Void) async throws
+}
+
+public extension LoopBehavior {
+  func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
+    try await work()
+  }
 }

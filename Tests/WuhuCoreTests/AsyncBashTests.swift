@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import Testing
@@ -34,46 +35,47 @@ struct AsyncBashTests {
     }
     let turns = TurnCounter()
 
+    let streamFn: StreamFn = { model, _, _ in
+      let turn = await turns.next()
+      if turn == 1 {
+        return AsyncThrowingStream { continuation in
+          let toolCall = ToolCall(
+            id: "t_async_1",
+            name: "async_bash",
+            arguments: .object(["command": .string("sleep 0.2 && echo 'done'")]),
+          )
+          let assistant = AssistantMessage(
+            provider: model.provider,
+            model: model.id,
+            content: [.toolCall(toolCall)],
+            stopReason: .toolUse,
+          )
+          continuation.yield(.done(message: assistant))
+          continuation.finish()
+        }
+      }
+
+      return AsyncThrowingStream { continuation in
+        Task {
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
+          let assistant = AssistantMessage(
+            provider: model.provider,
+            model: model.id,
+            content: [.text("ok")],
+            stopReason: .stop,
+          )
+          continuation.yield(.done(message: assistant))
+          continuation.finish()
+        }
+      }
+    }
+
     let service = WuhuService(
       store: store,
       blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       asyncBashRegistry: registry,
-      baseStreamFn: { model, _, _ in
-        let turn = await turns.next()
-        if turn == 1 {
-          return AsyncThrowingStream { continuation in
-            let toolCall = ToolCall(
-              id: "t_async_1",
-              name: "async_bash",
-              arguments: .object(["command": .string("sleep 0.2 && echo 'done'")]),
-            )
-            let assistant = AssistantMessage(
-              provider: model.provider,
-              model: model.id,
-              content: [.toolCall(toolCall)],
-              stopReason: .toolUse,
-            )
-            continuation.yield(.done(message: assistant))
-            continuation.finish()
-          }
-        }
-
-        return AsyncThrowingStream { continuation in
-          Task {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            let assistant = AssistantMessage(
-              provider: model.provider,
-              model: model.id,
-              content: [.text("ok")],
-              stopReason: .stop,
-            )
-            continuation.yield(.done(message: assistant))
-            continuation.finish()
-          }
-        }
-      },
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    ) { $0.streamFn = streamFn }
 
     let session = try await service.createSession(
       sessionID: sessionID,

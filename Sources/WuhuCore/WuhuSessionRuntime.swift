@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -32,6 +33,7 @@ actor WuhuSessionRuntime {
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
+    dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
     defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
   ) {
@@ -44,6 +46,7 @@ actor WuhuSessionRuntime {
     behavior = WuhuBehavior(
       sessionID: sessionID, store: store,
       runtimeConfig: runtimeConfig, blobStore: blobStore,
+      dependencyOverrides: dependencyOverrides,
     )
   }
 
@@ -130,10 +133,6 @@ actor WuhuSessionRuntime {
 
   func setTools(_ tools: [AnyAgentTool]) async {
     await runtimeConfig.setTools(tools)
-  }
-
-  func setStreamFn(_ streamFn: @escaping StreamFn) async {
-    await runtimeConfig.setStreamFn(streamFn)
   }
 
   func isIdle() -> Bool {
