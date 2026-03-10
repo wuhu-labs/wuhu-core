@@ -30,7 +30,7 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.3.2"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.4.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.2.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", .upToNextMinor(from: "0.3.0")),
@@ -71,6 +71,7 @@ let package = Package(
       dependencies: [
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -96,6 +97,7 @@ let package = Package(
       dependencies: [
         "WuhuAPI",
         "WuhuCoreClient",
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -136,6 +138,7 @@ let package = Package(
         "WuhuCLIKit",
         "WuhuServer",
         "WuhuRunner",
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "Mux", package: "wuhu-yamux"),

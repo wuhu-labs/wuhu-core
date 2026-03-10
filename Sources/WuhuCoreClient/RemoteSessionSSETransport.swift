@@ -1,5 +1,6 @@
 import Foundation
 import PiAI
+import PiAIAsyncHTTPClient
 
 /// Transport-level connection lifecycle for SSE subscriptions.
 ///
@@ -148,7 +149,7 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
           attempt = 0
           connectionContinuation.yield(.connected)
 
-          for try await message in sse {
+          for try await message in sse.events {
             try Task.checkCancellation()
             guard let data = message.data.data(using: .utf8) else { continue }
 

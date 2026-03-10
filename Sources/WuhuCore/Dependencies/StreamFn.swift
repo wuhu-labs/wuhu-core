@@ -2,6 +2,7 @@ import Dependencies
 import Foundation
 import Logging
 import PiAI
+import PiAIAsyncHTTPClient
 import ServiceContextModule
 import WuhuAPI
 
@@ -10,9 +11,29 @@ public typealias StreamFn = @Sendable (Model, Context, RequestOptions) async thr
 
 // MARK: - Dependency registration
 
+/// Shared HTTP transport for LLM requests. Keep alive for the lifetime of the process to avoid
+/// connection teardown mid-stream when providers are created as temporaries.
+private let sharedHTTPClient = AsyncHTTPClientTransport()
+
+/// Stream a response from the model using the provider inferred from `model.provider`.
+private func streamSimple(
+  model: Model,
+  context: Context,
+  options: RequestOptions,
+) async throws -> AsyncThrowingStream<AssistantMessageEvent, any Error> {
+  switch model.provider {
+  case .openai:
+    try await OpenAIResponsesProvider(http: sharedHTTPClient).stream(model: model, context: context, options: options)
+  case .openaiCodex:
+    try await OpenAICodexResponsesProvider(http: sharedHTTPClient).stream(model: model, context: context, options: options)
+  case .anthropic:
+    try await AnthropicMessagesProvider(http: sharedHTTPClient).stream(model: model, context: context, options: options)
+  }
+}
+
 private enum StreamFnKey: DependencyKey {
-  static let liveValue: StreamFn = PiAI.streamSimple
-  static let testValue: StreamFn = PiAI.streamSimple
+  static let liveValue: StreamFn = streamSimple
+  static let testValue: StreamFn = streamSimple
 }
 
 public extension DependencyValues {
