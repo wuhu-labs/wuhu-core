@@ -9,7 +9,7 @@ import WuhuAPI
 /// Dispatches actions to sub-reducers and implements the full
 /// `nextEffect` priority ladder for scheduling effects.
 ///
-/// Holds session-scoped dependencies (store, config, blob store)
+/// Holds session-scoped dependencies (store, config)
 /// that effect factories close over. Created once per session.
 struct WuhuBehavior: LoopBehavior {
   typealias State = WuhuState
@@ -20,7 +20,6 @@ struct WuhuBehavior: LoopBehavior {
   let sessionID: SessionID
   let store: SQLiteSessionStore
   let runtimeConfig: WuhuSessionRuntimeConfig
-  let blobStore: WuhuBlobStore
   var dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
 
   // MARK: - Reduce

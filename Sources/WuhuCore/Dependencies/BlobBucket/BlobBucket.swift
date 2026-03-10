@@ -2,20 +2,12 @@ import Crypto
 import Dependencies
 import Foundation
 
-/// Content-addressed blob storage built on top of a ``DataBucket``.
+/// Content-addressed blob storage built on top of ``DataBucket``.
 ///
-/// Blobs are keyed by `{namespace}/sha256-{hex}.{ext}`. The namespace is
-/// caller-defined (typically a session ID). Deduplication is automatic —
-/// identical data produces the same SHA-256 key.
-///
-/// Blob URIs follow the format `blob://{namespace}/sha256-{hex}.{ext}`.
-public struct BlobBucket: Sendable {
-  private let storage: any DataBucket
-
-  public init(storage: any DataBucket) {
-    self.storage = storage
-  }
-
+/// Not a dependency itself — reads `@Dependency(\.dataBucket)` internally.
+/// Keys are `blobs/{namespace}/sha256-{hex}.{ext}`. The namespace is
+/// caller-defined (typically a session ID).
+public enum BlobBucket {
   /// Store binary data and return a blob URI.
   ///
   /// - Parameters:
@@ -23,31 +15,35 @@ public struct BlobBucket: Sendable {
   ///   - data: Raw binary data to store.
   ///   - mimeType: MIME type (e.g. "image/png").
   /// - Returns: A blob URI like `blob://{namespace}/sha256-{hex}.{ext}`.
-  public func store(namespace: String, data: Data, mimeType: String) async throws -> String {
+  public static func store(namespace: String, data: Data, mimeType: String) async throws -> String {
+    @Dependency(\.dataBucket) var dataBucket
+
     let hash = SHA256.hash(data: data)
     let hex = hash.map { String(format: "%02x", $0) }.joined()
-    let ext = Self.extensionForMimeType(mimeType)
+    let ext = extensionForMimeType(mimeType)
     let filename = "sha256-\(hex).\(ext)"
-    let key = "\(namespace)/\(filename)"
+    let key = "blobs/\(namespace)/\(filename)"
 
-    if try await !storage.exists(key: key) {
-      try await storage.write(key: key, data: data)
+    if try await !dataBucket.exists(key: key) {
+      try await dataBucket.write(key: key, data: data)
     }
 
     return "blob://\(namespace)/\(filename)"
   }
 
   /// Resolve a blob URI to file data.
-  public func resolve(uri: String) async throws -> Data {
-    let key = try Self.parseURI(uri)
-    guard let data = try await storage.read(key: key) else {
+  public static func resolve(uri: String) async throws -> Data {
+    @Dependency(\.dataBucket) var dataBucket
+
+    let key = try parseURI(uri)
+    guard let data = try await dataBucket.read(key: key) else {
       throw BlobBucketError.notFound(uri)
     }
     return data
   }
 
   /// Resolve a blob URI to a base64-encoded string.
-  public func resolveToBase64(uri: String) async throws -> String {
+  public static func resolveToBase64(uri: String) async throws -> String {
     let data = try await resolve(uri: uri)
     return data.base64EncodedString()
   }
@@ -64,7 +60,7 @@ public struct BlobBucket: Sendable {
     guard parts.count == 2 else {
       throw BlobBucketError.invalidURI(uri)
     }
-    return "\(parts[0])/\(parts[1])"
+    return "blobs/\(parts[0])/\(parts[1])"
   }
 
   // MARK: - MIME / extension helpers
@@ -114,19 +110,5 @@ public enum BlobBucketError: Error, CustomStringConvertible {
     case let .fileTooLarge(path, size):
       "Image file too large: \(path) (\(size / 1024 / 1024)MB). Max supported: \(BlobBucket.maxImageFileSize / 1024 / 1024)MB"
     }
-  }
-}
-
-// MARK: - Dependency registration
-
-private enum BlobBucketKey: DependencyKey {
-  static let liveValue: BlobBucket = .init(storage: LocalDataBucket(rootDirectory: NSTemporaryDirectory() + "wuhu-blobs"))
-  static let testValue: BlobBucket = .init(storage: LocalDataBucket(rootDirectory: NSTemporaryDirectory() + "wuhu-blobs-test"))
-}
-
-public extension DependencyValues {
-  var blobBucket: BlobBucket {
-    get { self[BlobBucketKey.self] }
-    set { self[BlobBucketKey.self] = newValue }
   }
 }

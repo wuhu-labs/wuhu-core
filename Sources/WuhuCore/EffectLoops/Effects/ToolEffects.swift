@@ -11,7 +11,6 @@ extension WuhuBehavior {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
-    let blobStore = blobStore
     let tracker = state.tools.repetitionTracker
 
     return Effect { send in
@@ -123,7 +122,6 @@ extension WuhuBehavior {
             tracker: tracker,
             sessionID: sessionID,
             store: store,
-            blobStore: blobStore,
             send: send,
           )
 
@@ -307,7 +305,6 @@ private func persistToolSuccess(
   tracker: ToolCallRepetitionTracker,
   sessionID: SessionID,
   store: SQLiteSessionStore,
-  blobStore: WuhuBlobStore,
   send: Send<WuhuAction>,
 ) async {
   do {
@@ -323,15 +320,18 @@ private func persistToolSuccess(
     }
 
     // Convert image content blocks: store base64 data as blobs, replace with blob URIs.
-    let persistedContent = try finalResult.content.map { block -> WuhuContentBlock in
+    var persistedContent: [WuhuContentBlock] = []
+    for block in finalResult.content {
       if case let .image(img) = block, !img.data.hasPrefix("blob://") {
         guard let rawData = Data(base64Encoded: img.data) else {
-          return WuhuContentBlock.fromPi(block)
+          persistedContent.append(WuhuContentBlock.fromPi(block))
+          continue
         }
-        let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
-        return .image(blobURI: uri, mimeType: img.mimeType)
+        let uri = try await BlobBucket.store(namespace: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
+        persistedContent.append(.image(blobURI: uri, mimeType: img.mimeType))
+      } else {
+        persistedContent.append(WuhuContentBlock.fromPi(block))
       }
-      return WuhuContentBlock.fromPi(block)
     }
 
     let toolResultMessage = WuhuToolResultMessage(

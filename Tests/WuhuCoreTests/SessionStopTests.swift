@@ -10,8 +10,7 @@ struct SessionStopTests {
 
   @Test func stopSession_noopWhenIdle() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
+    let service = WuhuService(store: store, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let session = try await service.createSession(
       sessionID: newSessionID(),
@@ -28,8 +27,7 @@ struct SessionStopTests {
 
   @Test func stopSession_appendsStopMessageWhenTranscriptLooksExecuting() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
+    let service = WuhuService(store: store, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let session = try await service.createSession(
       sessionID: newSessionID(),
@@ -55,8 +53,7 @@ struct SessionStopTests {
 
   @Test func stopSession_repairsMissingToolResultsWithStoppedReason() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
-    let service = WuhuService(store: store, blobStore: blobStore, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
+    let service = WuhuService(store: store, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
 
     let session = try await service.createSession(
       sessionID: newSessionID(),

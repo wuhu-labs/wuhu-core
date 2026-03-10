@@ -10,7 +10,6 @@ extension WuhuBehavior {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
-    let blobStore = blobStore
     let entries = state.transcript.entries
     return Effect { send in
       @Dependency(\.streamFn) var streamFn
@@ -32,7 +31,7 @@ extension WuhuBehavior {
         let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
         let systemPrompt = header?.systemPrompt ?? ""
         let messages = WuhuPromptPreparation.extractContextMessages(from: entries)
-        let hydrated = hydrateImageBlobs(in: messages, blobStore: blobStore)
+        let hydrated = await hydrateImageBlobs(in: messages)
 
         var effectiveSystemPrompt = systemPrompt
         if let cwd = session.cwd {
@@ -111,25 +110,35 @@ extension WuhuBehavior {
 }
 
 /// Replace blob URIs in image content blocks with base64-encoded data for LLM consumption.
-private func hydrateImageBlobs(in messages: [Message], blobStore: WuhuBlobStore) -> [Message] {
-  messages.map { message in
+private func hydrateImageBlobs(in messages: [Message]) async -> [Message] {
+  var result: [Message] = []
+  for message in messages {
     switch message {
     case var .user(u):
-      u.content = u.content.map { hydrateBlock($0, blobStore: blobStore) }
-      return .user(u)
+      u.content = await hydrateBlocks(u.content)
+      result.append(.user(u))
     case let .assistant(a):
-      return .assistant(a)
+      result.append(.assistant(a))
     case var .toolResult(t):
-      t.content = t.content.map { hydrateBlock($0, blobStore: blobStore) }
-      return .toolResult(t)
+      t.content = await hydrateBlocks(t.content)
+      result.append(.toolResult(t))
     }
   }
+  return result
 }
 
-private func hydrateBlock(_ block: ContentBlock, blobStore: WuhuBlobStore) -> ContentBlock {
+private func hydrateBlocks(_ blocks: [ContentBlock]) async -> [ContentBlock] {
+  var result: [ContentBlock] = []
+  for block in blocks {
+    await result.append(hydrateBlock(block))
+  }
+  return result
+}
+
+private func hydrateBlock(_ block: ContentBlock) async -> ContentBlock {
   guard case let .image(img) = block, img.data.hasPrefix("blob://") else { return block }
   do {
-    let base64 = try blobStore.resolveToBase64(uri: img.data)
+    let base64 = try await BlobBucket.resolveToBase64(uri: img.data)
     return .image(.init(data: base64, mimeType: img.mimeType))
   } catch {
     return .text(.init(text: "[Failed to load image: \(error)]"))

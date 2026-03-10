@@ -26,9 +26,9 @@ private let secretHeaderNames: Set<String> = [
 /// If the call crashes mid-stream, you still have the request for debugging.
 public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
   private let base: any PiAI.HTTPClient
-  private let payloadStore: any LLMPayloadStore
+  private let payloadStore: any DataBucket
 
-  public init(base: any PiAI.HTTPClient, payloadStore: any LLMPayloadStore) {
+  public init(base: any PiAI.HTTPClient, payloadStore: any DataBucket) {
     self.base = base
     self.payloadStore = payloadStore
   }

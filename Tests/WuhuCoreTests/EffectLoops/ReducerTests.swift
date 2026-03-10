@@ -34,13 +34,10 @@ private func makeEntry(
 
 private func makeBehavior() throws -> WuhuBehavior {
   let store = try SQLiteSessionStore(path: ":memory:")
-  let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-  let blobStore = WuhuBlobStore(rootDirectory: blobDir)
   return WuhuBehavior(
     sessionID: .init(rawValue: "test"),
     store: store,
     runtimeConfig: WuhuSessionRuntimeConfig(),
-    blobStore: blobStore,
   )
 }
 

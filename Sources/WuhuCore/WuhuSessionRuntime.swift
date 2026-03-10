@@ -32,7 +32,6 @@ actor WuhuSessionRuntime {
     store: SQLiteSessionStore,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
-    blobStore: WuhuBlobStore,
     dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
     defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
@@ -45,7 +44,7 @@ actor WuhuSessionRuntime {
     runtimeConfig = WuhuSessionRuntimeConfig(defaultCostLimitCents: defaultCostLimitCents)
     behavior = WuhuBehavior(
       sessionID: sessionID, store: store,
-      runtimeConfig: runtimeConfig, blobStore: blobStore,
+      runtimeConfig: runtimeConfig,
       dependencyOverrides: dependencyOverrides,
     )
   }

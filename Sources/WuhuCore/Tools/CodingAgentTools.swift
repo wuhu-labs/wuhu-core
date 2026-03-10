@@ -150,14 +150,14 @@ private func readTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
     // Check if the file is an image — return as image content block.
     let ext = (resolved as NSString).pathExtension.lowercased()
-    if WuhuBlobStore.isImageExtension(ext) {
-      guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
+    if BlobBucket.isImageExtension(ext) {
+      guard let mimeType = BlobBucket.mimeTypeForExtension(ext) else {
         throw ToolError.message("Unsupported image format: \(ext)")
       }
       let fileData = try await runner.readData(path: resolved)
-      guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
+      guard fileData.count <= BlobBucket.maxImageFileSize else {
         throw ToolError.message(
-          "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
+          "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(BlobBucket.maxImageFileSize))",
         )
       }
       let base64 = fileData.base64EncodedString()
