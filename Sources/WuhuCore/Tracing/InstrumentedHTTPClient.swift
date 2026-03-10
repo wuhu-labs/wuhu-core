@@ -57,7 +57,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
       let requestPath = "\(datePath)/\(callID).request"
       let requestData = serializeRequest(request)
       do {
-        try await payloadStore.write(path: requestPath, data: requestData)
+        try await payloadStore.write(key: requestPath, data: requestData)
       } catch {
         // Best-effort: payload capture must never break the LLM call
       }
@@ -113,7 +113,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
           // Stream completed successfully — write response payload
           if let responsePath {
             do {
-              try await store.write(path: responsePath, data: buffer)
+              try await store.write(key: responsePath, data: buffer)
             } catch {
               // Best-effort
             }
@@ -126,7 +126,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
           buffer.append(Data("\n--- ERROR ---\n\(error)\n".utf8))
           if let responsePath {
             do {
-              try await store.write(path: responsePath, data: buffer)
+              try await store.write(key: responsePath, data: buffer)
             } catch {
               // Best-effort
             }

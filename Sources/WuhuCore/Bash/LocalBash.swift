@@ -38,7 +38,7 @@ public enum LocalBash {
   ) async throws -> BashResult {
     let outputURL = FileManager.default.temporaryDirectory
       .appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
-    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+    _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
 
     let outputFD = try FileDescriptor.open(
       FilePath(outputURL.path),

@@ -9,7 +9,6 @@ extension WuhuBehavior {
   func runCompaction(state: WuhuState) -> Effect<WuhuAction> {
     let sessionID = sessionID
     let store = store
-    let runtimeConfig = runtimeConfig
     let entries = state.transcript.entries
     let settingsSnapshot = state.settings.snapshot
 
