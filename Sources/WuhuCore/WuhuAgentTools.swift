@@ -1,6 +1,9 @@
 import Foundation
+import Logging
 import PiAI
 import WuhuAPI
+
+private let logger = WuhuDebugLogger.logger("WuhuAgentTools")
 
 enum WuhuAgentToolNames {
   static let bash = "bash"
@@ -500,6 +503,18 @@ extension WuhuService {
       let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawRunner = (params.runner ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
+      logger.debug(
+        "mount tool called",
+        metadata: [
+          "sessionID": "\(currentSessionID)",
+          "path": "\(rawPath.isEmpty ? "(empty)" : rawPath)",
+          "name": "\(params.name ?? "(none)")",
+          "templateID": "\(rawTemplateID.isEmpty ? "(none)" : rawTemplateID)",
+          "runner": "\(rawRunner.isEmpty ? "(none)" : rawRunner)",
+          "primary": "\(params.primary.map { String($0) } ?? "(auto)")",
+        ],
+      )
+
       if !rawPath.isEmpty, !rawTemplateID.isEmpty {
         throw WuhuToolExecutionError(message: "path and mountTemplateID are mutually exclusive — provide one or the other")
       }
@@ -573,6 +588,18 @@ extension WuhuService {
 
       // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
       try await emitMountContext(sessionID: currentSessionID, mount: mount, runner: runner)
+
+      logger.debug(
+        "mount created",
+        metadata: [
+          "sessionID": "\(currentSessionID)",
+          "mountID": "\(mount.id)",
+          "name": "\(effectiveName)",
+          "path": "\(mountPath)",
+          "isPrimary": "\(mount.isPrimary)",
+          "runner": "\(runnerID.wireValue)",
+        ],
+      )
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],

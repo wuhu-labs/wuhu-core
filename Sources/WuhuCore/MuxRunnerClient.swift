@@ -154,6 +154,7 @@ public actor MuxRunnerClient: Runner {
   // MARK: - File I/O
 
   public func readData(path: String) async throws -> Data {
+    logger.debug("server sending readData to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)"])
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: .read, payload: ReadRequest(path: path, binary: true))
     try await stream.finish()
@@ -167,6 +168,7 @@ public actor MuxRunnerClient: Runner {
   }
 
   public func readString(path: String, encoding _: String.Encoding) async throws -> String {
+    logger.debug("server sending readString to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)"])
     let resp: ReadResponse = try await rpc(.read, request: ReadRequest(path: path, binary: false))
     guard let content = resp.content else {
       throw RunnerError.requestFailed(message: "No content in text read response")
@@ -175,6 +177,7 @@ public actor MuxRunnerClient: Runner {
   }
 
   public func writeData(path: String, data: Data, createIntermediateDirectories: Bool) async throws {
+    logger.debug("server sending writeData to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)", "size": "\(data.count)"])
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: .write, payload: WriteRequest(path: path, createDirs: createIntermediateDirectories, content: nil))
     try await MuxRunnerCodec.writeBinary(stream, data: data)
@@ -188,15 +191,18 @@ public actor MuxRunnerClient: Runner {
   }
 
   public func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding _: String.Encoding) async throws {
+    logger.debug("server sending writeString to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)", "size": "\(content.count)"])
     let _: WriteResponse = try await rpc(.write, request: WriteRequest(path: path, createDirs: createIntermediateDirectories, content: content))
   }
 
   public func exists(path: String) async throws -> FileExistence {
+    logger.debug("server sending exists to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)"])
     let resp: ExistsResponse = try await rpc(.exists, request: ExistsRequest(path: path))
     return resp.existence
   }
 
   public func listDirectory(path: String) async throws -> [DirectoryEntry] {
+    logger.debug("server sending ls to runner", metadata: ["runner": "\(runnerName)", "path": "\(path)"])
     let resp: LsResponse = try await rpc(.ls, request: LsRequest(path: path))
     return resp.entries
   }
@@ -211,11 +217,13 @@ public actor MuxRunnerClient: Runner {
   }
 
   public func find(params: FindParams) async throws -> FindResult {
-    try await rpc(.find, request: params)
+    logger.debug("server sending find to runner", metadata: ["runner": "\(runnerName)", "root": "\(params.root)", "pattern": "\(params.pattern)"])
+    return try await rpc(.find, request: params)
   }
 
   public func grep(params: GrepParams) async throws -> GrepResult {
-    try await rpc(.grep, request: params)
+    logger.debug("server sending grep to runner", metadata: ["runner": "\(runnerName)", "root": "\(params.root)", "pattern": "\(params.pattern)"])
+    return try await rpc(.grep, request: params)
   }
 
   public func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
