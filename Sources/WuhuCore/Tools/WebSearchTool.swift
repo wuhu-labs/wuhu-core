@@ -5,7 +5,7 @@ import NIOFoundationCompat
 /// Brave Search API web search tool.
 ///
 /// Makes real HTTP requests to the Brave Search API using `AsyncHTTPClient` directly.
-extension WuhuTools {
+extension AgentTools {
   static func webSearchTool(apiKey: String, httpClient: AsyncHTTPClient.HTTPClient? = nil) -> AnyAgentTool {
     struct Params: Sendable {
       var query: String

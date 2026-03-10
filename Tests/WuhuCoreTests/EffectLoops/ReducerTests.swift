@@ -6,8 +6,8 @@ import WuhuAPI
 
 // MARK: - Test Helpers
 
-private func makeState() -> WuhuState {
-  WuhuState(
+private func makeState() -> AgentState {
+  AgentState(
     transcript: .empty,
     queue: .empty,
     inference: .empty,
@@ -32,12 +32,12 @@ private func makeEntry(
   )
 }
 
-private func makeBehavior() throws -> WuhuBehavior {
+private func makeBehavior() throws -> AgentBehavior {
   let store = try SQLiteSessionStore(path: ":memory:")
-  return WuhuBehavior(
+  return AgentBehavior(
     sessionID: .init(rawValue: "test"),
     store: store,
-    runtimeConfig: WuhuSessionRuntimeConfig(),
+    runtimeConfig: SessionRuntimeConfig(),
   )
 }
 
@@ -465,39 +465,39 @@ struct CostReducerTests {
 
 // MARK: - Pricing Table Tests
 
-@Suite("WuhuPricingTable")
+@Suite("PricingTable")
 struct PricingTableTests {
   @Test("known Anthropic models return expected prices")
   func knownAnthropicModels() {
-    let opus = WuhuPricingTable.price(provider: .anthropic, model: "claude-opus-4-5")
+    let opus = PricingTable.price(provider: .anthropic, model: "claude-opus-4-5")
     #expect(opus.inputPricePerMTok == 1500)
     #expect(opus.outputPricePerMTok == 7500)
 
-    let sonnet = WuhuPricingTable.price(provider: .anthropic, model: "claude-sonnet-4-6")
+    let sonnet = PricingTable.price(provider: .anthropic, model: "claude-sonnet-4-6")
     #expect(sonnet.inputPricePerMTok == 300)
     #expect(sonnet.outputPricePerMTok == 1500)
 
-    let haiku = WuhuPricingTable.price(provider: .anthropic, model: "claude-haiku-4-5")
+    let haiku = PricingTable.price(provider: .anthropic, model: "claude-haiku-4-5")
     #expect(haiku.inputPricePerMTok == 80)
     #expect(haiku.outputPricePerMTok == 400)
   }
 
   @Test("known OpenAI models return expected prices")
   func knownOpenAIModels() {
-    let gpt5 = WuhuPricingTable.price(provider: .openai, model: "gpt-5")
+    let gpt5 = PricingTable.price(provider: .openai, model: "gpt-5")
     #expect(gpt5.inputPricePerMTok == 200)
     #expect(gpt5.outputPricePerMTok == 800)
 
-    let codex = WuhuPricingTable.price(provider: .openaiCodex, model: "gpt-5-codex")
+    let codex = PricingTable.price(provider: .openaiCodex, model: "gpt-5-codex")
     #expect(codex.inputPricePerMTok == 200)
     #expect(codex.outputPricePerMTok == 800)
   }
 
   @Test("unknown model falls back to Opus pricing")
   func unknownFallback() {
-    let price = WuhuPricingTable.price(provider: .openai, model: "unknown-model-xyz")
-    #expect(price.inputPricePerMTok == WuhuPricingTable.fallbackPrice.inputPricePerMTok)
-    #expect(price.outputPricePerMTok == WuhuPricingTable.fallbackPrice.outputPricePerMTok)
+    let price = PricingTable.price(provider: .openai, model: "unknown-model-xyz")
+    #expect(price.inputPricePerMTok == PricingTable.fallbackPrice.inputPricePerMTok)
+    #expect(price.outputPricePerMTok == PricingTable.fallbackPrice.outputPricePerMTok)
   }
 
   @Test("computeEntryCost calculates correctly")
@@ -505,7 +505,7 @@ struct PricingTableTests {
     // 1000 input tokens * 1500 + 500 output tokens * 7500
     // = 1_500_000 + 3_750_000 = 5_250_000
     // / 1_000_000 = 5 (integer division)
-    let cost = WuhuPricingTable.computeEntryCost(
+    let cost = PricingTable.computeEntryCost(
       provider: .anthropic,
       model: "claude-opus-4-5",
       usage: WuhuUsage(inputTokens: 1000, outputTokens: 500, totalTokens: 1500),
@@ -541,7 +541,7 @@ struct PricingTableTests {
       ),
     ]
 
-    let cost = WuhuPricingTable.computeCost(entries: entries)
+    let cost = PricingTable.computeCost(entries: entries)
     // 10M input tokens * 300 + 1M output tokens * 1500 = 3_000_000_000 + 1_500_000_000 = 4_500_000_000
     // Divided by 1_000_000 = 4_500
     #expect(cost == 4500)
@@ -609,7 +609,7 @@ struct StatusReducerTests {
 
 // MARK: - State Query Tests (needsInference, staleToolCallIDs)
 
-@Suite("WuhuBehavior state queries")
+@Suite("AgentBehavior state queries")
 struct WuhuBehaviorStateQueryTests {
   @Test("needsInference returns true when last message is user")
   func needsInferenceUser() throws {
@@ -654,7 +654,7 @@ struct WuhuBehaviorStateQueryTests {
     let behavior = try makeBehavior()
     var state = makeState()
     // Use a timestamp in the distant past to simulate a stale tool call
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
     state.tools.statuses["tc-2"] = ToolCallRecord(status: .pending, updatedAt: oldTimestamp) // pending is not stale — it hasn't been picked up yet
     state.tools.statuses["tc-3"] = ToolCallRecord(status: .completed, updatedAt: oldTimestamp)
@@ -679,7 +679,7 @@ struct WuhuBehaviorStateQueryTests {
   func staleExcludesRecovering() throws {
     let behavior = try makeBehavior()
     var state = makeState()
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
     state.tools.recoveringIDs.insert("tc-1")
 
@@ -691,7 +691,7 @@ struct WuhuBehaviorStateQueryTests {
   func staleExcludesWithResults() throws {
     let behavior = try makeBehavior()
     var state = makeState()
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
     state.transcript.entries.append(makeEntry(payload: .message(.toolResult(.init(
       toolCallId: "tc-1", toolName: "bash", content: [], details: .object([:]), isError: false, timestamp: Date(),

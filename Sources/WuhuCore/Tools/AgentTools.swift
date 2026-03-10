@@ -1,7 +1,7 @@
 import Foundation
 import PiAI
 
-public enum WuhuTools {
+public enum AgentTools {
   public static func simulatedWeatherTool() -> AnyAgentTool {
     struct Params: Decodable, Sendable {
       var city: String

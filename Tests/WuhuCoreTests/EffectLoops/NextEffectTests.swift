@@ -7,8 +7,8 @@ import WuhuCoreClient
 
 // MARK: - Test Helpers
 
-private func makeState() -> WuhuState {
-  WuhuState(
+private func makeState() -> AgentState {
+  AgentState(
     transcript: .empty,
     queue: .empty,
     inference: .empty,
@@ -19,18 +19,18 @@ private func makeState() -> WuhuState {
   )
 }
 
-private func makeRunningState() -> WuhuState {
+private func makeRunningState() -> AgentState {
   var state = makeState()
   state.status.snapshot = .init(status: .running)
   return state
 }
 
-private func makeBehavior() throws -> WuhuBehavior {
+private func makeBehavior() throws -> AgentBehavior {
   let store = try SQLiteSessionStore(path: ":memory:")
-  return WuhuBehavior(
+  return AgentBehavior(
     sessionID: .init(rawValue: "test"),
     store: store,
-    runtimeConfig: WuhuSessionRuntimeConfig(),
+    runtimeConfig: SessionRuntimeConfig(),
   )
 }
 
@@ -214,7 +214,7 @@ struct NextEffectPriorityTests {
     var state = makeState()
     state.status.snapshot = .init(status: .stopped)
     state.transcript.entries.append(makeUserEntry())
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     let effect = behavior.nextEffect(state: &state)
@@ -253,7 +253,7 @@ struct NextEffectPriorityTests {
     var state = makeRunningState()
 
     // Set up a stale tool call (started, no result in transcript, past deadline)
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     // Also add pending queue items (lower priority)
@@ -273,7 +273,7 @@ struct NextEffectPriorityTests {
   func staleRecoveryGuardToken() throws {
     let behavior = try makeBehavior()
     var state = makeRunningState()
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     let effect1 = behavior.nextEffect(state: &state)
@@ -311,7 +311,7 @@ struct NextEffectPriorityTests {
     let result = BashResult(exitCode: 0, output: "hello", timedOut: false, terminated: false)
     state.tools.pendingBashResults["tc-1"] = result
 
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-2"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp)
 
     // First call should handle the pending bash result, not the stale tool
@@ -523,7 +523,7 @@ struct NextEffectPriorityTests {
     state.cost.isPaused = true
     state.cost.exceededEntryEmitted = true // Already emitted
     state.inference.retryAfter = .now + .seconds(5) // Priority 2
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp) // Priority 3 (stale)
     state.transcript.entries.append(makeUserEntry()) // Priority 6
 
@@ -537,7 +537,7 @@ struct NextEffectPriorityTests {
     var state = makeRunningState()
     state.inference.retryAfter = .now + .seconds(5)
     state.inference.status = .waitingRetry
-    let oldTimestamp = Date().addingTimeInterval(-WuhuBehavior.staleToolCallDeadline - 1)
+    let oldTimestamp = Date().addingTimeInterval(-AgentBehavior.staleToolCallDeadline - 1)
     state.tools.statuses["tc-1"] = ToolCallRecord(status: .started, updatedAt: oldTimestamp) // Stale tool
 
     let effect = behavior.nextEffect(state: &state)

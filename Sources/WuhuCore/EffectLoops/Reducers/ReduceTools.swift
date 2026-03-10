@@ -1,5 +1,5 @@
 /// Sub-reducer for tools actions.
-func reduceTools(state: inout WuhuState, action: ToolsAction) {
+func reduceTools(state: inout AgentState, action: ToolsAction) {
   switch action {
   case let .willExecute(call):
     state.tools.statuses[call.id] = ToolCallRecord(status: .started)

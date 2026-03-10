@@ -1,6 +1,6 @@
 import Foundation
 
-actor WuhuLiveEventHub {
+actor LiveEventHub {
   private var subscribers: [String: [UUID: AsyncStream<WuhuSessionStreamEvent>.Continuation]] = [:]
 
   func subscribe(sessionID: String) -> AsyncStream<WuhuSessionStreamEvent> {

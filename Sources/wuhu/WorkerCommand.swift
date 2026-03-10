@@ -26,7 +26,7 @@ struct WorkerCommand: AsyncParsableCommand {
   var orphanDeadline: Int = 3600
 
   func run() async throws {
-    WuhuDebugLogger.bootstrap()
+    DebugLogger.bootstrap()
 
     let logger = Logger(label: "WuhuWorker")
 

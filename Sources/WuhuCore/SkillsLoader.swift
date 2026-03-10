@@ -1,7 +1,7 @@
 import Foundation
 import WuhuAPI
 
-enum WuhuSkillsLoader {
+enum SkillsLoader {
   static func load(environmentRoot: String, workspaceRoot: String? = nil) -> [WuhuSkill] {
     let fm = FileManager.default
     let homeSkillsDir = fm.homeDirectoryForCurrentUser

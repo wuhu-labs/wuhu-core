@@ -2,7 +2,7 @@ import Dependencies
 import Foundation
 import Logging
 
-private let debugLogger = WuhuDebugLogger.logger("WorkerCallbackBuffer")
+private let debugLogger = DebugLogger.logger("WorkerCallbackBuffer")
 
 /// Disk-backed buffered ``RunnerCallbacks`` for use inside a worker process.
 ///

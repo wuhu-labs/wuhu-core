@@ -2,15 +2,15 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-actor WuhuAsyncBashCompletionRouter {
-  private let registry: WuhuAsyncBashRegistry
+actor AsyncBashCompletionRouter {
+  private let registry: AsyncBashRegistry
   private let instanceID: String
   private let enqueueSystemJSON: @Sendable (_ sessionID: String, _ jsonText: String, _ timestamp: Date) async -> Void
 
   private var task: Task<Void, Never>?
 
   init(
-    registry: WuhuAsyncBashRegistry,
+    registry: AsyncBashRegistry,
     instanceID: String,
     enqueueSystemJSON: @escaping @Sendable (_ sessionID: String, _ jsonText: String, _ timestamp: Date) async -> Void,
   ) {
@@ -34,7 +34,7 @@ actor WuhuAsyncBashCompletionRouter {
     task = nil
   }
 
-  private func handle(_ completion: WuhuAsyncBashCompletion) async {
+  private func handle(_ completion: AsyncBashCompletion) async {
     guard completion.ownerID == instanceID else { return }
     guard let sessionID = completion.sessionID else { return }
 

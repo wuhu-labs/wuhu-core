@@ -124,7 +124,7 @@ enum Migration_V6 {
 
       // Verify no FK violations were introduced
       if let violations = try Row.fetchOne(db, sql: "PRAGMA foreign_key_check") {
-        throw WuhuStoreError.sessionCorrupt(
+        throw StoreError.sessionCorrupt(
           "Foreign key violations after v6 migration: \(violations)",
         )
       }

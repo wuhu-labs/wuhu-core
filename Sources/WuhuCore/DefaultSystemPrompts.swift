@@ -1,6 +1,6 @@
 import Foundation
 
-public enum WuhuDefaultSystemPrompts {
+public enum DefaultSystemPrompts {
   public static let codingAgent: String = [
     "You are a coding agent.",
     "Use tools to inspect and modify the repository in your working directory.",

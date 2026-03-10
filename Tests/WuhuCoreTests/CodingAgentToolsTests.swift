@@ -13,8 +13,8 @@ struct CodingAgentToolsTests {
   }
 
   private func tools() -> [String: AnyAgentTool] {
-    let resolver = WuhuTools.testMountResolver(cwd: cwd)
-    return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
+    let resolver = AgentTools.testMountResolver(cwd: cwd)
+    return Dictionary(uniqueKeysWithValues: AgentTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
   }
 
   private func textOutput(_ result: ToolExecutionResult) throws -> String {
@@ -35,8 +35,8 @@ struct CodingAgentToolsTests {
 
   /// Real-filesystem tools — only used by bash/swift tests that need process execution.
   private func realTools(cwd: String) -> [String: AnyAgentTool] {
-    let resolver = WuhuTools.testMountResolver(cwd: cwd)
-    return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
+    let resolver = AgentTools.testMountResolver(cwd: cwd)
+    return Dictionary(uniqueKeysWithValues: AgentTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
   }
 
   // MARK: - read tool

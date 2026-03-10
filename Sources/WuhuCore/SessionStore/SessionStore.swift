@@ -2,7 +2,7 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-public enum WuhuStoreError: Error, Sendable, CustomStringConvertible {
+public enum StoreError: Error, Sendable, CustomStringConvertible {
   case sessionNotFound(String)
   case sessionCorrupt(String)
   case noHeaderEntry(String)

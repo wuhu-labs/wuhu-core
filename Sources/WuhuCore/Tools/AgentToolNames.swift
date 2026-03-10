@@ -3,9 +3,9 @@ import Logging
 import PiAI
 import WuhuAPI
 
-private let logger = WuhuDebugLogger.logger("WuhuAgentTools")
+private let logger = DebugLogger.logger("WuhuAgentTools")
 
-enum WuhuAgentToolNames {
+enum AgentToolNames {
   static let bash = "bash"
   static let asyncBash = "async_bash"
   static let asyncBashStatus = "async_bash_status"
@@ -78,18 +78,18 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.createSession,
+      name: AgentToolNames.createSession,
       description: "Create a fresh coding session from a mount template with no conversation history. Instantiates a new workspace from the template. Use this for subagent-style dispatch where history inheritance is unwanted.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.createSession) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.createSession) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let task = params.task.trimmingCharacters(in: .whitespacesAndNewlines)
       let mountTemplateID = params.mountTemplateID.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !task.isEmpty else { throw WuhuToolExecutionError(message: "task must not be empty") }
-      guard !mountTemplateID.isEmpty else { throw WuhuToolExecutionError(message: "mountTemplateID must not be empty") }
+      guard !task.isEmpty else { throw ToolMessageError(message: "task must not be empty") }
+      guard !mountTemplateID.isEmpty else { throw ToolMessageError(message: "mountTemplateID must not be empty") }
 
       let child = try await createDirectSession(
         parentSessionID: currentSessionID,
@@ -123,13 +123,13 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.listChildSessions,
+      name: AgentToolNames.listChildSessions,
       description: "List child sessions created by this session (by parentSessionID), including status and unread final-message state.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.listChildSessions) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.listChildSessions) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       _ = try Params.parse(toolName: tool.name, args: args)
 
       let children = try await store.listChildSessions(parentSessionID: currentSessionID)
@@ -177,16 +177,16 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.readSessionFinalMessage,
+      name: AgentToolNames.readSessionFinalMessage,
       description: "Read the final assistant message for a session (the last assistant message without tool calls). If this session is the parent, marks it as read.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.readSessionFinalMessage) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.readSessionFinalMessage) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let targetID = params.sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !targetID.isEmpty else { throw WuhuToolExecutionError(message: "sessionID is required") }
+      guard !targetID.isEmpty else { throw ToolMessageError(message: "sessionID is required") }
 
       let final = try await loadFinalAssistantMessage(sessionID: targetID)
 
@@ -232,23 +232,23 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.joinSessions,
+      name: AgentToolNames.joinSessions,
       description: "Wait for one or more child sessions to finish (reach idle or stopped state). Blocks until all specified sessions are no longer running, then returns their final statuses and messages. Use this after dispatching parallel sessions with create_session or fork.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.joinSessions) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.joinSessions) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
 
       let ids = params.sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-      guard !ids.isEmpty else { throw WuhuToolExecutionError(message: "sessionIDs must not be empty") }
+      guard !ids.isEmpty else { throw ToolMessageError(message: "sessionIDs must not be empty") }
 
       let children = try await store.listChildSessions(parentSessionID: currentSessionID)
       let childIDs = Set(children.map(\.session.id))
       for id in ids {
         guard childIDs.contains(id) else {
-          throw WuhuToolExecutionError(message: "Session '\(id)' is not a child of the current session")
+          throw ToolMessageError(message: "Session '\(id)' is not a child of the current session")
         }
       }
 
@@ -351,11 +351,11 @@ extension WuhuService {
   }
 
   private func sessionSteerTool() -> AnyAgentTool {
-    sessionEnqueueTool(name: WuhuAgentToolNames.sessionSteer, lane: .steer)
+    sessionEnqueueTool(name: AgentToolNames.sessionSteer, lane: .steer)
   }
 
   private func sessionFollowUpTool() -> AnyAgentTool {
-    sessionEnqueueTool(name: WuhuAgentToolNames.sessionFollowUp, lane: .followUp)
+    sessionEnqueueTool(name: AgentToolNames.sessionFollowUp, lane: .followUp)
   }
 
   private func sessionEnqueueTool(name: String, lane: UserQueueLane) -> AnyAgentTool {
@@ -389,12 +389,12 @@ extension WuhuService {
     )
 
     return AnyAgentTool(tool: tool, label: name) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let targetID = params.sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
       let text = params.message.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !targetID.isEmpty else { throw WuhuToolExecutionError(message: "sessionID is required") }
-      guard !text.isEmpty else { throw WuhuToolExecutionError(message: "message is required") }
+      guard !targetID.isEmpty else { throw ToolMessageError(message: "sessionID is required") }
+      guard !text.isEmpty else { throw ToolMessageError(message: "message is required") }
 
       let author: Author = .participant(.init(rawValue: "channel-agent"), kind: .bot)
       let message = QueuedUserMessage(author: author, content: .text(text))
@@ -413,10 +413,10 @@ extension WuhuService {
       "properties": .object([:]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.mountTemplateList, description: "List available mount templates.", parameters: schema)
+    let tool = Tool(name: AgentToolNames.mountTemplateList, description: "List available mount templates.", parameters: schema)
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateList) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.mountTemplateList) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let a = try ToolArgs(toolName: tool.name, args: args)
       try a.ensureNoExtraKeys(allowed: [])
 
@@ -441,14 +441,14 @@ extension WuhuService {
       "required": .array([.string("identifier")]),
       "additionalProperties": .bool(false),
     ])
-    let tool = Tool(name: WuhuAgentToolNames.mountTemplateGet, description: "Get a mount template definition.", parameters: schema)
+    let tool = Tool(name: AgentToolNames.mountTemplateGet, description: "Get a mount template definition.", parameters: schema)
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mountTemplateGet) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.mountTemplateGet) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let a = try ToolArgs(toolName: tool.name, args: args)
       let identifier = try a.requireString("identifier").trimmingCharacters(in: .whitespacesAndNewlines)
       try a.ensureNoExtraKeys(allowed: ["identifier"])
-      guard !identifier.isEmpty else { throw WuhuToolExecutionError(message: "identifier is required") }
+      guard !identifier.isEmpty else { throw ToolMessageError(message: "identifier is required") }
 
       let t = try await store.getMountTemplate(identifier: identifier)
       return try AgentToolResult(
@@ -491,13 +491,13 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.mount,
+      name: AgentToolNames.mount,
       description: "Mount a directory as the working directory for this session. Changes the cwd for all filesystem and bash tools. Injects AGENTS.md and skills from the mounted directory. Can be called multiple times to switch directories. Call with no path (or empty path) to create a scratch directory. Pass mountTemplateID to instantiate a fresh workspace from a mount template.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mount) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.mount) { [weak self] _, args in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
       let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -516,7 +516,7 @@ extension WuhuService {
       )
 
       if !rawPath.isEmpty, !rawTemplateID.isEmpty {
-        throw WuhuToolExecutionError(message: "path and mountTemplateID are mutually exclusive — provide one or the other")
+        throw ToolMessageError(message: "path and mountTemplateID are mutually exclusive — provide one or the other")
       }
 
       // Resolve runner
@@ -529,7 +529,7 @@ extension WuhuService {
       // Look up and validate runner
       let runner = await runnerRegistry.get(runnerID)
       guard let runner else {
-        throw await WuhuToolExecutionError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(runnerRegistry.listRunnerNames().joined(separator: ", "))")
+        throw await ToolMessageError(message: "Runner '\(runnerID.displayName)' is not connected. Available runners: \(runnerRegistry.listRunnerNames().joined(separator: ", "))")
       }
 
       let mountPath: String
@@ -542,7 +542,7 @@ extension WuhuService {
         mountTemplateID = resolved.templateID
       } else if rawPath.isEmpty {
         // Create a scratch directory tied to this session ID
-        mountPath = try WuhuScratchDirectory.create(sessionID: currentSessionID)
+        mountPath = try ScratchDirectory.create(sessionID: currentSessionID)
       } else {
         mountPath = rawPath
       }
@@ -551,7 +551,7 @@ extension WuhuService {
       if runnerID == .local {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: mountPath, isDirectory: &isDir), isDir.boolValue else {
-          throw WuhuToolExecutionError(message: "Directory not found: \(mountPath)")
+          throw ToolMessageError(message: "Directory not found: \(mountPath)")
         }
       }
 
@@ -627,7 +627,7 @@ extension WuhuService {
     // When a non-local runner is provided, materialize on the runner's filesystem.
     // The template's paths (templatePath, workspacesPath) are interpreted on the runner.
     if let runner, runner.id != .local {
-      let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath, cwd: "")
+      let workspacesRoot = WorkspaceManager.resolveWorkspacesPath(mt.workspacesPath, cwd: "")
       let destinationPath = URL(fileURLWithPath: workspacesRoot)
         .appendingPathComponent(sessionID, isDirectory: true)
         .path
@@ -642,8 +642,8 @@ extension WuhuService {
     // Local materialization (existing behavior)
     let serverCwd = FileManager.default.currentDirectoryPath
     let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
-    let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
-    let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
+    let workspacesRoot = WorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+    let workspacePath = try await WorkspaceManager.materializeFolderTemplateWorkspace(
       sessionID: sessionID,
       templatePath: templatePath,
       startupScript: mt.startupScript,
@@ -665,7 +665,7 @@ extension WuhuService {
       provider: parent.provider,
       model: parent.model,
       reasoningEffort: reasoningEffort,
-      systemPrompt: WuhuDefaultSystemPrompts.codingAgent,
+      systemPrompt: DefaultSystemPrompts.codingAgent,
       cwd: resolved.workspacePath,
       parentSessionID: parentSessionID,
     )
@@ -700,13 +700,13 @@ extension WuhuService {
     ])
 
     let tool = Tool(
-      name: WuhuAgentToolNames.listRunners,
+      name: AgentToolNames.listRunners,
       description: "List all registered runners with their connection status. Shows built-in, declared (from server config), and incoming (connected to server) runners.",
       parameters: schema,
     )
 
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.listRunners) { [weak self] _, _ in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
+    return AnyAgentTool(tool: tool, label: AgentToolNames.listRunners) { [weak self] _, _ in
+      guard let self else { throw ToolMessageError(message: "Service unavailable") }
 
       let runners = await runnerRegistry.listAll()
       var lines: [String] = []

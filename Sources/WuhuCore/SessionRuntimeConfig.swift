@@ -1,7 +1,7 @@
 import Foundation
 import PiAI
 
-actor WuhuSessionRuntimeConfig {
+actor SessionRuntimeConfig {
   private var _tools: [AnyAgentTool] = []
   let defaultCostLimitCents: Int64?
 

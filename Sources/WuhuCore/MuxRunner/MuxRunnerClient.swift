@@ -3,7 +3,7 @@ import Logging
 import Mux
 import WuhuAPI
 
-private let logger = WuhuDebugLogger.logger("MuxRunnerClient")
+private let logger = DebugLogger.logger("MuxRunnerClient")
 
 /// Server-side actor that implements the `Runner` protocol by forwarding
 /// all calls over a `MuxSession` to a remote runner process.

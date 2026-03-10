@@ -66,7 +66,7 @@ public struct WuhuMuxRunnerServer: Sendable {
   }
 
   public func run(config: WuhuRunnerConfig) async throws {
-    WuhuDebugLogger.bootstrap()
+    DebugLogger.bootstrap()
 
     let logger = Logger(label: "WuhuRunner")
     let name = config.name

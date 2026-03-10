@@ -21,7 +21,7 @@ struct MountlessToolTests {
   private func noMountTools() -> [String: AnyAgentTool] {
     let resolver = noMountResolver()
     return Dictionary(
-      uniqueKeysWithValues: WuhuTools.codingAgentTools(
+      uniqueKeysWithValues: AgentTools.codingAgentTools(
         cwdProvider: { nil },
         mountResolver: resolver,
       ).map { ($0.tool.name, $0) },

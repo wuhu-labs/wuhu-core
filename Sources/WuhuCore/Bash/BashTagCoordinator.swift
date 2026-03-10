@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-private let logger = WuhuDebugLogger.logger("BashTagCoordinator")
+private let logger = DebugLogger.logger("BashTagCoordinator")
 
 /// Handler for bash results arriving from the worker.
 /// Routes results to the appropriate session.

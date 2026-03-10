@@ -4,7 +4,7 @@ import Foundation
 ///
 /// When a session calls `mount({})` with no path, a scratch directory is created
 /// at `~/.wuhu/scratch/<sessionID>` so the agent has a private workspace.
-public enum WuhuScratchDirectory {
+public enum ScratchDirectory {
   /// The root directory under which all scratch directories live.
   public static func scratchRoot() -> String {
     URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)

@@ -2,7 +2,7 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-enum WuhuToolRepairer {
+enum ToolRepairer {
   static let lostToolResultText =
     "The result for this tool call has been lost. Retry if needed. The tool call might or might not have taken place; for non-idempotent actions, check the current state before continuing."
 
@@ -24,7 +24,7 @@ enum WuhuToolRepairer {
     transcript: [WuhuSessionEntry],
     mode: Mode,
     store: any SessionStore,
-    eventHub: WuhuLiveEventHub,
+    eventHub: LiveEventHub,
   ) async throws -> Result {
     var pendingOrder: [String] = []
     var pendingNames: [String: String] = [:]

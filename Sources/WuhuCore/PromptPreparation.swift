@@ -2,13 +2,13 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-enum WuhuPromptPreparation {
+enum PromptPreparation {
   static func extractHeader(from transcript: [WuhuSessionEntry], sessionID: String) throws -> WuhuSessionHeader {
     guard let headerEntry = transcript.first(where: { $0.parentEntryID == nil }) else {
-      throw WuhuStoreError.noHeaderEntry(sessionID)
+      throw StoreError.noHeaderEntry(sessionID)
     }
     guard case let .header(header) = headerEntry.payload else {
-      throw WuhuStoreError.sessionCorrupt("Header entry \(headerEntry.id) payload is not header")
+      throw StoreError.sessionCorrupt("Header entry \(headerEntry.id) payload is not header")
     }
     return header
   }
@@ -21,7 +21,7 @@ enum WuhuPromptPreparation {
 
   static func extractContextMessages(from transcript: [WuhuSessionEntry]) -> [Message] {
     let headerIndex = transcript.firstIndex(where: { $0.parentEntryID == nil }) ?? 0
-    let reminderIndex = WuhuGroupChat.reminderEntryIndex(in: transcript)
+    let reminderIndex = GroupChat.reminderEntryIndex(in: transcript)
 
     var summary: String?
     var firstKeptEntryID: Int64?
@@ -41,7 +41,7 @@ enum WuhuPromptPreparation {
 
     var messages: [Message] = []
     if let summary, !summary.isEmpty {
-      messages.append(WuhuCompactionEngine.makeSummaryMessage(summary: summary))
+      messages.append(CompactionEngine.makeSummaryMessage(summary: summary))
     }
 
     // Track pending tool calls so we can defer context entries that land
@@ -76,7 +76,7 @@ enum WuhuPromptPreparation {
       }
 
       guard case let .message(m) = entry.payload else { continue }
-      guard let pi = WuhuGroupChat.renderForLLM(message: m, entryIndex: entryIndex, reminderIndex: reminderIndex) else { continue }
+      guard let pi = GroupChat.renderForLLM(message: m, entryIndex: entryIndex, reminderIndex: reminderIndex) else { continue }
 
       // Track tool call lifecycle
       switch pi {
@@ -105,7 +105,7 @@ enum WuhuPromptPreparation {
     // Flush any remaining deferred messages (shouldn't happen in normal flow)
     messages.append(contentsOf: deferredContextMessages)
 
-    return WuhuToolRepairer.repairMissingToolResultsInMemory(messages)
+    return ToolRepairer.repairMissingToolResultsInMemory(messages)
   }
 
   static func extractLatestSessionSettings(from transcript: [WuhuSessionEntry]) -> WuhuSessionSettings? {

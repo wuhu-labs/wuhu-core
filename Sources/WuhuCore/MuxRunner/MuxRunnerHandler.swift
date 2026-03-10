@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import Mux
 
-private let logger = WuhuDebugLogger.logger("MuxRunnerHandler")
+private let logger = DebugLogger.logger("MuxRunnerHandler")
 
 /// Accepts inbound mux streams and dispatches each to the appropriate
 /// `Runner` method via `RunnerServerHandler`.

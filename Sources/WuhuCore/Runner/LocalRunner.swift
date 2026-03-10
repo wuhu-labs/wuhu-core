@@ -2,7 +2,7 @@ import Dependencies
 import Foundation
 import Logging
 
-private let logger = WuhuDebugLogger.logger("LocalRunner")
+private let logger = DebugLogger.logger("LocalRunner")
 
 /// Local runner — executes everything on the local machine.
 /// Uses the `FileIO` dependency for filesystem operations, preserving

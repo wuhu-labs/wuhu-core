@@ -19,7 +19,7 @@ public struct WuhuServer: Sendable {
     let config = try WuhuServerConfig.load(path: path)
 
     // Bootstrap logging (must happen before any Logger is created)
-    WuhuDebugLogger.bootstrap(logLevel: config.logLevel)
+    DebugLogger.bootstrap(logLevel: config.logLevel)
 
     // Bootstrap OTel if endpoint is configured
     if let endpoint = config.otelEndpoint, !endpoint.isEmpty {
@@ -135,7 +135,7 @@ public struct WuhuServer: Sendable {
     @Sendable func resolveMountTemplate(_ identifier: String, missingStatus: HTTPResponse.Status) async throws -> WuhuMountTemplate {
       do {
         return try await store.getMountTemplate(identifier: identifier)
-      } catch let err as WuhuMountTemplateResolutionError {
+      } catch let err as MountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(missingStatus, message: err.description)
@@ -187,7 +187,7 @@ public struct WuhuServer: Sendable {
       let identifier = try context.parameters.require("identifier")
       do {
         try await store.deleteMountTemplate(identifier: identifier)
-      } catch let err as WuhuMountTemplateResolutionError {
+      } catch let err as MountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(.notFound, message: err.description)
@@ -314,7 +314,7 @@ public struct WuhuServer: Sendable {
       let systemPrompt: String = if let prompt = create.systemPrompt, !prompt.isEmpty {
         prompt
       } else {
-        WuhuDefaultSystemPrompts.codingAgent
+        DefaultSystemPrompts.codingAgent
       }
       let sessionID = UUID().uuidString.lowercased()
 
@@ -330,8 +330,8 @@ public struct WuhuServer: Sendable {
         let mt = try await resolveMountTemplate(mtIdentifier, missingStatus: .badRequest)
         let serverCwd = FileManager.default.currentDirectoryPath
         let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
-        let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
-        let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
+        let workspacesRoot = WorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+        let workspacePath = try await WorkspaceManager.materializeFolderTemplateWorkspace(
           sessionID: sessionID,
           templatePath: templatePath,
           startupScript: mt.startupScript,

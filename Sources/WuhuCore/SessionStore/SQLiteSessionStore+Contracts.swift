@@ -58,7 +58,7 @@ extension SQLiteSessionStore {
   func loadCostLimitCents(sessionID: SessionID) async throws -> Int64? {
     try await dbQueue.read { db in
       guard let row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       return row.costLimitCents
     }
@@ -67,7 +67,7 @@ extension SQLiteSessionStore {
   func setCostLimitCents(sessionID: SessionID, costLimitCents: Int64?) async throws {
     try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       row.costLimitCents = costLimitCents
       row.updatedAt = Date()
@@ -90,7 +90,7 @@ extension SQLiteSessionStore {
   func loadSettingsSnapshot(sessionID: SessionID) async throws -> SessionSettingsSnapshot {
     try await dbQueue.read { db in
       guard let row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
 
       let effectiveModel = ModelSpecifier(provider: ProviderID(rawValue: row.provider), id: row.model)
@@ -114,7 +114,7 @@ extension SQLiteSessionStore {
   func loadStatusSnapshot(sessionID: SessionID) async throws -> SessionStatusSnapshot {
     try await dbQueue.read { db in
       guard let row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       let status = SessionExecutionStatus(rawValue: row.executionStatus) ?? .idle
       return .init(status: status)
@@ -130,7 +130,7 @@ extension SQLiteSessionStore {
   func setPendingModelSelection(sessionID: SessionID, selection: WuhuSessionSettings) async throws -> SessionSettingsSnapshot {
     try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       row.pendingProvider = selection.provider.rawValue
       row.pendingModel = selection.model
@@ -154,7 +154,7 @@ extension SQLiteSessionStore {
   func applyPendingModelIfPossible(sessionID: SessionID) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot)? {
     let result: (WuhuSession, WuhuSessionEntry)? = try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       guard let p = row.pendingProvider, let m = row.pendingModel else { return nil }
 
@@ -210,7 +210,7 @@ extension SQLiteSessionStore {
         arguments: [sessionID.rawValue, lane.rawValue, id.rawValue],
       )
       if db.changesCount == 0 {
-        throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
+        throw StoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
       }
 
       let journal = UserQueueJournalEntry.canceled(lane: lane, id: id, at: now)
@@ -251,7 +251,7 @@ extension SQLiteSessionStore {
   func drainInterruptCheckpoint(sessionID: SessionID) async throws -> DrainResult {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
 
       let systemRows = try SystemQueuePendingRow
@@ -379,7 +379,7 @@ extension SQLiteSessionStore {
   func drainTurnBoundary(sessionID: SessionID) async throws -> DrainResult {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
 
       let followRows = try UserQueuePendingRow
@@ -550,7 +550,7 @@ extension SQLiteSessionStore {
   func appendEntryWithSession(sessionID: SessionID, payload: WuhuEntryPayload, createdAt: Date) async throws -> (WuhuSession, WuhuSessionEntry) {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+        throw StoreError.sessionNotFound(sessionID.rawValue)
       }
       let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &sessionRow, payload: payload, createdAt: createdAt)
       return try (sessionRow.toModel(), entryRow.toModel())
@@ -562,7 +562,7 @@ extension SQLiteSessionStore {
   public func renameSession(id: String, title: String) async throws -> WuhuSession {
     try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: id) else {
-        throw WuhuStoreError.sessionNotFound(id)
+        throw StoreError.sessionNotFound(id)
       }
       let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
       row.customTitle = trimmed.isEmpty ? nil : trimmed
@@ -577,7 +577,7 @@ extension SQLiteSessionStore {
   public func archiveSession(id: String) async throws -> WuhuSession {
     try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: id) else {
-        throw WuhuStoreError.sessionNotFound(id)
+        throw StoreError.sessionNotFound(id)
       }
       row.isArchived = true
       row.updatedAt = Date()
@@ -589,7 +589,7 @@ extension SQLiteSessionStore {
   public func unarchiveSession(id: String) async throws -> WuhuSession {
     try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: id) else {
-        throw WuhuStoreError.sessionNotFound(id)
+        throw StoreError.sessionNotFound(id)
       }
       row.isArchived = false
       row.updatedAt = Date()

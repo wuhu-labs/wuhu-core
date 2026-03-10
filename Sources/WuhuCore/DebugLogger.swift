@@ -6,7 +6,7 @@ import ServiceContextModule
 ///
 /// Log level is controlled by the `logLevel` parameter (defaulting to `.info`).
 /// The old `WUHU_DEBUG=1` environment variable gate is removed — use log levels instead.
-public enum WuhuDebugLogger {
+public enum DebugLogger {
   /// Call once at process startup (before any Logger is created) to configure
   /// the swift-log bootstrap with stderr output at the specified log level.
   ///

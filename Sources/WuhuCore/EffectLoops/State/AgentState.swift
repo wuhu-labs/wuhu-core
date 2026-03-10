@@ -2,7 +2,7 @@
 ///
 /// Composed of sub-states, each owning a logical concern.
 /// Maps from the old `WuhuSessionLoopState` — same data, restructured.
-struct WuhuState: Sendable, Equatable {
+struct AgentState: Sendable, Equatable {
   var transcript: TranscriptState
   var queue: QueueState
   var inference: InferenceState
@@ -11,7 +11,7 @@ struct WuhuState: Sendable, Equatable {
   var settings: SettingsState
   var status: StatusState
 
-  static var empty: WuhuState {
+  static var empty: AgentState {
     .init(
       transcript: .empty,
       queue: .empty,

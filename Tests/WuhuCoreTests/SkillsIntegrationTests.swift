@@ -353,7 +353,7 @@ struct SkillsIntegrationTests {
     # Test Skill Instructions
     """
 
-    let skill = WuhuSkillsLoader.loadSkillFromContent(
+    let skill = SkillsLoader.loadSkillFromContent(
       content,
       filePath: "/project/.wuhu/skills/test-skill/SKILL.md",
       source: "project",
@@ -375,7 +375,7 @@ struct SkillsIntegrationTests {
     # No description
     """
 
-    let skill = WuhuSkillsLoader.loadSkillFromContent(
+    let skill = SkillsLoader.loadSkillFromContent(
       content,
       filePath: "/project/.wuhu/skills/bad-skill/SKILL.md",
       source: "project",

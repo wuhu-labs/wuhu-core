@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WuhuLLMRetryPolicy: Sendable {
+public struct LLMRetryPolicy: Sendable {
   public var maxRetries: Int
   public var initialBackoffSeconds: Double
   public var maxBackoffSeconds: Double

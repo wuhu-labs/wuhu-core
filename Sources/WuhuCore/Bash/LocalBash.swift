@@ -9,7 +9,7 @@ import Subprocess
   @preconcurrency import SystemPackage
 #endif
 
-private let logger = WuhuDebugLogger.logger("LocalBash")
+private let logger = DebugLogger.logger("LocalBash")
 
 /// Callback type for incremental bash output chunks.
 public typealias BashOutputCallback = @Sendable (String) async -> Void

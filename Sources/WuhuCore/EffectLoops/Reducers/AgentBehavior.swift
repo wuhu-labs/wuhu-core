@@ -11,20 +11,20 @@ import WuhuAPI
 ///
 /// Holds session-scoped dependencies (store, config)
 /// that effect factories close over. Created once per session.
-struct WuhuBehavior: LoopBehavior {
-  typealias State = WuhuState
-  typealias Action = WuhuAction
+struct AgentBehavior: LoopBehavior {
+  typealias State = AgentState
+  typealias Action = AgentAction
 
   // MARK: - Session-scoped dependencies
 
   let sessionID: SessionID
   let store: SQLiteSessionStore
-  let runtimeConfig: WuhuSessionRuntimeConfig
+  let runtimeConfig: SessionRuntimeConfig
   var dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
 
   // MARK: - Reduce
 
-  func reduce(state: inout WuhuState, action: WuhuAction) {
+  func reduce(state: inout AgentState, action: AgentAction) {
     switch action {
     case let .queue(a):
       reduceQueue(state: &state, action: a)
@@ -45,7 +45,7 @@ struct WuhuBehavior: LoopBehavior {
 
   // MARK: - Next Effect (Priority Ladder)
 
-  func nextEffect(state: inout WuhuState) -> Effect<WuhuAction>? {
+  func nextEffect(state: inout AgentState) -> Effect<AgentAction>? {
     // 1. Cost gate — if paused, emit exceeded entry then idle
     if state.cost.isPaused {
       if !state.cost.exceededEntryEmitted {
@@ -134,7 +134,7 @@ struct WuhuBehavior: LoopBehavior {
   /// `.pending` tools are not stale — they haven't been picked up yet.
   /// `.started` tools within the deadline are not stale — the worker
   /// may still deliver the result.
-  func staleToolCallIDs(in state: WuhuState) -> [String] {
+  func staleToolCallIDs(in state: AgentState) -> [String] {
     let now = Date()
 
     var finished: Set<String> = []
@@ -156,7 +156,7 @@ struct WuhuBehavior: LoopBehavior {
   }
 
   /// Whether the transcript is mid-turn and needs an inference call.
-  func needsInference(state: WuhuState) -> Bool {
+  func needsInference(state: AgentState) -> Bool {
     for entry in state.transcript.entries.reversed() {
       switch entry.payload {
       case let .message(m):
@@ -182,7 +182,7 @@ struct WuhuBehavior: LoopBehavior {
   }
 
   /// Find tool calls in `.pending` status (not yet started).
-  private func pendingToolCalls(in state: WuhuState) -> [ToolCall] {
+  private func pendingToolCalls(in state: AgentState) -> [ToolCall] {
     let pendingIDs = state.tools.statuses.filter { $0.value.status == .pending }.map(\.key)
     guard !pendingIDs.isEmpty else { return [] }
 
@@ -202,12 +202,12 @@ struct WuhuBehavior: LoopBehavior {
   }
 
   /// Whether compaction should run.
-  private func shouldCompact(state: WuhuState) -> Bool {
+  private func shouldCompact(state: AgentState) -> Bool {
     let model = modelFromSettings(state.settings.snapshot)
-    let settings = WuhuCompactionSettings.load(model: model)
-    let messages = WuhuPromptPreparation.extractContextMessages(from: state.transcript.entries)
-    let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
-    return WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
+    let settings = CompactionSettings.load(model: model)
+    let messages = PromptPreparation.extractContextMessages(from: state.transcript.entries)
+    let estimate = CompactionEngine.estimateContextTokens(messages: messages)
+    return CompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
   }
 
   // MARK: - Run (dependency injection)

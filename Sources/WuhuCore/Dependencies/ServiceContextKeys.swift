@@ -13,7 +13,7 @@ private enum LLMCallDatePathKey: ServiceContextKey {
 }
 
 extension ServiceContext {
-  /// The Wuhu session ID. Set by `WuhuBehavior.run`, flows down to all child tasks.
+  /// The Wuhu session ID. Set by `AgentBehavior.run`, flows down to all child tasks.
   var sessionID: String? {
     get { self[SessionIDKey.self] }
     set { self[SessionIDKey.self] = newValue }

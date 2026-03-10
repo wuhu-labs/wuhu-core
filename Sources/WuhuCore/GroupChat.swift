@@ -2,7 +2,7 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-enum WuhuGroupChat {
+enum GroupChat {
   static let reminderCustomType = "wuhu_group_chat_reminder_v1"
 
   static func reminderEntryIndex(in transcript: [WuhuSessionEntry]) -> Int? {

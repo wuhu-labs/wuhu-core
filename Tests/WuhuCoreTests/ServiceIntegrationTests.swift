@@ -185,13 +185,13 @@ struct ServiceIntegrationTests {
     //
     // Looking at AgentLoop.runUntilIdle: if infer() throws, the error propagates to
     // runUntilIdle, then to the for-await loop in start(), which catches non-cancellation
-    // errors and retries after 1 second (in WuhuSessionRuntime.ensureStarted).
+    // errors and retries after 1 second (in SessionRuntime.ensureStarted).
     //
     // So the session runtime will restart the loop after a brief pause.
     // We should wait and then enqueue again.
 
     // First attempt — will encounter an error.
-    // The agent loop will fail during inference and WuhuSessionRuntime
+    // The agent loop will fail during inference and SessionRuntime
     // will restart after a 1-second sleep.
     do {
       try await harness.enqueueAndWaitForIdle("try this", sessionID: session.id, timeout: 3)
@@ -242,7 +242,7 @@ struct ServiceCompactionTests {
     // We'll simulate a low context window by setting WUHU_COMPACTION_CONTEXT_WINDOW_TOKENS
     // to a small value via env override.
     //
-    // The compaction settings are loaded from env vars in WuhuCompactionSettings.load().
+    // The compaction settings are loaded from env vars in CompactionSettings.load().
     // We need the context to exceed (contextWindowTokens - reserveTokens).
     //
     // With contextWindow=2000 and reserve=500, threshold=1500 tokens.
@@ -272,7 +272,7 @@ struct ServiceCompactionTests {
     )
 
     // Override compaction settings to a very low threshold.
-    // Since WuhuCompactionSettings.load() reads from ProcessInfo.processInfo.environment,
+    // Since CompactionSettings.load() reads from ProcessInfo.processInfo.environment,
     // we need to set env vars. But that's global state... instead, let's just fire many turns
     // and rely on the default settings. With default context window of 128k, we'd need
     // way too many turns.
@@ -314,22 +314,22 @@ struct ServiceCompactionTests {
     let transcript = try await store.getEntries(sessionID: session.id)
 
     // Verify compaction engine says we should compact
-    let messages = WuhuPromptPreparation.extractContextMessages(from: transcript)
-    let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
+    let messages = PromptPreparation.extractContextMessages(from: transcript)
+    let estimate = CompactionEngine.estimateContextTokens(messages: messages)
 
     // With low settings, should compact
-    let settings = WuhuCompactionSettings(
+    let settings = CompactionSettings(
       enabled: true,
       reserveTokens: 500,
       keepRecentTokens: 2000,
       contextWindowTokens: 4000,
     )
 
-    let shouldCompact = WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
+    let shouldCompact = CompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
     #expect(shouldCompact, "Compaction should trigger with low context window threshold")
 
     // Verify preparation succeeds
-    let prep = WuhuCompactionEngine.prepareCompaction(transcript: transcript, settings: settings)
+    let prep = CompactionEngine.prepareCompaction(transcript: transcript, settings: settings)
     #expect(prep != nil, "Compaction preparation should produce a result")
 
     if let prep {
@@ -338,7 +338,7 @@ struct ServiceCompactionTests {
 
       // The summary messages should be shorter than the full history
       let summaryTokenEstimate = prep.messagesToSummarize.reduce(0) {
-        $0 + WuhuCompactionEngine.estimateTokens(message: $1)
+        $0 + CompactionEngine.estimateTokens(message: $1)
       }
       #expect(summaryTokenEstimate > 0)
     }
@@ -396,19 +396,19 @@ struct ServiceCompactionTests {
 
     // Verify compaction would trigger with low settings.
     let transcript = try await store.getEntries(sessionID: session.id)
-    let messages = WuhuPromptPreparation.extractContextMessages(from: transcript)
-    let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
+    let messages = PromptPreparation.extractContextMessages(from: transcript)
+    let estimate = CompactionEngine.estimateContextTokens(messages: messages)
 
-    let lowSettings = WuhuCompactionSettings(
+    let lowSettings = CompactionSettings(
       enabled: true,
       reserveTokens: 1000,
       keepRecentTokens: 2000,
       contextWindowTokens: 8000,
     )
-    #expect(WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: lowSettings))
+    #expect(CompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: lowSettings))
 
     // Verify preparation produces a valid result.
-    let prep = WuhuCompactionEngine.prepareCompaction(transcript: transcript, settings: lowSettings)
+    let prep = CompactionEngine.prepareCompaction(transcript: transcript, settings: lowSettings)
     #expect(prep != nil, "prepareCompaction should succeed")
 
     if let prep {
@@ -432,7 +432,7 @@ struct ServiceCompactionTests {
         }
       }
 
-      let summary = try await WuhuCompactionEngine.generateSummary(
+      let summary = try await CompactionEngine.generateSummary(
         preparation: prep,
         model: model,
         settings: lowSettings,
@@ -459,7 +459,7 @@ struct ServiceCompactionTests {
       #expect(hasCompaction, "Compaction entry should be in transcript")
 
       // Verify context messages after compaction are shorter.
-      let messagesAfter = WuhuPromptPreparation.extractContextMessages(from: transcriptAfter)
+      let messagesAfter = PromptPreparation.extractContextMessages(from: transcriptAfter)
       #expect(
         messagesAfter.count < messages.count,
         "Post-compaction context (\(messagesAfter.count) messages) should be shorter than pre-compaction (\(messages.count) messages)",

@@ -2,13 +2,13 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-struct WuhuCompactionSettings: Sendable, Hashable {
+struct CompactionSettings: Sendable, Hashable {
   var enabled: Bool
   var reserveTokens: Int
   var keepRecentTokens: Int
   var contextWindowTokens: Int
 
-  static func load(model: Model, env: [String: String] = ProcessInfo.processInfo.environment) -> WuhuCompactionSettings {
+  static func load(model: Model, env: [String: String] = ProcessInfo.processInfo.environment) -> CompactionSettings {
     let enabled = (env["WUHU_COMPACTION_ENABLED"] ?? "1") != "0"
     let reserveTokens = Int(env["WUHU_COMPACTION_RESERVE_TOKENS"] ?? "") ?? 16384
 
@@ -45,7 +45,7 @@ struct WuhuCompactionSettings: Sendable, Hashable {
   }
 }
 
-enum WuhuCompactionEngine {
+enum CompactionEngine {
   static let summarizationSystemPrompt = """
   You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
 
@@ -183,7 +183,7 @@ enum WuhuCompactionEngine {
     )
   }
 
-  static func shouldCompact(contextTokens: Int, settings: WuhuCompactionSettings) -> Bool {
+  static func shouldCompact(contextTokens: Int, settings: CompactionSettings) -> Bool {
     guard settings.enabled else { return false }
     return contextTokens > settings.contextWindowTokens - settings.reserveTokens
   }
@@ -232,7 +232,7 @@ enum WuhuCompactionEngine {
 
   static func prepareCompaction(
     transcript: [WuhuSessionEntry],
-    settings: WuhuCompactionSettings,
+    settings: CompactionSettings,
   ) -> Preparation? {
     guard let headerIndex = transcript.firstIndex(where: { $0.parentEntryID == nil }) else { return nil }
     let messagesStartIndex = min(headerIndex + 1, transcript.count)
@@ -308,7 +308,7 @@ enum WuhuCompactionEngine {
   static func generateSummary(
     preparation: Preparation,
     model: Model,
-    settings: WuhuCompactionSettings,
+    settings: CompactionSettings,
     requestOptions: RequestOptions,
     streamFn: StreamFn,
   ) async throws -> String {

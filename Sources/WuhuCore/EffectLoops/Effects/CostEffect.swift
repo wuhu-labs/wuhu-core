@@ -2,10 +2,10 @@ import Foundation
 import WuhuAPI
 
 /// Effect factory for cost-related side effects.
-extension WuhuBehavior {
+extension AgentBehavior {
   /// Persists a `wuhu_cost_limit_exceeded_v1` custom entry to the transcript
   /// so the user sees why the session stopped.
-  func emitCostExceededEntry(state: WuhuState) -> Effect<WuhuAction> {
+  func emitCostExceededEntry(state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
     let totalSpent = state.cost.totalSpent
@@ -29,9 +29,9 @@ extension WuhuBehavior {
           payload: payload,
           createdAt: Date(),
         )
-        await send(WuhuAction.transcript(.append(entry)))
+        await send(AgentAction.transcript(.append(entry)))
       } catch {
-        let line = "[WuhuBehavior] ERROR: failed to emit cost-exceeded entry: \(String(describing: error))\n"
+        let line = "[AgentBehavior] ERROR: failed to emit cost-exceeded entry: \(String(describing: error))\n"
         FileHandle.standardError.write(Data(line.utf8))
       }
     }

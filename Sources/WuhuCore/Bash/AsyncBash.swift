@@ -1,13 +1,13 @@
 import Foundation
 import PiAI
 
-public struct WuhuAsyncBashToolContext: Sendable {
-  public var registry: WuhuAsyncBashRegistry
+public struct AsyncBashToolContext: Sendable {
+  public var registry: AsyncBashRegistry
   public var sessionID: String?
   public var ownerID: String?
 
   public init(
-    registry: WuhuAsyncBashRegistry = .shared,
+    registry: AsyncBashRegistry = .shared,
     sessionID: String? = nil,
     ownerID: String? = nil,
   ) {
@@ -17,7 +17,7 @@ public struct WuhuAsyncBashToolContext: Sendable {
   }
 }
 
-public struct WuhuAsyncBashStarted: Sendable, Hashable {
+public struct AsyncBashStarted: Sendable, Hashable {
   public var id: String
   public var pid: Int32
   public var startedAt: Date
@@ -39,14 +39,14 @@ public struct WuhuAsyncBashStarted: Sendable, Hashable {
   }
 }
 
-public enum WuhuAsyncTaskState: String, Sendable, Hashable, Codable {
+public enum AsyncTaskState: String, Sendable, Hashable, Codable {
   case running
   case finished
 }
 
-public struct WuhuAsyncBashStatus: Sendable, Hashable, Codable {
+public struct AsyncBashStatus: Sendable, Hashable, Codable {
   public var id: String
-  public var state: WuhuAsyncTaskState
+  public var state: AsyncTaskState
   public var pid: Int32?
   public var startedAt: Date
   public var endedAt: Date?
@@ -58,7 +58,7 @@ public struct WuhuAsyncBashStatus: Sendable, Hashable, Codable {
 
   public init(
     id: String,
-    state: WuhuAsyncTaskState,
+    state: AsyncTaskState,
     pid: Int32?,
     startedAt: Date,
     endedAt: Date?,
@@ -81,7 +81,7 @@ public struct WuhuAsyncBashStatus: Sendable, Hashable, Codable {
   }
 }
 
-public struct WuhuAsyncBashCompletion: Sendable, Hashable {
+public struct AsyncBashCompletion: Sendable, Hashable {
   public var id: String
   public var sessionID: String?
   public var ownerID: String?
@@ -97,8 +97,8 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
 
 #if os(macOS) || os(Linux)
 
-  public actor WuhuAsyncBashRegistry {
-    public static let shared = WuhuAsyncBashRegistry()
+  public actor AsyncBashRegistry {
+    public static let shared = AsyncBashRegistry()
 
     public init() {}
 
@@ -148,11 +148,11 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
     }
 
     private var tasks: [String: TaskRecord] = [:]
-    private var subscribers: [UUID: AsyncStream<WuhuAsyncBashCompletion>.Continuation] = [:]
+    private var subscribers: [UUID: AsyncStream<AsyncBashCompletion>.Continuation] = [:]
     private var reapTask: Task<Void, Never>?
 
-    public func subscribeCompletions() -> AsyncStream<WuhuAsyncBashCompletion> {
-      AsyncStream(WuhuAsyncBashCompletion.self, bufferingPolicy: .bufferingNewest(4096)) { continuation in
+    public func subscribeCompletions() -> AsyncStream<AsyncBashCompletion> {
+      AsyncStream(AsyncBashCompletion.self, bufferingPolicy: .bufferingNewest(4096)) { continuation in
         let token = UUID()
         subscribers[token] = continuation
         continuation.onTermination = { [weak self] _ in
@@ -200,7 +200,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       sessionID: String? = nil,
       ownerID: String? = nil,
       timeoutSeconds: Double? = nil,
-    ) throws -> WuhuAsyncBashStarted {
+    ) throws -> AsyncBashStarted {
       var isDir: ObjCBool = false
       guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
         throw PiAIError.unsupported("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
@@ -278,7 +278,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       )
     }
 
-    public func status(id: String) -> WuhuAsyncBashStatus? {
+    public func status(id: String) -> AsyncBashStatus? {
       guard let record = tasks[id] else { return nil }
 
       if record.endedAt == nil, !record.process.isRunning {
@@ -288,7 +288,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
 
       let endedAt = record.endedAt
       let durationSeconds = endedAt.map { $0.timeIntervalSince(record.startedAt) }
-      let state: WuhuAsyncTaskState = endedAt == nil ? .running : .finished
+      let state: AsyncTaskState = endedAt == nil ? .running : .finished
       let pid: Int32? = (state == .running) ? Int32(record.process.processIdentifier) : nil
 
       return .init(
@@ -325,7 +325,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       try? record.stderrHandle.close()
 
       let endedAt = record.endedAt ?? Date()
-      let completion = WuhuAsyncBashCompletion(
+      let completion = AsyncBashCompletion(
         id: record.id,
         sessionID: record.sessionID,
         ownerID: record.ownerID,
@@ -347,13 +347,13 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
 
 #else
 
-  public actor WuhuAsyncBashRegistry {
-    public static let shared = WuhuAsyncBashRegistry()
+  public actor AsyncBashRegistry {
+    public static let shared = AsyncBashRegistry()
 
     public init() {}
 
-    public func subscribeCompletions() -> AsyncStream<WuhuAsyncBashCompletion> {
-      AsyncStream(WuhuAsyncBashCompletion.self) { continuation in
+    public func subscribeCompletions() -> AsyncStream<AsyncBashCompletion> {
+      AsyncStream(AsyncBashCompletion.self) { continuation in
         continuation.finish()
       }
     }
@@ -364,11 +364,11 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       sessionID _: String? = nil,
       ownerID _: String? = nil,
       timeoutSeconds _: Double? = nil,
-    ) throws -> WuhuAsyncBashStarted {
+    ) throws -> AsyncBashStarted {
       throw PiAIError.unsupported("Async bash is not supported on this platform.")
     }
 
-    public func status(id _: String) -> WuhuAsyncBashStatus? {
+    public func status(id _: String) -> AsyncBashStatus? {
       nil
     }
 

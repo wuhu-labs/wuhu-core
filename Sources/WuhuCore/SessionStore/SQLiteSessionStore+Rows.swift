@@ -19,7 +19,7 @@ struct MountTemplateRow: Codable, FetchableRecord, MutablePersistableRecord {
 
   func toModel() throws -> WuhuMountTemplate {
     guard let mtType = WuhuMountTemplateType(rawValue: type) else {
-      throw WuhuMountTemplateResolutionError.unsupportedType(type)
+      throw MountTemplateResolutionError.unsupportedType(type)
     }
     return .init(
       id: id,
@@ -90,10 +90,10 @@ struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
 
   func toModel() throws -> WuhuSession {
     guard let provider = WuhuProvider(rawValue: provider) else {
-      throw WuhuStoreError.sessionCorrupt("Unknown provider: \(self.provider)")
+      throw StoreError.sessionCorrupt("Unknown provider: \(self.provider)")
     }
     guard let headEntryID, let tailEntryID else {
-      throw WuhuStoreError.sessionCorrupt("Session \(id) missing head/tail entry ids")
+      throw StoreError.sessionCorrupt("Session \(id) missing head/tail entry ids")
     }
     return .init(
       id: id,
@@ -226,7 +226,7 @@ extension SQLiteSessionStore {
 
   static func maybeSetIdleIfNoPendingWork(db: Database, sessionID: String) throws {
     guard let row = try SessionRow.fetchOne(db, key: sessionID) else {
-      throw WuhuStoreError.sessionNotFound(sessionID)
+      throw StoreError.sessionNotFound(sessionID)
     }
     if row.executionStatus == SessionExecutionStatus.stopped.rawValue {
       return
@@ -377,7 +377,7 @@ extension SQLiteSessionStore {
     )
     try row.insert(db)
     guard let newID = row.id else {
-      throw WuhuStoreError.sessionCorrupt("Failed to create entry id")
+      throw StoreError.sessionCorrupt("Failed to create entry id")
     }
 
     sessionRow.tailEntryID = newID
@@ -415,7 +415,7 @@ extension SQLiteSessionStore {
     }
 
     guard let fetched = try EntryRow.fetchOne(db, key: newID) else {
-      throw WuhuStoreError.sessionCorrupt("Failed to re-fetch inserted entry \(newID)")
+      throw StoreError.sessionCorrupt("Failed to re-fetch inserted entry \(newID)")
     }
     return fetched
   }

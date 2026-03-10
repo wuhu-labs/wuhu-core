@@ -3,7 +3,7 @@ import Foundation
 /// In-process pub/sub for transport-agnostic ``SessionEvent`` updates.
 ///
 /// Used by the server to implement race-free SSE subscriptions.
-actor WuhuSessionSubscriptionHub {
+actor SessionSubscriptionHub {
   private var subscribers: [String: [UUID: AsyncStream<SessionEvent>.Continuation]] = [:]
 
   func subscribe(sessionID: String) -> AsyncStream<SessionEvent> {

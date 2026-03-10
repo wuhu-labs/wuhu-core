@@ -3,7 +3,7 @@ import Foundation
 import Logging
 import WuhuAPI
 
-private let debugLogger = WuhuDebugLogger.logger("WorkerManager")
+private let debugLogger = DebugLogger.logger("WorkerManager")
 
 /// Manages runner workers: owns the flock, spawns the current-gen worker,
 /// drains previous-gen workers, and handles crash/respawn.
@@ -105,7 +105,7 @@ public actor WorkerManager: Runner {
           await connection.runner.setCallbacks(upstream)
           let listenerTask = Task {
             await connection.startCallbackListener()
-            await self.previousGenWorkerDrained(directory: item.directory)
+            self.previousGenWorkerDrained(directory: item.directory)
           }
           let state = DrainingWorkerState(
             connection: connection,
@@ -262,7 +262,7 @@ public actor WorkerManager: Runner {
       await item.connection.runner.setCallbacks(callbacks)
       let listenerTask = Task {
         await item.connection.startCallbackListener()
-        await self.previousGenWorkerDrained(directory: item.directory)
+        self.previousGenWorkerDrained(directory: item.directory)
       }
       let state = DrainingWorkerState(
         connection: item.connection,

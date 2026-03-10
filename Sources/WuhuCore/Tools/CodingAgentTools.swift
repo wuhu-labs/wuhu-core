@@ -5,11 +5,11 @@ import PiAI
 /// Returns nil when no mount has been set yet.
 public typealias CwdProvider = @Sendable () async throws -> String?
 
-public extension WuhuTools {
+public extension AgentTools {
   static func codingAgentTools(
     cwdProvider: @escaping CwdProvider,
     mountResolver: @escaping MountResolver,
-    asyncBash: WuhuAsyncBashToolContext = .init(),
+    asyncBash: AsyncBashToolContext = .init(),
     braveSearchAPIKey: String? = nil,
   ) -> [AnyAgentTool] {
     var tools: [AnyAgentTool] = [
@@ -630,7 +630,7 @@ private func bashTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
 
 // MARK: - async_bash
 
-private func asyncBashTool(cwdProvider: @escaping CwdProvider, context: WuhuAsyncBashToolContext) -> AnyAgentTool {
+private func asyncBashTool(cwdProvider: @escaping CwdProvider, context: AsyncBashToolContext) -> AnyAgentTool {
   struct Params: Sendable {
     var command: String
     var timeout: Double?
@@ -690,7 +690,7 @@ private func asyncBashTool(cwdProvider: @escaping CwdProvider, context: WuhuAsyn
 
 // MARK: - async_bash_status
 
-private func asyncBashStatusTool(context: WuhuAsyncBashToolContext) -> AnyAgentTool {
+private func asyncBashStatusTool(context: AsyncBashToolContext) -> AnyAgentTool {
   struct Params: Sendable {
     var id: String
 

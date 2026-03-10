@@ -1,4 +1,4 @@
-public enum WuhuMountTemplateResolutionError: Error, Sendable, CustomStringConvertible {
+public enum MountTemplateResolutionError: Error, Sendable, CustomStringConvertible {
   case unknownMountTemplate(String)
   case unsupportedType(String)
 

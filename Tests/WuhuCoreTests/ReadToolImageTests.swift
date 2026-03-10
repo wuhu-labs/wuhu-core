@@ -13,8 +13,8 @@ struct ReadToolImageTests {
   }
 
   private func tools() -> [String: AnyAgentTool] {
-    let resolver = WuhuTools.testMountResolver(cwd: cwd)
-    return Dictionary(uniqueKeysWithValues: WuhuTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
+    let resolver = AgentTools.testMountResolver(cwd: cwd)
+    return Dictionary(uniqueKeysWithValues: AgentTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver).map { ($0.tool.name, $0) })
   }
 
   @Test func readToolReturnsImageContentForPNG() async throws {

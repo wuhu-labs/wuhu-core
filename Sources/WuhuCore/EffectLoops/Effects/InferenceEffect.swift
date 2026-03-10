@@ -3,17 +3,17 @@ import Foundation
 import PiAI
 
 /// Effect factory for running inference (streaming LLM call).
-extension WuhuBehavior {
+extension AgentBehavior {
   /// Calls PiAI streaming API, sends `.inference(.delta)` for each text chunk,
   /// `.inference(.completed)` on success, `.inference(.failed)` on error.
-  func runInference(state: WuhuState) -> Effect<WuhuAction> {
+  func runInference(state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
     let entries = state.transcript.entries
     return Effect { send in
       @Dependency(\.streamFn) var streamFn
-      await send(WuhuAction.inference(.started))
+      await send(AgentAction.inference(.started))
 
       do {
         let session = try await store.getSession(id: sessionID.rawValue)
@@ -28,9 +28,9 @@ extension WuhuBehavior {
         let tools = await runtimeConfig.tools()
 
         // Build context
-        let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
+        let header = (try? PromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
         let systemPrompt = header?.systemPrompt ?? ""
-        let messages = WuhuPromptPreparation.extractContextMessages(from: entries)
+        let messages = PromptPreparation.extractContextMessages(from: entries)
         let hydrated = await hydrateImageBlobs(in: messages)
 
         var effectiveSystemPrompt = systemPrompt
@@ -53,7 +53,7 @@ extension WuhuBehavior {
           case let .start(p):
             partial = p
           case let .textDelta(delta, p):
-            await send(WuhuAction.inference(.delta(delta)))
+            await send(AgentAction.inference(.delta(delta)))
             partial = p
           case let .done(message):
             final = message
@@ -70,17 +70,17 @@ extension WuhuBehavior {
           payload: .message(.fromPi(.assistant(message))),
           createdAt: message.timestamp,
         )
-        await send(WuhuAction.transcript(.append(entry)))
+        await send(AgentAction.transcript(.append(entry)))
 
         // Track cost for this inference (use resolved model from the response, not the session alias)
         if let usage = message.usage {
-          let entryCost = WuhuPricingTable.computeEntryCost(
+          let entryCost = PricingTable.computeEntryCost(
             provider: session.provider,
             model: message.model,
             usage: WuhuUsage.fromPi(usage),
           )
           if entryCost > 0 {
-            await send(WuhuAction.cost(.spent(entryCost)))
+            await send(AgentAction.cost(.spent(entryCost)))
           }
         }
 
@@ -92,18 +92,18 @@ extension WuhuBehavior {
         if !calls.isEmpty {
           let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
           for update in updates {
-            await send(WuhuAction.tools(.statusSet(id: update.id, status: update.status)))
+            await send(AgentAction.tools(.statusSet(id: update.id, status: update.status)))
           }
         }
 
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(WuhuAction.status(.updated(status)))
+        await send(AgentAction.status(.updated(status)))
 
-        await send(WuhuAction.inference(.completed(message)))
+        await send(AgentAction.inference(.completed(message)))
       } catch is CancellationError {
         throw CancellationError()
       } catch {
-        await send(WuhuAction.inference(.failed(InferenceError.from(error))))
+        await send(AgentAction.inference(.failed(InferenceError.from(error))))
       }
     }
   }

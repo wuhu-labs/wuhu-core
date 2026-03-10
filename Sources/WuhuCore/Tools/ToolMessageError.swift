@@ -1,6 +1,6 @@
 import Foundation
 
-struct WuhuToolExecutionError: Error, Sendable, CustomStringConvertible, Hashable {
+struct ToolMessageError: Error, Sendable, CustomStringConvertible, Hashable {
   var message: String
 
   var description: String {

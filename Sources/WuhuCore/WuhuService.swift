@@ -5,25 +5,25 @@ import WuhuAPI
 
 public actor WuhuService {
   let store: SQLiteSessionStore
-  private let retryPolicy: WuhuLLMRetryPolicy
-  private let asyncBashRegistry: WuhuAsyncBashRegistry
+  private let retryPolicy: LLMRetryPolicy
+  private let asyncBashRegistry: AsyncBashRegistry
   private let dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
   private let instanceID: String
-  private let eventHub = WuhuLiveEventHub()
-  private let subscriptionHub = WuhuSessionSubscriptionHub()
-  private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
+  private let eventHub = LiveEventHub()
+  private let subscriptionHub = SessionSubscriptionHub()
+  private var asyncBashRouter: AsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
   public let bashCoordinator: BashTagCoordinator
   private let defaultCostLimitCents: Int64?
 
-  private var runtimes: [String: WuhuSessionRuntime] = [:]
+  private var runtimes: [String: SessionRuntime] = [:]
 
   public init(
     store: SQLiteSessionStore,
-    retryPolicy: WuhuLLMRetryPolicy = .init(),
-    asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
+    retryPolicy: LLMRetryPolicy = .init(),
+    asyncBashRegistry: AsyncBashRegistry = .shared,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry,
@@ -93,13 +93,13 @@ public actor WuhuService {
         // Configure runtime with tools + stream fn before starting,
         // same as enqueue(...) does for new messages.
         let sid = session.id
-        let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sid, ownerID: instanceID)
+        let asyncBash = AsyncBashToolContext(registry: asyncBashRegistry, sessionID: sid, ownerID: instanceID)
         let mountResolver = MountResolverFactory.make(
           sessionID: sid,
           store: store,
           runnerRegistry: runnerRegistry,
         )
-        let baseTools = WuhuTools.codingAgentTools(
+        let baseTools = AgentTools.codingAgentTools(
           cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
           mountResolver: mountResolver,
           asyncBash: asyncBash,
@@ -122,7 +122,7 @@ public actor WuhuService {
 
   private func ensureAsyncBashRouter() async {
     guard asyncBashRouter == nil else { return }
-    let router = WuhuAsyncBashCompletionRouter(
+    let router = AsyncBashCompletionRouter(
       registry: asyncBashRegistry,
       instanceID: instanceID,
       enqueueSystemJSON: { [weak self] sessionID, jsonText, timestamp in
@@ -140,9 +140,9 @@ public actor WuhuService {
     await asyncBashRegistry.startReapWatchdog()
   }
 
-  private func runtime(for sessionID: String) -> WuhuSessionRuntime {
+  private func runtime(for sessionID: String) -> SessionRuntime {
     if let existing = runtimes[sessionID] { return existing }
-    let runtime = WuhuSessionRuntime(
+    let runtime = SessionRuntime(
       sessionID: .init(rawValue: sessionID),
       store: store,
       eventHub: eventHub,
@@ -292,13 +292,13 @@ public actor WuhuService {
     _ = try await store.appendEntry(sessionID: sessionID, payload: announcementPayload)
 
     // Mount-level AGENTS.md
-    let agentsFiles: [WuhuContextFile] = if let runner {
+    let agentsFiles: [ContextFile] = if let runner {
       await loadAgentsFilesViaRunner(runner: runner, root: mount.path)
     } else {
       loadAgentsFiles(at: mount.path)
     }
     if !agentsFiles.isEmpty {
-      let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
+      let rendered = ContextRenderer.renderAgentsFiles(agentsFiles)
       let agentsPayload: WuhuEntryPayload = .custom(
         customType: WuhuCustomMessageTypes.agentsContext,
         data: .object([
@@ -319,7 +319,7 @@ public actor WuhuService {
         .appendingPathComponent(".wuhu")
         .appendingPathComponent("skills")
         .path
-      mountSkills = WuhuSkillsLoader.load(userSkillsDir: "/dev/null", projectSkillsDir: mountSkillsDir)
+      mountSkills = SkillsLoader.load(userSkillsDir: "/dev/null", projectSkillsDir: mountSkillsDir)
     }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
@@ -340,7 +340,7 @@ public actor WuhuService {
     // Workspace AGENTS.md
     let agentsFiles = loadAgentsFiles(at: workspaceRoot)
     if !agentsFiles.isEmpty {
-      let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
+      let rendered = ContextRenderer.renderAgentsFiles(agentsFiles)
       let agentsPayload: WuhuEntryPayload = .custom(
         customType: WuhuCustomMessageTypes.agentsContext,
         data: .object([
@@ -359,7 +359,7 @@ public actor WuhuService {
     let workspaceSkillsDir = URL(fileURLWithPath: workspaceRoot, isDirectory: true)
       .appendingPathComponent("skills")
       .path
-    let skills = WuhuSkillsLoader.load(
+    let skills = SkillsLoader.load(
       userSkillsDir: homeSkillsDir,
       workspaceSkillsDir: workspaceSkillsDir,
       projectSkillsDir: "/dev/null",
@@ -421,7 +421,7 @@ public actor WuhuService {
       return .init(repairedEntries: [], stopEntry: nil)
     }
 
-    let toolRepair = try await WuhuToolRepairer.repairMissingToolResultsIfNeeded(
+    let toolRepair = try await ToolRepairer.repairMissingToolResultsIfNeeded(
       sessionID: sessionID,
       transcript: transcript,
       mode: .stopped,
@@ -539,14 +539,14 @@ public actor WuhuService {
 
 // MARK: - Context helpers
 
-private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
+private func loadAgentsFiles(at root: String) -> [ContextFile] {
   let fm = FileManager.default
   let candidates = [
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.md").path,
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.local.md").path,
   ]
 
-  var files: [WuhuContextFile] = []
+  var files: [ContextFile] = []
   for path in candidates {
     guard fm.fileExists(atPath: path) else { continue }
     guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
@@ -556,13 +556,13 @@ private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
 }
 
 /// Load AGENTS.md files via a runner's FileIO ops (works for both local and remote runners).
-private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async -> [WuhuContextFile] {
+private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async -> [ContextFile] {
   let candidates = [
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.md").path,
     URL(fileURLWithPath: root).appendingPathComponent("AGENTS.local.md").path,
   ]
 
-  var files: [WuhuContextFile] = []
+  var files: [ContextFile] = []
   for path in candidates {
     do {
       let existence = try await runner.exists(path: path)
@@ -606,7 +606,7 @@ private func loadSkillsViaRunner(runner: any Runner, root: String) async -> [Wuh
     let absolutePath = URL(fileURLWithPath: skillsDir).appendingPathComponent(entry.relativePath).path
     do {
       let content = try await runner.readString(path: absolutePath, encoding: .utf8)
-      if let skill = WuhuSkillsLoader.loadSkillFromContent(content, filePath: absolutePath, source: "project") {
+      if let skill = SkillsLoader.loadSkillFromContent(content, filePath: absolutePath, source: "project") {
         byName[skill.name] = skill
       }
     } catch {
@@ -617,13 +617,13 @@ private func loadSkillsViaRunner(runner: any Runner, root: String) async -> [Wuh
   return byName.values.sorted { $0.name < $1.name }
 }
 
-struct WuhuContextFile: Sendable, Hashable {
+struct ContextFile: Sendable, Hashable {
   var path: String
   var content: String
 }
 
-enum WuhuContextRenderer {
-  static func renderAgentsFiles(_ files: [WuhuContextFile]) -> String {
+enum ContextRenderer {
+  static func renderAgentsFiles(_ files: [ContextFile]) -> String {
     guard !files.isEmpty else { return "" }
     var s = "# Project Context\n\n"
     s += "Project-specific instructions and guidelines:\n\n"
@@ -644,14 +644,14 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     await ensureAsyncBashRouter()
     let session = try await store.getSession(id: sessionID.rawValue)
 
-    let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
+    let asyncBash = AsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
     let mountResolver = MountResolverFactory.make(
       sessionID: sid,
       store: store,
       runnerRegistry: runnerRegistry,
     )
-    let baseTools = WuhuTools.codingAgentTools(
+    let baseTools = AgentTools.codingAgentTools(
       cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
       mountResolver: mountResolver,
       asyncBash: asyncBash,

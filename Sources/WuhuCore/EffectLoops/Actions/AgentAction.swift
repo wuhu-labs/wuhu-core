@@ -2,7 +2,7 @@
 ///
 /// Hierarchical — each concern gets its own sub-action enum.
 /// The top-level `reduce` dispatches to sub-reducers based on case.
-enum WuhuAction: Sendable {
+enum AgentAction: Sendable {
   case queue(QueueAction)
   case inference(InferenceAction)
   case tools(ToolsAction)

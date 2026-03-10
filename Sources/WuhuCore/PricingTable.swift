@@ -6,7 +6,7 @@ import WuhuAPI
 /// Prices are in **hundredths-of-a-cent per million tokens** (Int64).
 /// This avoids floating-point drift — a $500 spend = 5,000,000,000 units,
 /// which fits comfortably in Int64.
-enum WuhuPricingTable {
+enum PricingTable {
   struct ModelPrice: Sendable {
     var inputPricePerMTok: Int64
     var outputPricePerMTok: Int64
@@ -53,7 +53,7 @@ enum WuhuPricingTable {
   static func price(provider: WuhuProvider, model: String) -> ModelPrice {
     let key = "\(provider.rawValue):\(model)"
     if let found = prices[key] { return found }
-    let line = "[WuhuPricingTable] WARNING: Unknown model '\(key)', using fallback (Opus) pricing\n"
+    let line = "[PricingTable] WARNING: Unknown model '\(key)', using fallback (Opus) pricing\n"
     FileHandle.standardError.write(Data(line.utf8))
     return fallbackPrice
   }

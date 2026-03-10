@@ -3,35 +3,35 @@ import Foundation
 import PiAI
 import WuhuAPI
 
-actor WuhuSessionRuntime {
+actor SessionRuntime {
   private let sessionID: SessionID
   private let store: SQLiteSessionStore
-  private let eventHub: WuhuLiveEventHub
-  private let subscriptionHub: WuhuSessionSubscriptionHub
-  private let runtimeConfig: WuhuSessionRuntimeConfig
+  private let eventHub: LiveEventHub
+  private let subscriptionHub: SessionSubscriptionHub
+  private let runtimeConfig: SessionRuntimeConfig
   private let onIdle: (@Sendable (_ sessionID: String) async -> Void)?
 
   private var publishedSystemCursor: QueueCursor = .init(rawValue: "0")
   private var publishedSteerCursor: QueueCursor = .init(rawValue: "0")
   private var publishedFollowUpCursor: QueueCursor = .init(rawValue: "0")
 
-  private let behavior: WuhuBehavior
-  private var loop: EffectLoop<WuhuBehavior>?
+  private let behavior: AgentBehavior
+  private var loop: EffectLoop<AgentBehavior>?
 
   private var startTask: Task<Void, Never>?
   private var observeTask: Task<Void, Never>?
 
   private var streaming: Bool = false
   private var inflightText: String = ""
-  private var observedState: WuhuState = .empty
+  private var observedState: AgentState = .empty
   private var observationReady: Bool = false
-  private var pendingActions: AsyncStream<WuhuAction>?
+  private var pendingActions: AsyncStream<AgentAction>?
 
   init(
     sessionID: SessionID,
     store: SQLiteSessionStore,
-    eventHub: WuhuLiveEventHub,
-    subscriptionHub: WuhuSessionSubscriptionHub,
+    eventHub: LiveEventHub,
+    subscriptionHub: SessionSubscriptionHub,
     dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
     defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
@@ -41,8 +41,8 @@ actor WuhuSessionRuntime {
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
-    runtimeConfig = WuhuSessionRuntimeConfig(defaultCostLimitCents: defaultCostLimitCents)
-    behavior = WuhuBehavior(
+    runtimeConfig = SessionRuntimeConfig(defaultCostLimitCents: defaultCostLimitCents)
+    behavior = AgentBehavior(
       sessionID: sessionID, store: store,
       runtimeConfig: runtimeConfig,
       dependencyOverrides: dependencyOverrides,
@@ -61,15 +61,15 @@ actor WuhuSessionRuntime {
       while !Task.isCancelled {
         do {
           let parts = try await store.loadLoopStateParts(sessionID: sessionID)
-          let defaultLimit = await runtimeConfig.defaultCostLimitCents
+          let defaultLimit = runtimeConfig.defaultCostLimitCents
 
           // Compute cost from transcript and populate CostState
-          let totalSpent = WuhuPricingTable.computeCost(entries: parts.entries)
+          let totalSpent = PricingTable.computeCost(entries: parts.entries)
           let costLimit = parts.costLimitCents ?? defaultLimit
           let budgetRemaining: Int64? = costLimit.map { $0 - totalSpent }
           let isPaused = budgetRemaining.map { $0 <= 0 } ?? false
 
-          let initialState = WuhuState(
+          let initialState = AgentState(
             transcript: .init(entries: parts.entries),
             queue: .init(system: parts.systemUrgent, steer: parts.steer, followUp: parts.followUp),
             inference: .empty,
@@ -88,7 +88,7 @@ actor WuhuSessionRuntime {
           return
         } catch {
           // Best-effort: keep the per-session loop alive for the process lifetime.
-          let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
+          let line = "[SessionRuntime] loop.start() failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
           FileHandle.standardError.write(Data(line.utf8))
           try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -105,7 +105,7 @@ actor WuhuSessionRuntime {
     }
   }
 
-  private func installLoop(_ newLoop: EffectLoop<WuhuBehavior>, state: WuhuState, actions: AsyncStream<WuhuAction>) {
+  private func installLoop(_ newLoop: EffectLoop<AgentBehavior>, state: AgentState, actions: AsyncStream<AgentAction>) {
     loop = newLoop
     observedState = state
     streaming = state.inference.status == .running
@@ -281,7 +281,7 @@ actor WuhuSessionRuntime {
 
   // MARK: - Observation handling
 
-  private func handleAction(_ action: WuhuAction) async {
+  private func handleAction(_ action: AgentAction) async {
     let wasIdle = isIdle()
     behavior.reduce(state: &observedState, action: action)
 
