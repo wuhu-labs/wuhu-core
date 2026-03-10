@@ -43,112 +43,33 @@ public extension DependencyValues {
   }
 }
 
-// MARK: - Observed wrapper (stderr + disk in one stream intercept)
+// MARK: - Instrumented HTTP client
 
-private let streamFnLogger = WuhuDebugLogger.logger("LLMRequest")
+/// A version of `sharedHTTPClient` wrapped with ``InstrumentedHTTPClient``
+/// for raw HTTP payload capture. Must be configured with a payload store
+/// before use via ``configureInstrumentedHTTPClient(payloadStore:)``.
+private nonisolated(unsafe) var _instrumentedHTTPClient: (any PiAI.HTTPClient)?
 
-/// Wrap a `StreamFn` with stderr debug logging and optional disk persistence.
-/// SessionID and purpose are read from `ServiceContext.current` via MetadataProvider.
-public func observedStreamFn(
-  _ base: @escaping StreamFn,
-  diskLogger: WuhuLLMRequestLogger? = nil,
-) -> StreamFn {
-  { model, context, options in
-    let ctx = ServiceContext.current
-    let sessionID = ctx?.sessionID ?? "unknown"
-    let purpose = ctx?.llmPurpose ?? .agent
+/// Configure the instrumented HTTP client with a payload store.
+/// Call this during server startup, before any LLM calls are made.
+public func configureInstrumentedHTTPClient(payloadStore: any LLMPayloadStore) {
+  _instrumentedHTTPClient = InstrumentedHTTPClient(base: sharedHTTPClient, payloadStore: payloadStore)
+}
 
-    let startedAt = Date()
-    streamFnLogger.debug(
-      "inference started",
-      metadata: [
-        "provider": "\(model.provider.rawValue)",
-        "model": "\(model.id)",
-        "messageCount": "\(context.messages.count)",
-        "toolCount": "\(context.tools?.count ?? 0)",
-      ],
-    )
-
-    let request = diskLogger.map { _ in
-      WuhuLLMRequestSnapshot(
-        model: .init(from: model),
-        context: .init(from: context),
-        options: .init(from: options),
-      )
-    }
-
-    let underlying = try await base(model, context, options)
-
-    return AsyncThrowingStream(AssistantMessageEvent.self, bufferingPolicy: .bufferingNewest(1024)) { continuation in
-      let task = Task {
-        var finalMessage: AssistantMessage?
-        do {
-          for try await event in underlying {
-            if case let .done(message) = event {
-              finalMessage = message
-            }
-            continuation.yield(event)
-          }
-
-          let finishedAt = Date()
-          let durationMs = Int(finishedAt.timeIntervalSince(startedAt) * 1000)
-          streamFnLogger.debug(
-            "inference completed",
-            metadata: [
-              "durationMs": "\(durationMs)",
-              "inputTokens": "\(finalMessage?.usage?.inputTokens ?? 0)",
-              "outputTokens": "\(finalMessage?.usage?.outputTokens ?? 0)",
-              "stopReason": "\(finalMessage?.stopReason.rawValue ?? "unknown")",
-            ],
-          )
-
-          if let diskLogger, let request {
-            await diskLogger.writeLog(
-              .init(
-                version: 1,
-                sessionID: sessionID,
-                purpose: purpose,
-                startedAt: startedAt,
-                finishedAt: finishedAt,
-                request: request,
-                response: finalMessage.map { .init(from: $0) },
-                error: nil,
-              ),
-            )
-          }
-          continuation.finish()
-        } catch {
-          let finishedAt = Date()
-          let durationMs = Int(finishedAt.timeIntervalSince(startedAt) * 1000)
-          streamFnLogger.debug(
-            "inference failed",
-            metadata: [
-              "durationMs": "\(durationMs)",
-              "error": "\(error)",
-            ],
-          )
-
-          if let diskLogger, let request {
-            await diskLogger.writeLog(
-              .init(
-                version: 1,
-                sessionID: sessionID,
-                purpose: purpose,
-                startedAt: startedAt,
-                finishedAt: finishedAt,
-                request: request,
-                response: finalMessage.map { .init(from: $0) },
-                error: "\(error)",
-              ),
-            )
-          }
-          continuation.finish(throwing: error)
-        }
-      }
-
-      continuation.onTermination = { _ in
-        task.cancel()
-      }
-    }
+/// Stream a response using the instrumented HTTP client (with payload capture).
+/// Falls back to the plain client if instrumentation hasn't been configured.
+public func streamInstrumented(
+  model: Model,
+  context: Context,
+  options: RequestOptions,
+) async throws -> AsyncThrowingStream<AssistantMessageEvent, any Error> {
+  let http: any PiAI.HTTPClient = _instrumentedHTTPClient ?? sharedHTTPClient
+  switch model.provider {
+  case .openai:
+    return try await OpenAIResponsesProvider(http: http).stream(model: model, context: context, options: options)
+  case .openaiCodex:
+    return try await OpenAICodexResponsesProvider(http: http).stream(model: model, context: context, options: options)
+  case .anthropic:
+    return try await AnthropicMessagesProvider(http: http).stream(model: model, context: context, options: options)
   }
 }

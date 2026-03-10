@@ -7,6 +7,7 @@ import Logging
 import Mux
 import MuxSocket
 import NIOCore
+import OTel
 import WuhuAPI
 import WuhuCore
 
@@ -14,10 +15,17 @@ public struct WuhuServer: Sendable {
   public init() {}
 
   public func run(configPath: String?, llmRequestLogDir: String? = nil) async throws {
-    WuhuDebugLogger.bootstrapIfNeeded()
-
     let path = (configPath?.isEmpty == false) ? configPath! : WuhuServerConfig.defaultPath()
     let config = try WuhuServerConfig.load(path: path)
+
+    // Bootstrap logging (must happen before any Logger is created)
+    WuhuDebugLogger.bootstrap(logLevel: config.logLevel)
+
+    // Bootstrap OTel if endpoint is configured
+    if let endpoint = config.otelEndpoint, !endpoint.isEmpty {
+      setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint, 1)
+      setenv("OTEL_SERVICE_NAME", "wuhu", 1)
+    }
 
     if let openai = config.llm?.openai, !openai.isEmpty {
       setenv("OPENAI_API_KEY", openai, 1)
@@ -49,19 +57,21 @@ public struct WuhuServer: Sendable {
     try workspaceDocsStore.ensureDefaultDirectories()
     workspaceDocsStore.startWatching()
 
+    // Configure LLM payload store (raw HTTP request/response capture)
     let effectiveLogDir: String? = {
       if let llmRequestLogDir, !llmRequestLogDir.isEmpty { return llmRequestLogDir }
       if let fromConfig = config.llmRequestLogDir, !fromConfig.isEmpty { return fromConfig }
       return nil
     }()
 
-    let requestLogger: WuhuLLMRequestLogger? = effectiveLogDir.flatMap { raw in
-      let expanded = (raw as NSString).expandingTildeInPath
-      return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
+    if let logDir = effectiveLogDir {
+      let expanded = (logDir as NSString).expandingTildeInPath
+      let payloadStore = LocalLLMPayloadStore(rootDirectory: expanded)
+      configureInstrumentedHTTPClient(payloadStore: payloadStore)
     }
 
     prepareDependencies {
-      $0.streamFn = observedStreamFn($0.streamFn, diskLogger: requestLogger)
+      $0.streamFn = tracedStreamFn(streamInstrumented)
     }
 
     // Runner registry — connect to configured remote runners
