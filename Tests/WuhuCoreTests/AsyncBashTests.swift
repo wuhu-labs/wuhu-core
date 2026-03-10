@@ -74,7 +74,7 @@ struct AsyncBashTests {
       store: store,
       blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       asyncBashRegistry: registry,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     ) { $0.streamFn = streamFn }
 
     let session = try await service.createSession(

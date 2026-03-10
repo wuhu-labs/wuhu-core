@@ -43,8 +43,8 @@ public protocol LoopBehavior<State, Action>: Sendable {
   func run(_ work: @escaping @Sendable () async throws -> Void) async throws
 }
 
-extension LoopBehavior {
-  public func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
+public extension LoopBehavior {
+  func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
     try await work()
   }
 }

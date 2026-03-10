@@ -54,7 +54,7 @@ struct BashOutputTruncationTests {
       store: store,
       blobStore: blobStore,
       runnerRegistry: registry,
-      bashCoordinator: bashCoordinator
+      bashCoordinator: bashCoordinator,
     ) { $0.streamFn = mock.streamFn }
     await service.startAgentLoopManager()
 

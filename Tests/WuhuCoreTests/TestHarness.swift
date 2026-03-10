@@ -37,7 +37,7 @@ struct TestHarness {
       store: store,
       blobStore: blobStore,
       workspaceRoot: workspaceRoot,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     ) { $0.streamFn = mockLLM.streamFn }
   }
 
@@ -57,7 +57,7 @@ struct TestHarness {
       store: store,
       blobStore: blobStore,
       workspaceRoot: workspaceRoot,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     ) { $0.streamFn = streamFn }
   }
 
@@ -66,7 +66,7 @@ struct TestHarness {
     WuhuService(
       store: store,
       blobStore: blobStore,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     ) { $0.streamFn = newMock.streamFn }
   }
 
