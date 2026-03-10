@@ -57,7 +57,7 @@ public actor LocalRunner: Runner {
     let task = Task { [weak self] in
       let result: BashResult
       do {
-        result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout) { chunk in
+        result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout, tag: tag) { chunk in
           try? await callbacks?.bashOutput(tag: tag, chunk: chunk)
         }
         logger.debug(
@@ -128,16 +128,19 @@ public actor LocalRunner: Runner {
   // MARK: - File I/O
 
   public func readData(path: String) async throws -> Data {
+    logger.debug("worker readData", metadata: ["path": "\(path)"])
     @Dependency(\.fileIO) var fileIO
     return try fileIO.readData(path: path)
   }
 
   public func readString(path: String, encoding: String.Encoding) async throws -> String {
+    logger.debug("worker readString", metadata: ["path": "\(path)"])
     @Dependency(\.fileIO) var fileIO
     return try fileIO.readString(path: path, encoding: encoding)
   }
 
   public func writeData(path: String, data: Data, createIntermediateDirectories: Bool) async throws {
+    logger.debug("worker writeData", metadata: ["path": "\(path)", "size": "\(data.count)"])
     @Dependency(\.fileIO) var fileIO
     if createIntermediateDirectories {
       let dir = (path as NSString).deletingLastPathComponent
@@ -147,6 +150,7 @@ public actor LocalRunner: Runner {
   }
 
   public func writeString(path: String, content: String, createIntermediateDirectories: Bool, encoding: String.Encoding) async throws {
+    logger.debug("worker writeString", metadata: ["path": "\(path)", "size": "\(content.count)"])
     @Dependency(\.fileIO) var fileIO
     if createIntermediateDirectories {
       let dir = (path as NSString).deletingLastPathComponent
@@ -156,6 +160,7 @@ public actor LocalRunner: Runner {
   }
 
   public func exists(path: String) async throws -> FileExistence {
+    logger.debug("worker exists", metadata: ["path": "\(path)"])
     @Dependency(\.fileIO) var fileIO
     let (exists, isDir) = fileIO.existsAndIsDirectory(path: path)
     if !exists { return .notFound }
@@ -163,6 +168,7 @@ public actor LocalRunner: Runner {
   }
 
   public func listDirectory(path: String) async throws -> [DirectoryEntry] {
+    logger.debug("worker listDirectory", metadata: ["path": "\(path)"])
     @Dependency(\.fileIO) var fileIO
     let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: path)
     guard dirExists else { throw RunnerError.fileNotFound(path: path) }
@@ -248,6 +254,7 @@ public actor LocalRunner: Runner {
   // MARK: - Search
 
   public func find(params: FindParams) async throws -> FindResult {
+    logger.debug("worker find", metadata: ["root": "\(params.root)", "pattern": "\(params.pattern)"])
     @Dependency(\.fileIO) var fileIO
 
     let searchRoot = params.root
@@ -284,6 +291,7 @@ public actor LocalRunner: Runner {
   }
 
   public func grep(params: GrepParams) async throws -> GrepResult {
+    logger.debug("worker grep", metadata: ["root": "\(params.root)", "pattern": "\(params.pattern)", "glob": "\(params.glob ?? "none")"])
     @Dependency(\.fileIO) var fileIO
 
     let searchPath = params.root

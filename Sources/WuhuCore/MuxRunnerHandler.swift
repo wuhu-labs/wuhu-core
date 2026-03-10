@@ -116,6 +116,7 @@ public enum MuxRunnerHandler {
 
       case .read:
         let req = try MuxRunnerCodec.decode(ReadRequest.self, from: payload)
+        logger.debug("runner received read", metadata: ["runner": "\(runnerName)", "path": "\(req.path)"])
         let (response, binaryData) = await handler.handle(request: .read(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
         if let data = binaryData {
@@ -124,6 +125,7 @@ public enum MuxRunnerHandler {
 
       case .write:
         let req = try MuxRunnerCodec.decode(WriteRequest.self, from: payload)
+        logger.debug("runner received write", metadata: ["runner": "\(runnerName)", "path": "\(req.path)"])
         if req.content != nil {
           let (response, _) = await handler.handle(request: .write(id: "", req))
           try await writeRunnerResponse(stream, op: op, response: response)
@@ -135,11 +137,13 @@ public enum MuxRunnerHandler {
 
       case .exists:
         let req = try MuxRunnerCodec.decode(ExistsRequest.self, from: payload)
+        logger.debug("runner received exists", metadata: ["runner": "\(runnerName)", "path": "\(req.path)"])
         let (response, _) = await handler.handle(request: .exists(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
       case .ls:
         let req = try MuxRunnerCodec.decode(LsRequest.self, from: payload)
+        logger.debug("runner received ls", metadata: ["runner": "\(runnerName)", "path": "\(req.path)"])
         let (response, _) = await handler.handle(request: .ls(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
@@ -155,11 +159,13 @@ public enum MuxRunnerHandler {
 
       case .find:
         let req = try MuxRunnerCodec.decode(FindParams.self, from: payload)
+        logger.debug("runner received find", metadata: ["runner": "\(runnerName)", "root": "\(req.root)", "pattern": "\(req.pattern)"])
         let (response, _) = await handler.handle(request: .find(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
       case .grep:
         let req = try MuxRunnerCodec.decode(GrepParams.self, from: payload)
+        logger.debug("runner received grep", metadata: ["runner": "\(runnerName)", "root": "\(req.root)", "pattern": "\(req.pattern)"])
         let (response, _) = await handler.handle(request: .grep(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
