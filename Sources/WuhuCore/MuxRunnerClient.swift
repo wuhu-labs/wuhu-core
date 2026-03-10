@@ -1,6 +1,9 @@
 import Foundation
+import Logging
 import Mux
 import WuhuAPI
+
+private let logger = WuhuDebugLogger.logger("MuxRunnerClient")
 
 /// Server-side actor that implements the `Runner` protocol by forwarding
 /// all calls over a `MuxSession` to a remote runner process.
@@ -41,13 +44,14 @@ public actor MuxRunnerClient: Runner {
   public func startCallbackListener() async {
     for await stream in session.inbound {
       let callbacks = callbacks
+      let runnerName = runnerName
       Task {
-        await Self.handleCallbackStream(stream, callbacks: callbacks)
+        await Self.handleCallbackStream(stream, callbacks: callbacks, runnerName: runnerName)
       }
     }
   }
 
-  private static func handleCallbackStream(_ stream: MuxStream, callbacks: (any RunnerCallbacks)?) async {
+  private static func handleCallbackStream(_ stream: MuxStream, callbacks: (any RunnerCallbacks)?, runnerName: String) async {
     do {
       let reader = MuxStreamReader(stream: stream)
       let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
@@ -55,12 +59,31 @@ public actor MuxRunnerClient: Runner {
       switch op {
       case .bashOutput:
         let chunk = try MuxRunnerCodec.decode(BashOutputChunk.self, from: payload)
+        logger.debug(
+          "server received bashOutput callback",
+          metadata: [
+            "tag": "\(chunk.tag)",
+            "runner": "\(runnerName)",
+            "chunkSize": "\(chunk.chunk.count)",
+          ],
+        )
         try await callbacks?.bashOutput(tag: chunk.tag, chunk: chunk.chunk)
         // Send ack
         try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: EmptyAck())
 
       case .bashFinished:
         let finished = try MuxRunnerCodec.decode(BashFinished.self, from: payload)
+        logger.debug(
+          "server received bashFinished callback",
+          metadata: [
+            "tag": "\(finished.tag)",
+            "runner": "\(runnerName)",
+            "exitCode": "\(finished.result.exitCode)",
+            "timedOut": "\(finished.result.timedOut)",
+            "terminated": "\(finished.result.terminated)",
+            "outputSize": "\(finished.result.output.count)",
+          ],
+        )
         try await callbacks?.bashFinished(tag: finished.tag, result: finished.result)
         // Send ack
         try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: EmptyAck())
@@ -79,11 +102,53 @@ public actor MuxRunnerClient: Runner {
   // MARK: - Runner protocol (v3: short-lived RPCs)
 
   public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
-    try await rpc(.startBash, request: StartBashRequest(tag: tag, command: command, cwd: cwd, timeout: timeout))
+    let commandPreview = String(command.prefix(50))
+    logger.debug(
+      "server sending startBash to runner",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "cwd": "\(cwd)",
+        "timeout": "\(timeout.map { String($0) } ?? "none")",
+        "commandPreview": "\(commandPreview)",
+      ],
+    )
+
+    let result: BashStarted = try await rpc(.startBash, request: StartBashRequest(tag: tag, command: command, cwd: cwd, timeout: timeout))
+
+    logger.debug(
+      "server received startBash response from runner",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "alreadyRunning": "\(result.alreadyRunning)",
+      ],
+    )
+
+    return result
   }
 
   public func cancelBash(tag: String) async throws -> BashCancelResult {
-    try await rpc(.cancelBash, request: CancelBashRequest(tag: tag))
+    logger.debug(
+      "server sending cancelBash to runner",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+      ],
+    )
+
+    let result: BashCancelResult = try await rpc(.cancelBash, request: CancelBashRequest(tag: tag))
+
+    logger.debug(
+      "server received cancelBash response from runner",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "result": "\(result.rawValue)",
+      ],
+    )
+
+    return result
   }
 
   // MARK: - File I/O

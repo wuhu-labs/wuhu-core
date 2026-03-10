@@ -1,5 +1,8 @@
 import Foundation
+import Logging
 import Mux
+
+private let logger = WuhuDebugLogger.logger("MuxRunnerHandler")
 
 /// Accepts inbound mux streams and dispatches each to the appropriate
 /// `Runner` method via `RunnerServerHandler`.
@@ -31,20 +34,21 @@ public enum MuxRunnerHandler {
 
     if callbacks == nil {
       // Set up callback sender so the runner can push bash results back to the server
-      let callbackSender = MuxCallbackSender(session: session)
+      let callbackSender = MuxCallbackSender(session: session, runnerName: name)
       await runner.setCallbacks(callbackSender)
     }
 
     for await stream in session.inbound {
       let handler = handler
+      let name = name
       Task {
-        await handleStream(stream, handler: handler)
+        await handleStream(stream, handler: handler, runnerName: name)
       }
     }
   }
 
   /// Handle a single inbound stream (one RPC call).
-  private static func handleStream(_ stream: MuxStream, handler: RunnerServerHandler) async {
+  private static func handleStream(_ stream: MuxStream, handler: RunnerServerHandler, runnerName: String) async {
     do {
       let reader = MuxStreamReader(stream: stream)
       let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
@@ -62,11 +66,51 @@ public enum MuxRunnerHandler {
 
       case .startBash:
         let req = try MuxRunnerCodec.decode(StartBashRequest.self, from: payload)
+        let commandPreview = String(req.command.prefix(50))
+        logger.debug(
+          "runner received startBash request",
+          metadata: [
+            "tag": "\(req.tag)",
+            "runner": "\(runnerName)",
+            "cwd": "\(req.cwd)",
+            "timeout": "\(req.timeout.map { String($0) } ?? "none")",
+            "commandPreview": "\(commandPreview)",
+          ],
+        )
         let (response, _) = await handler.handle(request: .startBash(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
+        if case let .startBash(_, result) = response {
+          switch result {
+          case let .success(started):
+            logger.debug(
+              "runner sent startBash response",
+              metadata: [
+                "tag": "\(req.tag)",
+                "runner": "\(runnerName)",
+                "alreadyRunning": "\(started.alreadyRunning)",
+              ],
+            )
+          case let .failure(error):
+            logger.debug(
+              "runner startBash failed",
+              metadata: [
+                "tag": "\(req.tag)",
+                "runner": "\(runnerName)",
+                "error": "\(error.message)",
+              ],
+            )
+          }
+        }
 
       case .cancelBash:
         let req = try MuxRunnerCodec.decode(CancelBashRequest.self, from: payload)
+        logger.debug(
+          "runner received cancelBash request",
+          metadata: [
+            "tag": "\(req.tag)",
+            "runner": "\(runnerName)",
+          ],
+        )
         let (response, _) = await handler.handle(request: .cancelBash(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
@@ -185,17 +229,38 @@ public enum MuxRunnerHandler {
 /// reads an ack response, and closes.
 public actor MuxCallbackSender: RunnerCallbacks {
   private let session: MuxSession
+  private let runnerName: String
 
-  public init(session: MuxSession) {
+  public init(session: MuxSession, runnerName: String = "unknown") {
     self.session = session
+    self.runnerName = runnerName
   }
 
   public func bashOutput(tag: String, chunk: String) async throws {
+    logger.debug(
+      "runner sending bashOutput callback",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "chunkSize": "\(chunk.count)",
+      ],
+    )
     let payload = BashOutputChunk(tag: tag, chunk: chunk)
     try await sendCallback(op: .bashOutput, payload: payload)
   }
 
   public func bashFinished(tag: String, result: BashResult) async throws {
+    logger.debug(
+      "runner sending bashFinished callback",
+      metadata: [
+        "tag": "\(tag)",
+        "runner": "\(runnerName)",
+        "exitCode": "\(result.exitCode)",
+        "timedOut": "\(result.timedOut)",
+        "terminated": "\(result.terminated)",
+        "outputSize": "\(result.output.count)",
+      ],
+    )
     let payload = BashFinished(tag: tag, result: result)
     try await sendCallback(op: .bashFinished, payload: payload)
   }
