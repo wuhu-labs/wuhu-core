@@ -22,11 +22,9 @@ public func tracedStreamFn(_ base: @escaping StreamFn) -> StreamFn {
     // and we compute the same paths for span attributes.
     let callID = UUID().uuidString.lowercased()
     let now = Date()
-    let fmt = DateFormatter()
-    fmt.locale = Locale(identifier: "en_US_POSIX")
-    fmt.timeZone = TimeZone(secondsFromGMT: 0)
-    fmt.dateFormat = "yyyy/MM/dd"
-    let datePath = fmt.string(from: now)
+    let cal = Calendar(identifier: .gregorian)
+    let c = cal.dateComponents(in: TimeZone(secondsFromGMT: 0)!, from: now)
+    let datePath = String(format: "%04d/%02d/%02d", c.year!, c.month!, c.day!)
 
     var ctx = ServiceContext.current ?? .topLevel
     ctx.llmCallID = callID

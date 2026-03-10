@@ -109,6 +109,7 @@ let package = Package(
       name: "WuhuServer",
       dependencies: [
         "WuhuCore",
+        .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxSocket", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
@@ -119,7 +120,6 @@ let package = Package(
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
         .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
         .product(name: "Dependencies", package: "swift-dependencies"),
-        .product(name: "OTel", package: "swift-otel"),
       ],
       swiftSettings: strictConcurrency,
     ),

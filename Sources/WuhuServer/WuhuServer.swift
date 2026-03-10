@@ -7,7 +7,7 @@ import Logging
 import Mux
 import MuxSocket
 import NIOCore
-import OTel
+import PiAI
 import WuhuAPI
 import WuhuCore
 
@@ -64,14 +64,17 @@ public struct WuhuServer: Sendable {
       return nil
     }()
 
-    if let logDir = effectiveLogDir {
-      let expanded = (logDir as NSString).expandingTildeInPath
-      let payloadStore = LocalLLMPayloadStore(rootDirectory: expanded)
-      configureInstrumentedHTTPClient(payloadStore: payloadStore)
-    }
+    let llmHTTPClient: any PiAI.HTTPClient = {
+      if let logDir = effectiveLogDir {
+        let expanded = (logDir as NSString).expandingTildeInPath
+        let payloadStore = LocalLLMPayloadStore(rootDirectory: expanded)
+        return InstrumentedHTTPClient(base: sharedHTTPClient, payloadStore: payloadStore)
+      }
+      return sharedHTTPClient
+    }()
 
     prepareDependencies {
-      $0.streamFn = tracedStreamFn(streamInstrumented)
+      $0.streamFn = tracedStreamFn(makeStreamFn(http: llmHTTPClient))
     }
 
     // Runner registry — connect to configured remote runners
