@@ -1,19 +1,22 @@
 import Foundation
 import PiAI
 import ServiceContextModule
+import Tracing
 
-/// Header names that must never be written to payload files.
+/// Header names that must never be written to payload files or span attributes.
 private let secretHeaderNames: Set<String> = [
   "authorization",
   "x-api-key",
-  "api-key",
 ]
 
-/// Wraps a `PiAI.HTTPClient` to capture raw HTTP request/response bytes.
+/// Wraps a `PiAI.HTTPClient` to capture raw HTTP request/response bytes and
+/// create an OTel child span for HTTP-level observability.
 ///
-/// For each SSE call, writes two files to the payload store:
-/// - `{date}/{callID}.request` — HTTP method, URL, non-secret headers, and raw JSON body
-/// - `{date}/{callID}.response` — HTTP status, response headers, and raw SSE event text
+/// For each SSE call:
+/// - Creates an `http.request` child span with URL, method, status, headers
+/// - Writes two files to the payload store:
+///   - `{date}/{callID}.request` — HTTP method, URL, non-secret headers, raw JSON body
+///   - `{date}/{callID}.response` — HTTP status, response headers, raw SSE event text
 ///
 /// File paths are derived from ``LLMCallIDKey`` and ``LLMCallDatePathKey``
 /// set in `ServiceContext` by ``tracedStreamFn``.
@@ -40,7 +43,16 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
     let callID = ctx?.llmCallID
     let datePath = ctx?.llmCallDatePath
 
-    // Write request immediately (before the stream starts)
+    // Start HTTP span manually — we end it when the SSE stream completes,
+    // not when this function returns, because the stream outlives the scope.
+    let span = startSpan("http.request", ofKind: .client)
+
+    // Set request attributes on span
+    span.attributes["http.method"] = request.method
+    span.attributes["http.url"] = request.url.absoluteString
+    setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
+
+    // Write request payload immediately (before the stream starts)
     if let callID, let datePath {
       let requestPath = "\(datePath)/\(callID).request"
       let requestData = serializeRequest(request)
@@ -51,15 +63,23 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
       }
     }
 
-    let sseResponse = try await base.sse(for: request)
-
-    // If we don't have a call ID, we can't write files — just pass through
-    guard let callID, let datePath else {
-      return sseResponse
+    let sseResponse: SSEResponse
+    do {
+      sseResponse = try await base.sse(for: request)
+    } catch {
+      span.recordError(error)
+      span.setStatus(.init(code: .error, message: "\(error)"))
+      span.end()
+      throw error
     }
 
-    // Wrap the SSE stream to accumulate raw response text
-    let responsePath = "\(datePath)/\(callID).response"
+    // Set response attributes on span
+    span.attributes["http.status_code"] = sseResponse.response.statusCode
+    setHeaderAttributes(sseResponse.response.headers, prefix: "http.response.header", on: span)
+
+    // If we don't have a call ID, we can't write files — just pass through
+    // but still wrap to end the span when stream completes
+    let responsePath = (callID != nil && datePath != nil) ? "\(datePath!)/\(callID!).response" : nil
     let store = payloadStore
 
     // Build a metadata header for the response file
@@ -90,22 +110,32 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
             continuation.yield(event)
           }
 
-          // Stream completed — write response
-          do {
-            try await store.write(path: responsePath, data: buffer)
-          } catch {
-            // Best-effort
+          // Stream completed successfully — write response payload
+          if let responsePath {
+            do {
+              try await store.write(path: responsePath, data: buffer)
+            } catch {
+              // Best-effort
+            }
           }
 
           continuation.finish()
+          span.end()
         } catch {
           // Stream failed — still write what we captured
           buffer.append(Data("\n--- ERROR ---\n\(error)\n".utf8))
-          do {
-            try await store.write(path: responsePath, data: buffer)
-          } catch {
-            // Best-effort
+          if let responsePath {
+            do {
+              try await store.write(path: responsePath, data: buffer)
+            } catch {
+              // Best-effort
+            }
           }
+
+          span.recordError(error)
+          span.setStatus(.init(code: .error, message: "\(error)"))
+          span.end()
+
           continuation.finish(throwing: error)
         }
       }
@@ -136,5 +166,20 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
       data.append(body)
     }
     return data
+  }
+
+  /// Set non-secret headers as span attributes.
+  /// Header names are normalized: lowercased, dashes become underscores.
+  private func setHeaderAttributes(
+    _ headers: [String: [String]],
+    prefix: String,
+    on span: any Span,
+  ) {
+    for (name, values) in headers {
+      guard !secretHeaderNames.contains(name.lowercased()) else { continue }
+      let normalizedName = name.lowercased().replacingOccurrences(of: "-", with: "_")
+      let key = "\(prefix).\(normalizedName)"
+      span.attributes[key] = values.joined(separator: ", ")
+    }
   }
 }
