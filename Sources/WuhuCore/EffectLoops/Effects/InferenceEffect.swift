@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 
@@ -11,9 +12,9 @@ extension WuhuBehavior {
     let runtimeConfig = runtimeConfig
     let blobStore = blobStore
     let llmRequestLogger = llmRequestLogger
-    let baseStreamFn = baseStreamFn
     let entries = state.transcript.entries
     return Effect { send in
+      @Dependency(\.streamFn) var baseStreamFn
       await send(WuhuAction.inference(.started))
 
       do {

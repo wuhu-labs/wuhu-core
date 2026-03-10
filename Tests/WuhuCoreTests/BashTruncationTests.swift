@@ -50,16 +50,12 @@ struct BashOutputTruncationTests {
     // Wire callbacks: LocalRunner → BashTagCoordinator
     await localRunner.setCallbacks(bashCoordinator)
 
-    let service = withDependencies {
-      $0.streamFn = mock.streamFn
-    } operation: {
-      WuhuService(
-        store: store,
-        blobStore: blobStore,
-        runnerRegistry: registry,
-        bashCoordinator: bashCoordinator,
-      )
-    }
+    let service = WuhuService(
+      store: store,
+      blobStore: blobStore,
+      runnerRegistry: registry,
+      bashCoordinator: bashCoordinator
+    ) { $0.streamFn = mock.streamFn }
     await service.startAgentLoopManager()
 
     // Create a session with a real cwd (mount).

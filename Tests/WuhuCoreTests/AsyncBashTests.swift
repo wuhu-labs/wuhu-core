@@ -70,16 +70,12 @@ struct AsyncBashTests {
       }
     }
 
-    let service = withDependencies {
-      $0.streamFn = streamFn
-    } operation: {
-      WuhuService(
-        store: store,
-        blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
-        asyncBashRegistry: registry,
-        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-      )
-    }
+    let service = WuhuService(
+      store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
+      asyncBashRegistry: registry,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+    ) { $0.streamFn = streamFn }
 
     let session = try await service.createSession(
       sessionID: sessionID,

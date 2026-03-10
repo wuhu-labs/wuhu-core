@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -10,11 +11,11 @@ extension WuhuBehavior {
     let store = store
     let runtimeConfig = runtimeConfig
     let llmRequestLogger = llmRequestLogger
-    let baseStreamFn = baseStreamFn
     let entries = state.transcript.entries
     let settingsSnapshot = state.settings.snapshot
 
     return Effect { send in
+      @Dependency(\.streamFn) var baseStreamFn
       defer { Task { await send(WuhuAction.transcript(.compactionFinished)) } }
 
       let session = try await store.getSession(id: sessionID.rawValue)

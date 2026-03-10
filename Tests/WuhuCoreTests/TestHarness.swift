@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -34,18 +33,12 @@ struct TestHarness {
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
     blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
-    let _store = store
-    let _blobStore = blobStore
-    service = withDependencies {
-      $0.streamFn = mockLLM.streamFn
-    } operation: {
-      WuhuService(
-        store: _store,
-        blobStore: _blobStore,
-        workspaceRoot: workspaceRoot,
-        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-      )
-    }
+    service = WuhuService(
+      store: store,
+      blobStore: blobStore,
+      workspaceRoot: workspaceRoot,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+    ) { $0.streamFn = mockLLM.streamFn }
   }
 
   /// Init with a raw `StreamFn` instead of `MockStreamFn`.
@@ -60,31 +53,21 @@ struct TestHarness {
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
     blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
-    let _store = store
-    let _blobStore = blobStore
-    service = withDependencies {
-      $0.streamFn = streamFn
-    } operation: {
-      WuhuService(
-        store: _store,
-        blobStore: _blobStore,
-        workspaceRoot: workspaceRoot,
-        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-      )
-    }
+    service = WuhuService(
+      store: store,
+      blobStore: blobStore,
+      workspaceRoot: workspaceRoot,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+    ) { $0.streamFn = streamFn }
   }
 
   /// Create a new harness re-using the same store (simulates server restart).
   func newServiceSameStore(mockLLM newMock: MockStreamFn) -> WuhuService {
-    withDependencies {
-      $0.streamFn = newMock.streamFn
-    } operation: {
-      WuhuService(
-        store: store,
-        blobStore: blobStore,
-        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-      )
-    }
+    WuhuService(
+      store: store,
+      blobStore: blobStore,
+      runnerRegistry: RunnerRegistry(runners: [LocalRunner()])
+    ) { $0.streamFn = newMock.streamFn }
   }
 
   // MARK: - Session creation

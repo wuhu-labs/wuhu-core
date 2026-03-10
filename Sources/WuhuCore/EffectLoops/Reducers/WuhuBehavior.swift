@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -20,7 +21,7 @@ struct WuhuBehavior: LoopBehavior {
   let runtimeConfig: WuhuSessionRuntimeConfig
   let blobStore: WuhuBlobStore
   var llmRequestLogger: WuhuLLMRequestLogger? = nil
-  var baseStreamFn: StreamFn = { _, _, _ in fatalError("StreamFn not configured") }
+  var dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
 
   // MARK: - Reduce
 
@@ -208,5 +209,17 @@ struct WuhuBehavior: LoopBehavior {
     let messages = WuhuPromptPreparation.extractContextMessages(from: state.transcript.entries)
     let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
     return WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
+  }
+
+  // MARK: - Run (dependency injection)
+
+  func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
+    if let overrides = dependencyOverrides {
+      try await withDependencies(overrides) {
+        try await work()
+      }
+    } else {
+      try await work()
+    }
   }
 }

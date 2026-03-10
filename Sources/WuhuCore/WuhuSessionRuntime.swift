@@ -34,7 +34,7 @@ actor WuhuSessionRuntime {
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
     llmRequestLogger: WuhuLLMRequestLogger? = nil,
-    baseStreamFn: StreamFn? = nil,
+    dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
     defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
   ) {
@@ -44,12 +44,11 @@ actor WuhuSessionRuntime {
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
     runtimeConfig = WuhuSessionRuntimeConfig(defaultCostLimitCents: defaultCostLimitCents)
-    @Dependency(\.streamFn) var defaultStreamFn
     behavior = WuhuBehavior(
       sessionID: sessionID, store: store,
       runtimeConfig: runtimeConfig, blobStore: blobStore,
       llmRequestLogger: llmRequestLogger,
-      baseStreamFn: baseStreamFn ?? defaultStreamFn,
+      dependencyOverrides: dependencyOverrides,
     )
   }
 

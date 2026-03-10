@@ -9,7 +9,7 @@ public actor WuhuService {
   private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
-  private let capturedStreamFn: StreamFn
+  private let dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
   private let instanceID: String
@@ -33,6 +33,7 @@ public actor WuhuService {
     runnerRegistry: RunnerRegistry,
     bashCoordinator: BashTagCoordinator = BashTagCoordinator(),
     defaultCostLimitCents: Int64? = nil,
+    dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -44,8 +45,7 @@ public actor WuhuService {
     self.runnerRegistry = runnerRegistry
     self.bashCoordinator = bashCoordinator
     self.defaultCostLimitCents = defaultCostLimitCents
-    @Dependency(\.streamFn) var streamFn
-    self.capturedStreamFn = streamFn
+    self.dependencyOverrides = dependencyOverrides
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -155,7 +155,7 @@ public actor WuhuService {
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
       llmRequestLogger: llmRequestLogger,
-      baseStreamFn: capturedStreamFn,
+      dependencyOverrides: dependencyOverrides,
       defaultCostLimitCents: defaultCostLimitCents,
       onIdle: nil,
     )
