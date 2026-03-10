@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import PiAI
+import PiAIAsyncHTTPClient
 
 // MARK: - Version subcommand
 

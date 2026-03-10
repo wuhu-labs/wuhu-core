@@ -48,7 +48,7 @@ struct RemoteSessionSSETransportTests {
     let http = MockHTTPClient(
       sseHandler: { request in
         #expect(request.url.absoluteString.contains("/v1/sessions/s1/subscribe"))
-        #expect(request.headers["Accept"] == "text/event-stream")
+        #expect(request.headers["Accept"] == ["text/event-stream"])
 
         return AsyncThrowingStream { continuation in
           for frame in frames {
@@ -170,7 +170,7 @@ struct RemoteSessionSSETransportTests {
       dataHandler: { request in
         #expect(request.method == "POST")
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/enqueue?lane=followUp")
-        #expect(request.headers["Content-Type"] == "application/json")
+        #expect(request.headers["Content-Type"] == ["application/json"])
 
         let decoded = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: request.body ?? Data())
         #expect(decoded.author == .unknown)
@@ -235,10 +235,11 @@ private struct MockHTTPClient: HTTPClient {
     return try await dataHandler(request)
   }
 
-  func sse(for request: HTTPRequest) async throws -> AsyncThrowingStream<SSEMessage, any Error> {
+  func sse(for request: HTTPRequest) async throws -> SSEResponse {
     guard let sseHandler else {
       throw PiAIError.unsupported("MockHTTPClient.sseHandler not set")
     }
-    return try await sseHandler(request)
+    let events = try await sseHandler(request)
+    return SSEResponse(response: HTTPResponse(statusCode: 200, headers: [:]), events: events)
   }
 }
