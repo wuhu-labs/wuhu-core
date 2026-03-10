@@ -34,13 +34,18 @@ struct TestHarness {
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
     blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
-    service = WuhuService(
-      store: store,
-      blobStore: blobStore,
-      baseStreamFn: mockLLM.streamFn,
-      workspaceRoot: workspaceRoot,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    let _store = store
+    let _blobStore = blobStore
+    service = withDependencies {
+      $0.streamFn = mockLLM.streamFn
+    } operation: {
+      WuhuService(
+        store: _store,
+        blobStore: _blobStore,
+        workspaceRoot: workspaceRoot,
+        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
+      )
+    }
   }
 
   /// Init with a raw `StreamFn` instead of `MockStreamFn`.
@@ -55,23 +60,31 @@ struct TestHarness {
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
     blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
-    service = WuhuService(
-      store: store,
-      blobStore: blobStore,
-      baseStreamFn: streamFn,
-      workspaceRoot: workspaceRoot,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    let _store = store
+    let _blobStore = blobStore
+    service = withDependencies {
+      $0.streamFn = streamFn
+    } operation: {
+      WuhuService(
+        store: _store,
+        blobStore: _blobStore,
+        workspaceRoot: workspaceRoot,
+        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
+      )
+    }
   }
 
   /// Create a new harness re-using the same store (simulates server restart).
   func newServiceSameStore(mockLLM newMock: MockStreamFn) -> WuhuService {
-    WuhuService(
-      store: store,
-      blobStore: blobStore,
-      baseStreamFn: newMock.streamFn,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    )
+    withDependencies {
+      $0.streamFn = newMock.streamFn
+    } operation: {
+      WuhuService(
+        store: store,
+        blobStore: blobStore,
+        runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
+      )
+    }
   }
 
   // MARK: - Session creation

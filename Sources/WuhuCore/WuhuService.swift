@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -8,7 +9,7 @@ public actor WuhuService {
   private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
-  private let baseStreamFn: StreamFn
+  private let capturedStreamFn: StreamFn
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
   private let instanceID: String
@@ -27,7 +28,6 @@ public actor WuhuService {
     llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
-    baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry,
@@ -39,12 +39,13 @@ public actor WuhuService {
     self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
-    self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry
     self.bashCoordinator = bashCoordinator
     self.defaultCostLimitCents = defaultCostLimitCents
+    @Dependency(\.streamFn) var streamFn
+    self.capturedStreamFn = streamFn
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -111,10 +112,8 @@ public actor WuhuService {
           braveSearchAPIKey: braveSearchAPIKey,
         )
         let resolvedTools = agentToolset(session: session, baseTools: baseTools)
-        let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sid, purpose: .agent) ?? baseStreamFn
 
         await rt.setTools(resolvedTools)
-        await rt.setStreamFn(streamFn)
         await rt.ensureStarted()
       }
       if !sessions.isEmpty {
@@ -155,6 +154,8 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
+      llmRequestLogger: llmRequestLogger,
+      baseStreamFn: capturedStreamFn,
       defaultCostLimitCents: defaultCostLimitCents,
       onIdle: nil,
     )
@@ -666,11 +667,8 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
-    let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
-
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.setTools(resolvedTools)
-    await runtime.setStreamFn(streamFn)
     await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }

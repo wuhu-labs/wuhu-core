@@ -9,6 +9,8 @@ extension WuhuBehavior {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
+    let llmRequestLogger = llmRequestLogger
+    let baseStreamFn = baseStreamFn
     let entries = state.transcript.entries
     let settingsSnapshot = state.settings.snapshot
 
@@ -26,7 +28,7 @@ extension WuhuBehavior {
 
       let resolved = WuhuModelCatalog.resolveAlias(session.model)
       let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-      let streamFn = await runtimeConfig.streamFn()
+      let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
       var requestOptions = makeRequestOptions(model: apiModel, settings: settingsSnapshot, userModelID: session.model)
       mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 

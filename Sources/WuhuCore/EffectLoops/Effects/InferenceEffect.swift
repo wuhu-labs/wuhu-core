@@ -10,6 +10,8 @@ extension WuhuBehavior {
     let store = store
     let runtimeConfig = runtimeConfig
     let blobStore = blobStore
+    let llmRequestLogger = llmRequestLogger
+    let baseStreamFn = baseStreamFn
     let entries = state.transcript.entries
     return Effect { send in
       await send(WuhuAction.inference(.started))
@@ -25,7 +27,7 @@ extension WuhuBehavior {
         mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
         let tools = await runtimeConfig.tools()
-        let streamFn = await runtimeConfig.streamFn()
+        let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
 
         // Build context
         let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))

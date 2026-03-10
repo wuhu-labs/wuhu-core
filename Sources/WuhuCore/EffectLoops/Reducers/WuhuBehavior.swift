@@ -19,6 +19,8 @@ struct WuhuBehavior: LoopBehavior {
   let store: SQLiteSessionStore
   let runtimeConfig: WuhuSessionRuntimeConfig
   let blobStore: WuhuBlobStore
+  var llmRequestLogger: WuhuLLMRequestLogger? = nil
+  var baseStreamFn: StreamFn = { _, _, _ in fatalError("StreamFn not configured") }
 
   // MARK: - Reduce
 
