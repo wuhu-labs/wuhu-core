@@ -427,6 +427,68 @@ struct NextEffectPriorityTests {
     #expect(effect == nil) // Model already responded
   }
 
+  @Test("inference blocked while drain is in progress")
+  func inferenceBlockedDuringDrain() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+    // Transcript ends with a tool result (so needsInference == true)
+    state.transcript.entries.append(makeToolResultEntry())
+    // But a drain is in progress — inference must wait
+    state.queue.isDraining = true
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect == nil)
+    #expect(state.inference.status == .idle) // Should NOT have been set to .running
+  }
+
+  @Test("inference proceeds after drain completes")
+  func inferenceAfterDrainCompletes() throws {
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+    // Transcript ends with a tool result
+    state.transcript.entries.append(makeToolResultEntry())
+    // Drain was in progress but just finished
+    state.queue.isDraining = false
+
+    let effect = behavior.nextEffect(state: &state)
+    #expect(effect != nil)
+    #expect(state.inference.status == .running) // Now inference can start
+  }
+
+  @Test("drain + inference: greedy step produces drain but not inference")
+  func drainAndInferenceRace() throws {
+    // Reproduces the bug scenario: after stop+resume, the steer queue has
+    // a pending message AND the transcript ends with a tool result.
+    // The step loop should produce a drain effect first, and NOT also
+    // produce an inference effect in the same step() call.
+    let behavior = try makeBehavior()
+    var state = makeRunningState()
+
+    // Transcript ends with a tool result (repair from stopped bash)
+    state.transcript.entries.append(makeToolResultEntry())
+
+    // Steer queue has a pending user message
+    state.queue.steer = .init(
+      cursor: .init(rawValue: "0"),
+      pending: [.init(
+        id: .init(rawValue: "q1"),
+        enqueuedAt: Date(),
+        message: .init(author: .system, content: .text("can you mount wuhu-umbrella-linux")),
+      )],
+      journal: [],
+    )
+
+    // First nextEffect: should return drain effect
+    let effect1 = behavior.nextEffect(state: &state)
+    #expect(effect1 != nil)
+    #expect(state.queue.isDraining == true) // Drain is happening
+
+    // Second nextEffect (called by step() loop): should NOT start inference
+    let effect2 = behavior.nextEffect(state: &state)
+    #expect(effect2 == nil)
+    #expect(state.inference.status == .idle) // Inference must not start yet
+  }
+
   // MARK: - Tool Execution (Priority 7)
 
   @Test("tool execution when pending tool calls exist")
