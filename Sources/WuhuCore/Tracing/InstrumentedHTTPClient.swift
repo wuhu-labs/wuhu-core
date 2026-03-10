@@ -26,9 +26,9 @@ private let secretHeaderNames: Set<String> = [
 /// If the call crashes mid-stream, you still have the request for debugging.
 public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
   private let base: any PiAI.HTTPClient
-  private let payloadStore: any LLMPayloadStore
+  private let payloadStore: any DataBucket
 
-  public init(base: any PiAI.HTTPClient, payloadStore: any LLMPayloadStore) {
+  public init(base: any PiAI.HTTPClient, payloadStore: any DataBucket) {
     self.base = base
     self.payloadStore = payloadStore
   }
@@ -57,7 +57,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
       let requestPath = "\(datePath)/\(callID).request"
       let requestData = serializeRequest(request)
       do {
-        try await payloadStore.write(path: requestPath, data: requestData)
+        try await payloadStore.write(key: requestPath, data: requestData)
       } catch {
         // Best-effort: payload capture must never break the LLM call
       }
@@ -113,7 +113,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
           // Stream completed successfully — write response payload
           if let responsePath {
             do {
-              try await store.write(path: responsePath, data: buffer)
+              try await store.write(key: responsePath, data: buffer)
             } catch {
               // Best-effort
             }
@@ -126,7 +126,7 @@ public struct InstrumentedHTTPClient: PiAI.HTTPClient, Sendable {
           buffer.append(Data("\n--- ERROR ---\n\(error)\n".utf8))
           if let responsePath {
             do {
-              try await store.write(path: responsePath, data: buffer)
+              try await store.write(key: responsePath, data: buffer)
             } catch {
               // Best-effort
             }

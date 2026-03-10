@@ -168,7 +168,7 @@ struct WuhuCLI: AsyncParsableCommand {
           let fileURL = URL(fileURLWithPath: path)
           let ext = fileURL.pathExtension.lowercased()
 
-          guard WuhuBlobStore.isImageExtension(ext) else {
+          guard BlobBucket.isImageExtension(ext) else {
             throw ValidationError("Unsupported image format: \(ext). Supported: png, jpg, jpeg, gif, webp")
           }
 
@@ -177,11 +177,11 @@ struct WuhuCLI: AsyncParsableCommand {
           }
 
           let data = try Data(contentsOf: fileURL)
-          guard data.count <= WuhuBlobStore.maxImageFileSize else {
+          guard data.count <= BlobBucket.maxImageFileSize else {
             throw ValidationError("Image file too large: \(path). Max: 10MB")
           }
 
-          guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
+          guard let mimeType = BlobBucket.mimeTypeForExtension(ext) else {
             throw ValidationError("Unsupported image format: \(ext). Supported: png, jpg, jpeg, gif, webp")
           }
 

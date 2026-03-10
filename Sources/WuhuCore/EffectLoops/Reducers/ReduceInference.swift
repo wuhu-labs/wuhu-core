@@ -4,7 +4,7 @@ import Foundation
 private let maxInferenceRetries = 10
 
 /// Sub-reducer for inference actions.
-func reduceInference(state: inout WuhuState, action: InferenceAction) {
+func reduceInference(state: inout AgentState, action: InferenceAction) {
   switch action {
   case .started:
     state.inference.status = .running

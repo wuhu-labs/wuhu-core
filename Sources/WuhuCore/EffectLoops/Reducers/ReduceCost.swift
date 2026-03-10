@@ -1,5 +1,5 @@
 /// Sub-reducer for cost actions.
-func reduceCost(state: inout WuhuState, action: CostAction) {
+func reduceCost(state: inout AgentState, action: CostAction) {
   switch action {
   case let .spent(amount):
     state.cost.totalSpent += amount

@@ -4,25 +4,24 @@ import PiAI
 import WuhuAPI
 
 /// Effect factory for transcript compaction.
-extension WuhuBehavior {
+extension AgentBehavior {
   /// Summarize transcript and persist compaction entry.
-  func runCompaction(state: WuhuState) -> Effect<WuhuAction> {
+  func runCompaction(state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
-    let runtimeConfig = runtimeConfig
     let entries = state.transcript.entries
     let settingsSnapshot = state.settings.snapshot
 
     return Effect { send in
       @Dependency(\.streamFn) var streamFn
-      defer { Task { await send(WuhuAction.transcript(.compactionFinished)) } }
+      defer { Task { await send(AgentAction.transcript(.compactionFinished)) } }
 
       let session = try await store.getSession(id: sessionID.rawValue)
       let provider = session.provider.piProvider
       let settingsModel = Model(id: session.model, provider: provider)
-      let settings = WuhuCompactionSettings.load(model: settingsModel)
+      let settings = CompactionSettings.load(model: settingsModel)
 
-      guard let prep = WuhuCompactionEngine.prepareCompaction(transcript: entries, settings: settings) else {
+      guard let prep = CompactionEngine.prepareCompaction(transcript: entries, settings: settings) else {
         return
       }
 
@@ -31,7 +30,7 @@ extension WuhuBehavior {
       var requestOptions = makeRequestOptions(model: apiModel, settings: settingsSnapshot, userModelID: session.model)
       mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
-      let summary = try await WuhuCompactionEngine.generateSummary(
+      let summary = try await CompactionEngine.generateSummary(
         preparation: prep,
         model: apiModel,
         settings: settings,
@@ -50,10 +49,10 @@ extension WuhuBehavior {
         payload: payload,
         createdAt: Date(),
       )
-      await send(WuhuAction.transcript(.append(entry)))
+      await send(AgentAction.transcript(.append(entry)))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(WuhuAction.status(.updated(status)))
+      await send(AgentAction.status(.updated(status)))
     }
   }
 }

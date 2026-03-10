@@ -19,7 +19,7 @@ public struct WuhuServer: Sendable {
     let config = try WuhuServerConfig.load(path: path)
 
     // Bootstrap logging (must happen before any Logger is created)
-    WuhuDebugLogger.bootstrap(logLevel: config.logLevel)
+    DebugLogger.bootstrap(logLevel: config.logLevel)
 
     // Bootstrap OTel if endpoint is configured
     if let endpoint = config.otelEndpoint, !endpoint.isEmpty {
@@ -43,11 +43,10 @@ public struct WuhuServer: Sendable {
 
     let store = try SQLiteSessionStore(path: dbPath)
 
-    let blobRoot: String = {
+    let dataRoot: String = {
       let dbDir = URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent()
-      return dbDir.appendingPathComponent("blobs", isDirectory: true).path
+      return dbDir.path
     }()
-    let blobStore = WuhuBlobStore(rootDirectory: blobRoot)
 
     let workspaceRoot = config.resolveWorkspaceRoot(databasePath: dbPath)
 
@@ -67,7 +66,7 @@ public struct WuhuServer: Sendable {
     let llmHTTPClient: any PiAI.HTTPClient = {
       if let logDir = effectiveLogDir {
         let expanded = (logDir as NSString).expandingTildeInPath
-        let payloadStore = LocalLLMPayloadStore(rootDirectory: expanded)
+        let payloadStore = LocalDataBucket(rootDirectory: expanded)
         return InstrumentedHTTPClient(base: sharedHTTPClient, payloadStore: payloadStore)
       }
       return sharedHTTPClient
@@ -75,6 +74,7 @@ public struct WuhuServer: Sendable {
 
     prepareDependencies {
       $0.streamFn = tracedStreamFn(makeStreamFn(http: llmHTTPClient))
+      $0.dataBucket = LocalDataBucket(rootDirectory: dataRoot)
     }
 
     // Runner registry — connect to configured remote runners
@@ -121,7 +121,6 @@ public struct WuhuServer: Sendable {
 
     let service = WuhuService(
       store: store,
-      blobStore: blobStore,
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
@@ -136,7 +135,7 @@ public struct WuhuServer: Sendable {
     @Sendable func resolveMountTemplate(_ identifier: String, missingStatus: HTTPResponse.Status) async throws -> WuhuMountTemplate {
       do {
         return try await store.getMountTemplate(identifier: identifier)
-      } catch let err as WuhuMountTemplateResolutionError {
+      } catch let err as MountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(missingStatus, message: err.description)
@@ -188,7 +187,7 @@ public struct WuhuServer: Sendable {
       let identifier = try context.parameters.require("identifier")
       do {
         try await store.deleteMountTemplate(identifier: identifier)
-      } catch let err as WuhuMountTemplateResolutionError {
+      } catch let err as MountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(.notFound, message: err.description)
@@ -228,18 +227,18 @@ public struct WuhuServer: Sendable {
       let contentType = request.headers[.contentType] ?? "application/octet-stream"
       let mimeType = String(contentType)
 
-      var body = try await request.body.collect(upTo: WuhuBlobStore.maxImageFileSize + 1024)
+      var body = try await request.body.collect(upTo: BlobBucket.maxImageFileSize + 1024)
       let data = if let bytes = body.readBytes(length: body.readableBytes) {
         Data(bytes)
       } else {
         Data()
       }
 
-      guard data.count <= WuhuBlobStore.maxImageFileSize else {
-        throw HTTPError(.badRequest, message: "Image too large. Max: \(WuhuBlobStore.maxImageFileSize / 1024 / 1024)MB")
+      guard data.count <= BlobBucket.maxImageFileSize else {
+        throw HTTPError(.badRequest, message: "Image too large. Max: \(BlobBucket.maxImageFileSize / 1024 / 1024)MB")
       }
 
-      let uri = try blobStore.store(sessionID: sessionID, data: data, mimeType: mimeType)
+      let uri = try await BlobBucket.store(namespace: sessionID, data: data, mimeType: mimeType)
 
       struct BlobUploadResponse: Encodable {
         let blobURI: String
@@ -260,13 +259,13 @@ public struct WuhuServer: Sendable {
 
       let data: Data
       do {
-        data = try blobStore.resolve(uri: uri)
+        data = try await BlobBucket.resolve(uri: uri)
       } catch {
         throw HTTPError(.notFound, message: "Blob not found: \(filename)")
       }
 
       let ext = filename.split(separator: ".").last.map(String.init) ?? ""
-      let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) ?? "application/octet-stream"
+      let mimeType = BlobBucket.mimeTypeForExtension(ext) ?? "application/octet-stream"
 
       var buffer = ByteBuffer()
       buffer.writeBytes(data)
@@ -315,7 +314,7 @@ public struct WuhuServer: Sendable {
       let systemPrompt: String = if let prompt = create.systemPrompt, !prompt.isEmpty {
         prompt
       } else {
-        WuhuDefaultSystemPrompts.codingAgent
+        DefaultSystemPrompts.codingAgent
       }
       let sessionID = UUID().uuidString.lowercased()
 
@@ -331,8 +330,8 @@ public struct WuhuServer: Sendable {
         let mt = try await resolveMountTemplate(mtIdentifier, missingStatus: .badRequest)
         let serverCwd = FileManager.default.currentDirectoryPath
         let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
-        let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
-        let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
+        let workspacesRoot = WorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+        let workspacePath = try await WorkspaceManager.materializeFolderTemplateWorkspace(
           sessionID: sessionID,
           templatePath: templatePath,
           startupScript: mt.startupScript,

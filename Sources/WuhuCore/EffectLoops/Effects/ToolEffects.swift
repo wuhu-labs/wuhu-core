@@ -3,24 +3,23 @@ import PiAI
 import WuhuAPI
 
 /// Effect factories for tool execution and stale tool recovery.
-extension WuhuBehavior {
+extension AgentBehavior {
   /// Execute tool calls in parallel. Each sends `.tools(.completed)` or
   /// `.tools(.failed)` with the result. Repetition tracking data is sent
   /// back in the actions so the reducer can update the tracker.
-  func executeToolCalls(_ calls: [ToolCall], state: WuhuState) -> Effect<WuhuAction> {
+  func executeToolCalls(_ calls: [ToolCall], state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
-    let blobStore = blobStore
     let tracker = state.tools.repetitionTracker
 
     return Effect { send in
       // Mark all as started in DB
       for call in calls {
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
-        await send(WuhuAction.tools(.willExecute(call)))
+        await send(AgentAction.tools(.willExecute(call)))
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(WuhuAction.status(.updated(status)))
+        await send(AgentAction.status(.updated(status)))
       }
 
       // Partition calls into blocked vs. allowed based on repetition history.
@@ -54,13 +53,13 @@ extension WuhuBehavior {
           payload: .message(.fromPi(toolResult)),
           createdAt: now,
         )
-        await send(WuhuAction.transcript(.append(entry)))
+        await send(AgentAction.transcript(.append(entry)))
 
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
-        await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
+        await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
 
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(WuhuAction.status(.updated(status)))
+        await send(AgentAction.status(.updated(status)))
       }
 
       // Execute allowed calls in parallel.
@@ -123,14 +122,13 @@ extension WuhuBehavior {
             tracker: tracker,
             sessionID: sessionID,
             store: store,
-            blobStore: blobStore,
             send: send,
           )
 
         case .success(.pending):
           // Fire-and-forget tool (e.g., bash). Result will arrive via callback.
           // Tool call stays in .started status. Just clear the executing guard.
-          await send(WuhuAction.tools(.statusSet(id: call.id, status: .started)))
+          await send(AgentAction.tools(.statusSet(id: call.id, status: .started)))
 
         case let .failure(error):
           await persistToolFailure(
@@ -147,7 +145,7 @@ extension WuhuBehavior {
   }
 
   /// Inject an error result for an orphaned tool call stuck in started/pending.
-  func recoverStaleToolCall(id: String, state: WuhuState) -> Effect<WuhuAction> {
+  func recoverStaleToolCall(id: String, state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
 
@@ -174,7 +172,7 @@ extension WuhuBehavior {
 
       if hasResult {
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-        await send(WuhuAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
+        await send(AgentAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
         return
       }
 
@@ -182,7 +180,7 @@ extension WuhuBehavior {
       let repaired: Message = .toolResult(.init(
         toolCallId: id,
         toolName: toolName,
-        content: [.text(WuhuToolRepairer.lostToolResultText)],
+        content: [.text(ToolRepairer.lostToolResultText)],
         details: .object([
           "wuhu_repair": .string("stale_tool_call"),
           "reason": .string("lost"),
@@ -196,18 +194,18 @@ extension WuhuBehavior {
         payload: .message(.fromPi(repaired)),
         createdAt: now,
       )
-      await send(WuhuAction.transcript(.append(entry)))
+      await send(AgentAction.transcript(.append(entry)))
 
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-      await send(WuhuAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
+      await send(AgentAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(WuhuAction.status(.updated(status)))
+      await send(AgentAction.status(.updated(status)))
     }
   }
 
   /// Persist a bash result that was delivered from the worker (typically after server restart).
-  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: WuhuState) -> Effect<WuhuAction> {
+  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
 
@@ -222,12 +220,12 @@ extension WuhuBehavior {
       if hasResult {
         // Already have a result — just update status and clear recovering flag
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
-        await send(WuhuAction.tools(.completed(
+        await send(AgentAction.tools(.completed(
           id: toolCallID, status: .completed,
           toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
         )))
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(WuhuAction.status(.updated(status)))
+        await send(AgentAction.status(.updated(status)))
         return
       }
 
@@ -283,16 +281,16 @@ extension WuhuBehavior {
         payload: .message(.toolResult(toolResultMessage)),
         createdAt: now,
       )
-      await send(WuhuAction.transcript(.append(entry)))
+      await send(AgentAction.transcript(.append(entry)))
 
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: toolCallID, status: .completed)
-      await send(WuhuAction.tools(.completed(
+      await send(AgentAction.tools(.completed(
         id: toolCallID, status: .completed,
         toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
       )))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(WuhuAction.status(.updated(status)))
+      await send(AgentAction.status(.updated(status)))
     }
   }
 }
@@ -307,8 +305,7 @@ private func persistToolSuccess(
   tracker: ToolCallRepetitionTracker,
   sessionID: SessionID,
   store: SQLiteSessionStore,
-  blobStore: WuhuBlobStore,
-  send: Send<WuhuAction>,
+  send: Send<AgentAction>,
 ) async {
   do {
     let now = Date()
@@ -323,15 +320,18 @@ private func persistToolSuccess(
     }
 
     // Convert image content blocks: store base64 data as blobs, replace with blob URIs.
-    let persistedContent = try finalResult.content.map { block -> WuhuContentBlock in
+    var persistedContent: [WuhuContentBlock] = []
+    for block in finalResult.content {
       if case let .image(img) = block, !img.data.hasPrefix("blob://") {
         guard let rawData = Data(base64Encoded: img.data) else {
-          return WuhuContentBlock.fromPi(block)
+          persistedContent.append(WuhuContentBlock.fromPi(block))
+          continue
         }
-        let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
-        return .image(blobURI: uri, mimeType: img.mimeType)
+        let uri = try await BlobBucket.store(namespace: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
+        persistedContent.append(.image(blobURI: uri, mimeType: img.mimeType))
+      } else {
+        persistedContent.append(WuhuContentBlock.fromPi(block))
       }
-      return WuhuContentBlock.fromPi(block)
     }
 
     let toolResultMessage = WuhuToolResultMessage(
@@ -348,16 +348,16 @@ private func persistToolSuccess(
       payload: .message(.toolResult(toolResultMessage)),
       createdAt: now,
     )
-    await send(WuhuAction.transcript(.append(entry)))
+    await send(AgentAction.transcript(.append(entry)))
 
     _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .completed)
-    await send(WuhuAction.tools(.completed(
+    await send(AgentAction.tools(.completed(
       id: call.id, status: .completed,
       toolName: call.name, argsHash: argsHash, resultHash: resultHash,
     )))
 
     let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    await send(WuhuAction.status(.updated(status)))
+    await send(AgentAction.status(.updated(status)))
   } catch {
     // If persistence fails, record as failure
     await persistToolFailure(
@@ -373,7 +373,7 @@ private func persistToolFailure(
   argsHash: Int,
   sessionID: SessionID,
   store: SQLiteSessionStore,
-  send: Send<WuhuAction>,
+  send: Send<AgentAction>,
 ) async {
   do {
     let now = Date()
@@ -391,16 +391,16 @@ private func persistToolFailure(
       payload: .message(.fromPi(toolResult)),
       createdAt: now,
     )
-    await send(WuhuAction.transcript(.append(entry)))
+    await send(AgentAction.transcript(.append(entry)))
 
     _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
-    await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
+    await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
 
     let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    await send(WuhuAction.status(.updated(status)))
+    await send(AgentAction.status(.updated(status)))
   } catch {
     // Best-effort: if even error persistence fails, just send the failure action.
-    await send(WuhuAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
+    await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
   }
 }
 

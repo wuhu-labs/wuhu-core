@@ -3,18 +3,17 @@ import Foundation
 import PiAI
 
 /// Effect factory for running inference (streaming LLM call).
-extension WuhuBehavior {
+extension AgentBehavior {
   /// Calls PiAI streaming API, sends `.inference(.delta)` for each text chunk,
   /// `.inference(.completed)` on success, `.inference(.failed)` on error.
-  func runInference(state: WuhuState) -> Effect<WuhuAction> {
+  func runInference(state: AgentState) -> Effect<AgentAction> {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
-    let blobStore = blobStore
     let entries = state.transcript.entries
     return Effect { send in
       @Dependency(\.streamFn) var streamFn
-      await send(WuhuAction.inference(.started))
+      await send(AgentAction.inference(.started))
 
       do {
         let session = try await store.getSession(id: sessionID.rawValue)
@@ -29,10 +28,10 @@ extension WuhuBehavior {
         let tools = await runtimeConfig.tools()
 
         // Build context
-        let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
+        let header = (try? PromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
         let systemPrompt = header?.systemPrompt ?? ""
-        let messages = WuhuPromptPreparation.extractContextMessages(from: entries)
-        let hydrated = hydrateImageBlobs(in: messages, blobStore: blobStore)
+        let messages = PromptPreparation.extractContextMessages(from: entries)
+        let hydrated = await hydrateImageBlobs(in: messages)
 
         var effectiveSystemPrompt = systemPrompt
         if let cwd = session.cwd {
@@ -54,7 +53,7 @@ extension WuhuBehavior {
           case let .start(p):
             partial = p
           case let .textDelta(delta, p):
-            await send(WuhuAction.inference(.delta(delta)))
+            await send(AgentAction.inference(.delta(delta)))
             partial = p
           case let .done(message):
             final = message
@@ -71,17 +70,17 @@ extension WuhuBehavior {
           payload: .message(.fromPi(.assistant(message))),
           createdAt: message.timestamp,
         )
-        await send(WuhuAction.transcript(.append(entry)))
+        await send(AgentAction.transcript(.append(entry)))
 
         // Track cost for this inference (use resolved model from the response, not the session alias)
         if let usage = message.usage {
-          let entryCost = WuhuPricingTable.computeEntryCost(
+          let entryCost = PricingTable.computeEntryCost(
             provider: session.provider,
             model: message.model,
             usage: WuhuUsage.fromPi(usage),
           )
           if entryCost > 0 {
-            await send(WuhuAction.cost(.spent(entryCost)))
+            await send(AgentAction.cost(.spent(entryCost)))
           }
         }
 
@@ -93,43 +92,53 @@ extension WuhuBehavior {
         if !calls.isEmpty {
           let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
           for update in updates {
-            await send(WuhuAction.tools(.statusSet(id: update.id, status: update.status)))
+            await send(AgentAction.tools(.statusSet(id: update.id, status: update.status)))
           }
         }
 
         let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(WuhuAction.status(.updated(status)))
+        await send(AgentAction.status(.updated(status)))
 
-        await send(WuhuAction.inference(.completed(message)))
+        await send(AgentAction.inference(.completed(message)))
       } catch is CancellationError {
         throw CancellationError()
       } catch {
-        await send(WuhuAction.inference(.failed(InferenceError.from(error))))
+        await send(AgentAction.inference(.failed(InferenceError.from(error))))
       }
     }
   }
 }
 
 /// Replace blob URIs in image content blocks with base64-encoded data for LLM consumption.
-private func hydrateImageBlobs(in messages: [Message], blobStore: WuhuBlobStore) -> [Message] {
-  messages.map { message in
+private func hydrateImageBlobs(in messages: [Message]) async -> [Message] {
+  var result: [Message] = []
+  for message in messages {
     switch message {
     case var .user(u):
-      u.content = u.content.map { hydrateBlock($0, blobStore: blobStore) }
-      return .user(u)
+      u.content = await hydrateBlocks(u.content)
+      result.append(.user(u))
     case let .assistant(a):
-      return .assistant(a)
+      result.append(.assistant(a))
     case var .toolResult(t):
-      t.content = t.content.map { hydrateBlock($0, blobStore: blobStore) }
-      return .toolResult(t)
+      t.content = await hydrateBlocks(t.content)
+      result.append(.toolResult(t))
     }
   }
+  return result
 }
 
-private func hydrateBlock(_ block: ContentBlock, blobStore: WuhuBlobStore) -> ContentBlock {
+private func hydrateBlocks(_ blocks: [ContentBlock]) async -> [ContentBlock] {
+  var result: [ContentBlock] = []
+  for block in blocks {
+    await result.append(hydrateBlock(block))
+  }
+  return result
+}
+
+private func hydrateBlock(_ block: ContentBlock) async -> ContentBlock {
   guard case let .image(img) = block, img.data.hasPrefix("blob://") else { return block }
   do {
-    let base64 = try blobStore.resolveToBase64(uri: img.data)
+    let base64 = try await BlobBucket.resolveToBase64(uri: img.data)
     return .image(.init(data: base64, mimeType: img.mimeType))
   } catch {
     return .text(.init(text: "[Failed to load image: \(error)]"))

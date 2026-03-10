@@ -53,7 +53,7 @@ public actor SQLiteSessionStore: SessionStore {
 
   public func getMountTemplate(identifier raw: String) async throws -> WuhuMountTemplate {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
+    guard !identifier.isEmpty else { throw MountTemplateResolutionError.unknownMountTemplate(raw) }
 
     return try await dbQueue.read { db in
       let row: MountTemplateRow? = if UUID(uuidString: identifier) != nil {
@@ -63,7 +63,7 @@ public actor SQLiteSessionStore: SessionStore {
       }
 
       guard let row else {
-        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
+        throw MountTemplateResolutionError.unknownMountTemplate(identifier)
       }
       return try row.toModel()
     }
@@ -74,7 +74,7 @@ public actor SQLiteSessionStore: SessionStore {
     request: WuhuUpdateMountTemplateRequest,
   ) async throws -> WuhuMountTemplate {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
+    guard !identifier.isEmpty else { throw MountTemplateResolutionError.unknownMountTemplate(raw) }
 
     let now = Date()
     return try await dbQueue.write { db in
@@ -85,7 +85,7 @@ public actor SQLiteSessionStore: SessionStore {
       }
 
       guard var row else {
-        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
+        throw MountTemplateResolutionError.unknownMountTemplate(identifier)
       }
 
       if let name = request.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -110,7 +110,7 @@ public actor SQLiteSessionStore: SessionStore {
 
   public func deleteMountTemplate(identifier raw: String) async throws {
     let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !identifier.isEmpty else { throw WuhuMountTemplateResolutionError.unknownMountTemplate(raw) }
+    guard !identifier.isEmpty else { throw MountTemplateResolutionError.unknownMountTemplate(raw) }
 
     try await dbQueue.write { db in
       let row: MountTemplateRow? = if UUID(uuidString: identifier) != nil {
@@ -120,7 +120,7 @@ public actor SQLiteSessionStore: SessionStore {
       }
 
       guard let row else {
-        throw WuhuMountTemplateResolutionError.unknownMountTemplate(identifier)
+        throw MountTemplateResolutionError.unknownMountTemplate(identifier)
       }
       _ = try row.delete(db)
     }
@@ -233,7 +233,7 @@ public actor SQLiteSessionStore: SessionStore {
       )
       try headerRow.insert(db)
       guard let headerID = headerRow.id else {
-        throw WuhuStoreError.sessionCorrupt("Failed to create header entry id")
+        throw StoreError.sessionCorrupt("Failed to create header entry id")
       }
 
       sessionRow.headEntryID = headerID
@@ -247,7 +247,7 @@ public actor SQLiteSessionStore: SessionStore {
   public func getSession(id: String) async throws -> WuhuSession {
     try await dbQueue.read { db in
       guard let row = try SessionRow.fetchOne(db, key: id) else {
-        throw WuhuStoreError.sessionNotFound(id)
+        throw StoreError.sessionNotFound(id)
       }
       return try row.toModel()
     }
@@ -302,7 +302,7 @@ public actor SQLiteSessionStore: SessionStore {
   public func getEntries(sessionID: String) async throws -> [WuhuSessionEntry] {
     try await dbQueue.read { db in
       guard let sessionRow = try SessionRow.fetchOne(db, key: sessionID) else {
-        throw WuhuStoreError.sessionNotFound(sessionID)
+        throw StoreError.sessionNotFound(sessionID)
       }
       let session = try sessionRow.toModel()
       let rows = try EntryRow
@@ -325,7 +325,7 @@ public actor SQLiteSessionStore: SessionStore {
   ) async throws -> [WuhuSessionEntry] {
     try await dbQueue.read { db in
       guard let _ = try SessionRow.fetchOne(db, key: sessionID) else {
-        throw WuhuStoreError.sessionNotFound(sessionID)
+        throw StoreError.sessionNotFound(sessionID)
       }
 
       var filter = Column("sessionID") == sessionID
@@ -346,7 +346,7 @@ public actor SQLiteSessionStore: SessionStore {
   ) async throws -> [WuhuSessionEntry] {
     try await dbQueue.read { db in
       guard let _ = try SessionRow.fetchOne(db, key: sessionID) else {
-        throw WuhuStoreError.sessionNotFound(sessionID)
+        throw StoreError.sessionNotFound(sessionID)
       }
 
       var filter = Column("sessionID") == sessionID
@@ -395,9 +395,9 @@ public actor SQLiteSessionStore: SessionStore {
       }
     }
 
-    guard let header else { throw WuhuStoreError.noHeaderEntry(sessionID) }
+    guard let header else { throw StoreError.noHeaderEntry(sessionID) }
     guard header.id == headEntryID else {
-      throw WuhuStoreError.sessionCorrupt("headEntryID=\(headEntryID) does not match header.id=\(header.id)")
+      throw StoreError.sessionCorrupt("headEntryID=\(headEntryID) does not match header.id=\(header.id)")
     }
 
     var ordered: [WuhuSessionEntry] = []
@@ -410,7 +410,7 @@ public actor SQLiteSessionStore: SessionStore {
 
     while let child = childByParent[current.id] {
       if seen.contains(child.id) {
-        throw WuhuStoreError.sessionCorrupt("Cycle detected at entry \(child.id)")
+        throw StoreError.sessionCorrupt("Cycle detected at entry \(child.id)")
       }
       ordered.append(child)
       seen.insert(child.id)
@@ -418,11 +418,11 @@ public actor SQLiteSessionStore: SessionStore {
     }
 
     guard current.id == tailEntryID else {
-      throw WuhuStoreError.sessionCorrupt("tailEntryID=\(tailEntryID) does not match last.id=\(current.id)")
+      throw StoreError.sessionCorrupt("tailEntryID=\(tailEntryID) does not match last.id=\(current.id)")
     }
 
     if ordered.count != entries.count {
-      throw WuhuStoreError.sessionCorrupt("Entries are not a single linear chain (expected \(entries.count), got \(ordered.count))")
+      throw StoreError.sessionCorrupt("Entries are not a single linear chain (expected \(entries.count), got \(ordered.count))")
     }
 
     return ordered

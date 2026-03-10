@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -12,11 +13,10 @@ import WuhuAPI
 /// - `SQLiteSessionStore` with `:memory:` database
 /// - `WuhuService` with a mock `StreamFn`
 /// - `InMemoryFileIO` via swift-dependencies
-/// - `WuhuBlobStore` with a temp directory
+/// - `DataBucket` configured via swift-dependencies
 struct TestHarness {
   let service: WuhuService
   let store: SQLiteSessionStore
-  let blobStore: WuhuBlobStore
   let mockLLM: MockStreamFn?
 
   /// Optional InMemoryFileIO for tool tests. If nil, tools won't use InMemoryFileIO.
@@ -30,15 +30,15 @@ struct TestHarness {
     self.mockLLM = mockLLM
     self.fileIO = fileIO
     store = try SQLiteSessionStore(path: ":memory:")
-    let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-    blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
     service = WuhuService(
       store: store,
-      blobStore: blobStore,
       workspaceRoot: workspaceRoot,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    ) { $0.streamFn = mockLLM.streamFn }
+    ) {
+      $0.streamFn = mockLLM.streamFn
+      $0.dataBucket = LocalDataBucket(rootDirectory: NSTemporaryDirectory() + "wuhu-test-data-\(UUID().uuidString.lowercased())")
+    }
   }
 
   /// Init with a raw `StreamFn` instead of `MockStreamFn`.
@@ -50,24 +50,26 @@ struct TestHarness {
     mockLLM = nil
     self.fileIO = fileIO
     store = try SQLiteSessionStore(path: ":memory:")
-    let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-    blobStore = WuhuBlobStore(rootDirectory: blobDir)
 
     service = WuhuService(
       store: store,
-      blobStore: blobStore,
       workspaceRoot: workspaceRoot,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    ) { $0.streamFn = streamFn }
+    ) {
+      $0.streamFn = streamFn
+      $0.dataBucket = LocalDataBucket(rootDirectory: NSTemporaryDirectory() + "wuhu-test-data-\(UUID().uuidString.lowercased())")
+    }
   }
 
   /// Create a new harness re-using the same store (simulates server restart).
   func newServiceSameStore(mockLLM newMock: MockStreamFn) -> WuhuService {
     WuhuService(
       store: store,
-      blobStore: blobStore,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    ) { $0.streamFn = newMock.streamFn }
+    ) {
+      $0.streamFn = newMock.streamFn
+      $0.dataBucket = LocalDataBucket(rootDirectory: NSTemporaryDirectory() + "wuhu-test-data-\(UUID().uuidString.lowercased())")
+    }
   }
 
   // MARK: - Session creation

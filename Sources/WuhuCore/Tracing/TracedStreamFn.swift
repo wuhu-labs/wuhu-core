@@ -90,7 +90,7 @@ public func tracedStreamFn(_ base: @escaping StreamFn) -> StreamFn {
             // once PiAI's Usage type tracks Anthropic cache fields.
 
             let wuhuProvider = WuhuProvider(from: model.provider)
-            let costCents = WuhuPricingTable.computeEntryCost(
+            let costCents = PricingTable.computeEntryCost(
               provider: wuhuProvider,
               model: model.id,
               usage: WuhuUsage.fromPi(usage),

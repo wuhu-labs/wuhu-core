@@ -41,8 +41,6 @@ struct BashOutputTruncationTests {
 
     // Build the harness with a real local runner that has callbacks wired up.
     let store = try SQLiteSessionStore(path: ":memory:")
-    let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-    let blobStore = WuhuBlobStore(rootDirectory: blobDir)
     let bashCoordinator = BashTagCoordinator()
     let localRunner = LocalRunner()
     let registry = RunnerRegistry(runners: [localRunner])
@@ -52,7 +50,6 @@ struct BashOutputTruncationTests {
 
     let service = WuhuService(
       store: store,
-      blobStore: blobStore,
       runnerRegistry: registry,
       bashCoordinator: bashCoordinator,
     ) { $0.streamFn = mock.streamFn }

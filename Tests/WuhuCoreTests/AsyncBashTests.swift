@@ -21,7 +21,7 @@ struct AsyncBashTests {
 
   @Test func asyncBashAppendsCompletionMessageBeforeIdle() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let registry = WuhuAsyncBashRegistry()
+    let registry = AsyncBashRegistry()
 
     let dir = try makeTempDir(prefix: "wuhu-async-bash")
     let sessionID = UUID().uuidString.lowercased()
@@ -72,7 +72,6 @@ struct AsyncBashTests {
 
     let service = WuhuService(
       store: store,
-      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       asyncBashRegistry: registry,
       runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
     ) { $0.streamFn = streamFn }
@@ -151,7 +150,7 @@ struct AsyncBashTests {
   /// handler didn't fire. This tests that the subscription still delivers
   /// completions for fast-exiting commands via the reap fallback.
   @Test func reapWatchdogDeliversCompletionForFastExit() async throws {
-    let registry = WuhuAsyncBashRegistry()
+    let registry = AsyncBashRegistry()
     let dir = try makeTempDir(prefix: "wuhu-reap-watchdog")
 
     let stream = await registry.subscribeCompletions()
@@ -166,7 +165,7 @@ struct AsyncBashTests {
     )
 
     // Wait for the completion (should arrive via terminationHandler or watchdog)
-    var completion: WuhuAsyncBashCompletion?
+    var completion: AsyncBashCompletion?
     let deadline = Date().addingTimeInterval(10)
     for await c in stream {
       if c.id == started.id {
