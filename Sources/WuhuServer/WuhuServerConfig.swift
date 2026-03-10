@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Yams
 
 public struct WuhuServerConfig: Sendable, Hashable {
@@ -42,6 +43,16 @@ public struct WuhuServerConfig: Sendable, Hashable {
   /// Set to `0` in YAML to explicitly disable cost gating.
   public var defaultCostLimitCents: Int64?
 
+  /// Minimum log level for stderr output. Defaults to `.info`.
+  public var logLevel: Logger.Level
+
+  /// OTLP endpoint for OpenTelemetry export (e.g. "http://localhost:4318").
+  /// If nil, OTel tracing/logging is disabled (spans are no-op).
+  public var otelEndpoint: String?
+
+  /// Minimum log level for OTel log export. Defaults to `logLevel`.
+  public var otelLogLevel: Logger.Level?
+
   public init(
     llm: LLM? = nil,
     databasePath: String? = nil,
@@ -53,6 +64,9 @@ public struct WuhuServerConfig: Sendable, Hashable {
     runners: [Runner]? = nil,
     localRunnerSocket: String? = nil,
     defaultCostLimitCents: Int64? = 100_000,
+    logLevel: Logger.Level = .info,
+    otelEndpoint: String? = nil,
+    otelLogLevel: Logger.Level? = nil,
   ) {
     self.llm = llm
     self.databasePath = databasePath
@@ -64,6 +78,9 @@ public struct WuhuServerConfig: Sendable, Hashable {
     self.runners = runners
     self.localRunnerSocket = localRunnerSocket
     self.defaultCostLimitCents = defaultCostLimitCents
+    self.logLevel = logLevel
+    self.otelEndpoint = otelEndpoint
+    self.otelLogLevel = otelLogLevel
   }
 
   /// Hard-coded fallback: $10 per session (100,000 hundredths-of-a-cent).
@@ -86,6 +103,9 @@ public struct WuhuServerConfig: Sendable, Hashable {
       braveSearchAPIKey: raw.braveSearchAPIKey,
       runners: raw.runners,
       localRunnerSocket: raw.localRunnerSocket,
+      logLevel: parseLogLevel(raw.logLevel) ?? .info,
+      otelEndpoint: raw.otelEndpoint,
+      otelLogLevel: parseLogLevel(raw.otelLogLevel),
     )
 
     // Convert dollars → hundredths-of-a-cent, apply fallback.
@@ -119,6 +139,22 @@ public struct WuhuServerConfig: Sendable, Hashable {
   }
 }
 
+// MARK: - Log level parsing
+
+private func parseLogLevel(_ string: String?) -> Logger.Level? {
+  guard let string, !string.isEmpty else { return nil }
+  switch string.lowercased() {
+  case "trace": return .trace
+  case "debug": return .debug
+  case "info": return .info
+  case "notice": return .notice
+  case "warning": return .warning
+  case "error": return .error
+  case "critical": return .critical
+  default: return nil
+  }
+}
+
 // MARK: - Raw YAML representation
 
 /// Intermediate Codable type matching the YAML key names.
@@ -136,6 +172,12 @@ private struct RawYAML: Codable {
   var localRunnerSocket: String?
   /// Cost limit in dollars (e.g. 10, 2.50). 0 = disable.
   var defaultCostLimit: Double?
+  /// Log level string (e.g. "debug", "info"). Defaults to "info".
+  var logLevel: String?
+  /// OTLP endpoint (e.g. "http://localhost:4318"). nil = disabled.
+  var otelEndpoint: String?
+  /// OTel log level string. Defaults to logLevel value.
+  var otelLogLevel: String?
 
   enum CodingKeys: String, CodingKey {
     case llm
@@ -148,5 +190,8 @@ private struct RawYAML: Codable {
     case runners
     case localRunnerSocket = "local_runner_socket"
     case defaultCostLimit = "default_cost_limit"
+    case logLevel = "log_level"
+    case otelEndpoint = "otel_endpoint"
+    case otelLogLevel = "otel_log_level"
   }
 }

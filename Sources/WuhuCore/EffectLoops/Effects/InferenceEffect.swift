@@ -1,7 +1,6 @@
 import Dependencies
 import Foundation
 import PiAI
-import ServiceContextModule
 
 /// Effect factory for running inference (streaming LLM call).
 extension WuhuBehavior {
@@ -18,95 +17,90 @@ extension WuhuBehavior {
       await send(WuhuAction.inference(.started))
 
       do {
-        var ctx = ServiceContext.current ?? .topLevel
-        ctx.llmPurpose = .agent
-        try await ServiceContext.$current.withValue(ctx) {
+        let session = try await store.getSession(id: sessionID.rawValue)
+        let settings = try await store.loadSettingsSnapshot(sessionID: sessionID)
 
-          let session = try await store.getSession(id: sessionID.rawValue)
-          let settings = try await store.loadSettingsSnapshot(sessionID: sessionID)
+        let resolved = WuhuModelCatalog.resolveAlias(session.model)
+        let provider = session.provider.piProvider
+        let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
+        var requestOptions = makeRequestOptions(model: apiModel, settings: settings, userModelID: session.model)
+        mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
-          let resolved = WuhuModelCatalog.resolveAlias(session.model)
-          let provider = session.provider.piProvider
-          let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-          var requestOptions = makeRequestOptions(model: apiModel, settings: settings, userModelID: session.model)
-          mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
+        let tools = await runtimeConfig.tools()
 
-          let tools = await runtimeConfig.tools()
+        // Build context
+        let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
+        let systemPrompt = header?.systemPrompt ?? ""
+        let messages = WuhuPromptPreparation.extractContextMessages(from: entries)
+        let hydrated = hydrateImageBlobs(in: messages, blobStore: blobStore)
 
-          // Build context
-          let header = (try? WuhuPromptPreparation.extractHeader(from: entries, sessionID: sessionID.rawValue))
-          let systemPrompt = header?.systemPrompt ?? ""
-          let messages = WuhuPromptPreparation.extractContextMessages(from: entries)
-          let hydrated = hydrateImageBlobs(in: messages, blobStore: blobStore)
+        var effectiveSystemPrompt = systemPrompt
+        if let cwd = session.cwd {
+          effectiveSystemPrompt += "\n\nWorking directory: \(cwd)\nAll relative paths are resolved from this directory."
+        }
 
-          var effectiveSystemPrompt = systemPrompt
-          if let cwd = session.cwd {
-            effectiveSystemPrompt += "\n\nWorking directory: \(cwd)\nAll relative paths are resolved from this directory."
+        let context = Context(
+          systemPrompt: effectiveSystemPrompt,
+          messages: hydrated,
+          tools: tools.map(\.tool),
+        )
+
+        let events = try await streamFn(apiModel, context, requestOptions)
+
+        var partial: AssistantMessage?
+        var final: AssistantMessage?
+        for try await event in events {
+          switch event {
+          case let .start(p):
+            partial = p
+          case let .textDelta(delta, p):
+            await send(WuhuAction.inference(.delta(delta)))
+            partial = p
+          case let .done(message):
+            final = message
           }
+        }
 
-          let context = Context(
-            systemPrompt: effectiveSystemPrompt,
-            messages: hydrated,
-            tools: tools.map(\.tool),
+        guard let message = final ?? partial else {
+          throw PiAIError.unsupported("No model output")
+        }
+
+        // Persist assistant entry
+        let (_, entry) = try await store.appendEntryWithSession(
+          sessionID: sessionID,
+          payload: .message(.fromPi(.assistant(message))),
+          createdAt: message.timestamp,
+        )
+        await send(WuhuAction.transcript(.append(entry)))
+
+        // Track cost for this inference (use resolved model from the response, not the session alias)
+        if let usage = message.usage {
+          let entryCost = WuhuPricingTable.computeEntryCost(
+            provider: session.provider,
+            model: message.model,
+            usage: WuhuUsage.fromPi(usage),
           )
-
-          let events = try await streamFn(apiModel, context, requestOptions)
-
-          var partial: AssistantMessage?
-          var final: AssistantMessage?
-          for try await event in events {
-            switch event {
-            case let .start(p):
-              partial = p
-            case let .textDelta(delta, p):
-              await send(WuhuAction.inference(.delta(delta)))
-              partial = p
-            case let .done(message):
-              final = message
-            }
+          if entryCost > 0 {
+            await send(WuhuAction.cost(.spent(entryCost)))
           }
+        }
 
-          guard let message = final ?? partial else {
-            throw PiAIError.unsupported("No model output")
+        // Upsert tool call statuses for any tool calls in the response
+        let calls = message.content.compactMap { block -> ToolCall? in
+          if case let .toolCall(c) = block { return c }
+          return nil
+        }
+        if !calls.isEmpty {
+          let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
+          for update in updates {
+            await send(WuhuAction.tools(.statusSet(id: update.id, status: update.status)))
           }
+        }
 
-          // Persist assistant entry
-          let (_, entry) = try await store.appendEntryWithSession(
-            sessionID: sessionID,
-            payload: .message(.fromPi(.assistant(message))),
-            createdAt: message.timestamp,
-          )
-          await send(WuhuAction.transcript(.append(entry)))
+        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+        await send(WuhuAction.status(.updated(status)))
 
-          // Track cost for this inference (use resolved model from the response, not the session alias)
-          if let usage = message.usage {
-            let entryCost = WuhuPricingTable.computeEntryCost(
-              provider: session.provider,
-              model: message.model,
-              usage: WuhuUsage.fromPi(usage),
-            )
-            if entryCost > 0 {
-              await send(WuhuAction.cost(.spent(entryCost)))
-            }
-          }
-
-          // Upsert tool call statuses for any tool calls in the response
-          let calls = message.content.compactMap { block -> ToolCall? in
-            if case let .toolCall(c) = block { return c }
-            return nil
-          }
-          if !calls.isEmpty {
-            let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
-            for update in updates {
-              await send(WuhuAction.tools(.statusSet(id: update.id, status: update.status)))
-            }
-          }
-
-          let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-          await send(WuhuAction.status(.updated(status)))
-
-          await send(WuhuAction.inference(.completed(message)))
-        } // ServiceContext.withValue
+        await send(WuhuAction.inference(.completed(message)))
       } catch is CancellationError {
         throw CancellationError()
       } catch {

@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 import WuhuServer
 
@@ -117,5 +118,40 @@ struct WuhuServerConfigTests {
     let config = try WuhuServerConfig.load(path: tmp.path)
     // $2.50 = 25,000 hundredths-of-a-cent
     #expect(config.defaultCostLimitCents == 25000)
+  }
+
+  @Test func loadsLogLevelAndOtelConfig() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    log_level: debug
+    otel_endpoint: "http://localhost:4318"
+    otel_log_level: trace
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    #expect(config.logLevel == .debug)
+    #expect(config.otelEndpoint == "http://localhost:4318")
+    #expect(config.otelLogLevel == .trace)
+  }
+
+  @Test func logLevelDefaultsToInfo() throws {
+    let yaml = """
+    databasePath: /tmp/wuhu.sqlite
+    """
+
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("wuhu-server-\(UUID().uuidString).yml")
+    try yaml.write(to: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let config = try WuhuServerConfig.load(path: tmp.path)
+    #expect(config.logLevel == .info)
+    #expect(config.otelEndpoint == nil)
+    #expect(config.otelLogLevel == nil)
   }
 }

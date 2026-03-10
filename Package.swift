@@ -44,6 +44,8 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
     .package(url: "https://github.com/apple/swift-service-context.git", from: "1.3.0"),
+    .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.1.0"),
+    .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
     // Pin swift-collections < 1.4.0 to work around Hummingbird's missing
     // `import DequeModule` — see https://github.com/hummingbird-project/hummingbird/issues/791
     .package(url: "https://github.com/apple/swift-collections.git", "1.0.0" ..< "1.4.0"),
@@ -89,6 +91,8 @@ let package = Package(
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
         .product(name: "ServiceContextModule", package: "swift-service-context"),
+        .product(name: "Tracing", package: "swift-distributed-tracing"),
+        .product(name: "OTel", package: "swift-otel"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -105,6 +109,7 @@ let package = Package(
       name: "WuhuServer",
       dependencies: [
         "WuhuCore",
+        .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxSocket", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
