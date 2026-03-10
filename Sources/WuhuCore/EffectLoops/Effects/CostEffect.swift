@@ -4,13 +4,15 @@ import WuhuAPI
 /// Effect factory for cost-related side effects.
 extension AgentBehavior {
   /// Persists a `wuhu_cost_limit_exceeded_v1` custom entry to the transcript
-  /// so the user sees why the session stopped.
-  func emitCostExceededEntry(state: AgentState) -> Effect<AgentAction> {
+  /// so the user sees why the session paused.
+  func emitCostExceededEntry() -> AgentEffect {
     let sessionID = sessionID
     let store = store
-    let totalSpent = state.cost.totalSpent
-    let budgetRemaining = state.cost.budgetRemaining
-    return Effect { send in
+
+    return .sync { snapshot in
+      let totalSpent = snapshot.cost.totalSpent
+      let budgetRemaining = snapshot.cost.budgetRemaining
+
       let custom = WuhuCustomMessage(
         customType: WuhuCustomMessageTypes.costLimitExceeded,
         content: [.text(text: "Session paused: cost limit exceeded.", signature: nil)],
@@ -23,17 +25,13 @@ extension AgentBehavior {
       )
       let payload: WuhuEntryPayload = .message(.customMessage(custom))
 
-      do {
-        let (_, entry) = try await store.appendEntryWithSession(
-          sessionID: sessionID,
-          payload: payload,
-          createdAt: Date(),
-        )
-        await send(AgentAction.transcript(.append(entry)))
-      } catch {
-        let line = "[AgentBehavior] ERROR: failed to emit cost-exceeded entry: \(String(describing: error))\n"
-        FileHandle.standardError.write(Data(line.utf8))
-      }
+      let (_, entry) = try await store.appendEntryWithSession(
+        sessionID: sessionID,
+        payload: payload,
+        createdAt: Date(),
+      )
+
+      return [.transcript(.append(entry))]
     }
   }
 }

@@ -6,13 +6,13 @@ import WuhuAPI
 /// Effect factory for transcript compaction.
 extension AgentBehavior {
   /// Summarize transcript and persist compaction entry.
-  func runCompaction(state: AgentState) -> Effect<AgentAction> {
+  func runCompaction(state: AgentState) -> AgentEffect {
     let sessionID = sessionID
     let store = store
     let entries = state.transcript.entries
     let settingsSnapshot = state.settings.snapshot
 
-    return Effect { send in
+    return .run("compaction") { send in
       @Dependency(\.streamFn) var streamFn
       defer { Task { await send(AgentAction.transcript(.compactionFinished)) } }
 

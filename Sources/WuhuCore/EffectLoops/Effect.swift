@@ -1,55 +1,7 @@
-/// A unit of asynchronous work that can send actions back into an
-/// ``EffectLoop``.
-///
-/// Effects are the only way to perform side effects (network calls,
-/// persistence, timers). They run concurrently with the loop and
-/// feed results back via ``Send``.
-///
-/// ## Creating Effects
-///
-///     // Fire-and-forget async work:
-///     Effect { send in
-///       let result = try await api.fetch()
-///       await send(.fetched(result))
-///     }
-///
-///     // Synchronous action (no async work):
-///     Effect.send(.increment)
-///
-///     // No-op:
-///     Effect.none
-public struct Effect<Action: Sendable>: Sendable {
-  enum Operation: Sendable {
-    case none
-    case send(Action)
-    case run(@Sendable (Send<Action>) async throws -> Void)
-  }
+import Foundation
 
-  let operation: Operation
-
-  private init(_ operation: Operation) {
-    self.operation = operation
-  }
-
-  /// An effect that does nothing.
-  public static var none: Effect {
-    Effect(.none)
-  }
-
-  /// An effect that synchronously sends a single action.
-  public static func send(_ action: Action) -> Effect {
-    Effect(.send(action))
-  }
-
-  /// An effect that runs an async closure. The closure receives a
-  /// ``Send`` function to feed actions back into the loop.
-  public init(_ run: @escaping @Sendable (Send<Action>) async throws -> Void) {
-    operation = .run(run)
-  }
-}
-
-/// A handle for sending actions back into an ``EffectLoop`` from
-/// within an effect's async closure.
+/// A handle for sending actions back into an ``EffectLoop`` from within a
+/// long-running effect task.
 ///
 /// `Send` is `@Sendable` and can be called from any context.
 public struct Send<Action: Sendable>: Sendable {
@@ -58,4 +10,29 @@ public struct Send<Action: Sendable>: Sendable {
   public func callAsFunction(_ action: Action) async {
     await _send(action)
   }
+}
+
+/// A unit of work produced by a ``LoopBehavior``.
+///
+/// This effect model intentionally stays primitive:
+/// - `.sync` is awaited inline and yields committed actions.
+/// - `.run` is spawned as a named task (deferred until sync work drains).
+/// - `.cancel` cancels named tasks (batch).
+///
+/// There is no effect merging/batching API. Greedy draining happens in the loop.
+public indirect enum Effect<State: Sendable, Action: Sendable, TaskID: Hashable & Sendable>: Sendable {
+  /// No-op.
+  case none
+
+  /// Serialized async work that returns actions to commit.
+  ///
+  /// The loop passes a snapshot of state into the closure. While awaiting,
+  /// incoming actions are queued but not reduced.
+  case sync(@Sendable (State) async throws -> [Action])
+
+  /// Long-running work in a named task. Use `TaskID` for cancellation.
+  case run(TaskID, @Sendable (Send<Action>) async throws -> Void)
+
+  /// Cancel named tasks (batch).
+  case cancel([TaskID])
 }

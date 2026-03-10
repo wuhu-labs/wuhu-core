@@ -15,11 +15,15 @@ func reduceInference(state: inout AgentState, action: InferenceAction) {
     // Inflight text tracking happens in the runtime observation layer.
     break
 
-  case .completed:
+  case let .completed(message):
     state.inference.status = .idle
     state.inference.retryCount = 0
     state.inference.retryAfter = nil
     state.inference.lastError = nil
+    state.inference.pendingCompletion = message
+
+  case .persisted:
+    state.inference.pendingCompletion = nil
 
   case let .failed(error):
     state.inference.lastError = error

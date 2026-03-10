@@ -14,6 +14,9 @@ import WuhuAPI
 struct AgentBehavior: LoopBehavior {
   typealias State = AgentState
   typealias Action = AgentAction
+  typealias TaskID = String
+
+  typealias AgentEffect = Effect<AgentState, AgentAction, TaskID>
 
   // MARK: - Session-scoped dependencies
 
@@ -24,7 +27,7 @@ struct AgentBehavior: LoopBehavior {
 
   // MARK: - Reduce
 
-  func reduce(state: inout AgentState, action: AgentAction) {
+  func reduce(state: inout AgentState, action: AgentAction) -> AgentEffect {
     switch action {
     case let .queue(a):
       reduceQueue(state: &state, action: a)
@@ -32,6 +35,10 @@ struct AgentBehavior: LoopBehavior {
       reduceInference(state: &state, action: a)
     case let .tools(a):
       reduceTools(state: &state, action: a)
+      if case let .willExecute(call) = a {
+        return executeToolCall(call, state: state)
+      }
+      return .none
     case let .cost(a):
       reduceCost(state: &state, action: a)
     case let .transcript(a):
@@ -41,16 +48,22 @@ struct AgentBehavior: LoopBehavior {
     case let .status(a):
       reduceStatus(state: &state, action: a)
     }
+    return .none
   }
 
   // MARK: - Next Effect (Priority Ladder)
 
-  func nextEffect(state: inout AgentState) -> Effect<AgentAction>? {
+  func nextEffect(state: inout AgentState) -> AgentEffect? {
+    // 0. Inference completion persistence.
+    if let message = state.inference.pendingCompletion {
+      return persistInferenceCompletion(message)
+    }
+
     // 1. Cost gate — if paused, emit exceeded entry then idle
     if state.cost.isPaused {
       if !state.cost.exceededEntryEmitted {
         state.cost.exceededEntryEmitted = true
-        return emitCostExceededEntry(state: state)
+        return emitCostExceededEntry()
       }
       return nil
     }
@@ -62,7 +75,29 @@ struct AgentBehavior: LoopBehavior {
     }
 
     // Only do work when the session is running.
-    guard state.status.snapshot.status == .running else { return nil }
+    // If stopped, cancel any known named tasks (best-effort) and idle.
+    if state.status.snapshot.status != .running {
+      var cancelIDs: [String] = []
+      if state.inference.status == .running {
+        cancelIDs.append("inference")
+        state.inference.status = .idle
+      }
+      if state.transcript.isCompacting {
+        cancelIDs.append("compaction")
+        state.transcript.isCompacting = false
+      }
+      if !state.tools.executingIDs.isEmpty {
+        cancelIDs.append(contentsOf: state.tools.executingIDs.map { "tool:\($0)" })
+        state.tools.executingIDs.removeAll()
+      }
+      if state.inference.status == .waitingRetry {
+        cancelIDs.append("retry-sleep")
+      }
+      if !cancelIDs.isEmpty {
+        return .cancel(cancelIDs)
+      }
+      return nil
+    }
 
     // 3. Pending bash results — delivered from worker after restart
     if let (toolCallID, result) = state.tools.pendingBashResults.first {
@@ -78,37 +113,29 @@ struct AgentBehavior: LoopBehavior {
     }
 
     // 5. Drain interrupts — system + steer queues
-    if !state.queue.isDraining,
-       !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty
-    {
-      state.queue.isDraining = true // guard token
-      return persistAndDrainInterrupts(state: state)
+    if !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty {
+      return persistAndDrainInterrupts()
     }
 
     // 6. Drain turn items — followUp queue (only if no interrupts pending)
-    if !state.queue.isDraining, !state.queue.followUp.pending.isEmpty {
-      state.queue.isDraining = true // guard token
-      return persistAndDrainTurn(state: state)
+    if !state.queue.followUp.pending.isEmpty {
+      return persistAndDrainTurn()
     }
 
     // 7. Inference — if needed and not already running.
-    //    Block while draining: the drain effect may append user messages
-    //    to the transcript. Starting inference before the drain completes
-    //    would use a stale transcript snapshot, losing the user's message.
-    if state.inference.status == .idle, !state.queue.isDraining, needsInference(state: state) {
+    //    Drain runs via `.sync`, so inference can safely run after drains.
+    if state.inference.status == .idle, needsInference(state: state) {
       state.inference.status = .running // guard token
       return runInference(state: state)
     }
 
-    // 8. Tool execution — pending tool calls
-    let pendingCalls = pendingToolCalls(in: state)
-    if !pendingCalls.isEmpty {
-      // Mark all as started (guard token) and track as executing
-      for call in pendingCalls {
-        state.tools.statuses[call.id] = ToolCallRecord(status: .started)
-        state.tools.executingIDs.insert(call.id)
-      }
-      return executeToolCalls(pendingCalls, state: state)
+    // 8. Tool execution — pending tool calls (one per nextEffect call).
+    //
+    // We start tools one-by-one via `.sync` (persist started), but because the loop
+    // drains greedily and defers `.run` tasks until sync drains, multiple tool calls
+    // will still be spawned back-to-back and execute in parallel.
+    if let call = pendingToolCalls(in: state).first {
+      return startToolCall(call)
     }
 
     // 9. Compaction — if transcript exceeds threshold

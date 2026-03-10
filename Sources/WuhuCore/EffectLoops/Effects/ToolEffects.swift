@@ -4,16 +4,128 @@ import WuhuAPI
 
 /// Effect factories for tool execution and stale tool recovery.
 extension AgentBehavior {
-  /// Execute tool calls in parallel. Each sends `.tools(.completed)` or
-  /// `.tools(.failed)` with the result. Repetition tracking data is sent
-  /// back in the actions so the reducer can update the tracker.
-  func executeToolCalls(_ calls: [ToolCall], state: AgentState) -> Effect<AgentAction> {
+  /// Persist `.started` for a pending tool call, then enqueue `.tools(.willExecute)`.
+  ///
+  /// This is deliberately a `.sync` effect: it establishes durable intent
+  /// (DB status) before any tool work is spawned.
+  func startToolCall(_ call: ToolCall) -> AgentEffect {
+    let sessionID = sessionID
+    let store = store
+
+    return .sync { _ in
+      _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
+      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+      return [
+        .tools(.willExecute(call)),
+        .status(.updated(status)),
+      ]
+    }
+  }
+
+  /// Execute a single tool call in a named task.
+  ///
+  /// The reducer returns this effect in response to `.tools(.willExecute)`.
+  func executeToolCall(_ call: ToolCall, state: AgentState) -> AgentEffect {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
     let tracker = state.tools.repetitionTracker
 
-    return Effect { send in
+    return .run("tool:\(call.id)") { send in
+      // Partition into blocked vs. allowed based on repetition history.
+      let argsHash = call.arguments.hashValue
+      let count = tracker.preflightCount(toolName: call.name, argsHash: argsHash)
+      if count >= ToolCallRepetitionTracker.blockThreshold {
+        let now = Date()
+        let toolResult: Message = .toolResult(.init(
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [.text(ToolCallRepetitionTracker.blockText)],
+          details: .object(["wuhu_tool_error": .string("repetition_blocked")]),
+          isError: true,
+          timestamp: now,
+        ))
+
+        let (_, entry) = try await store.appendEntryWithSession(
+          sessionID: sessionID,
+          payload: .message(.fromPi(toolResult)),
+          createdAt: now,
+        )
+        await send(.transcript(.append(entry)))
+
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
+        await send(.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
+
+        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+        await send(.status(.updated(status)))
+        return
+      }
+
+      let tools = await runtimeConfig.tools()
+
+      // Resolve the session directory for disk persistence of truncated output.
+      let primaryMount: WuhuMount? = try? await store.getPrimaryMount(sessionID: sessionID.rawValue)
+      let sessionDir: String? = if let primaryMount, primaryMount.runnerID == .local {
+        primaryMount.path
+      } else {
+        nil
+      }
+
+      do {
+        guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
+          throw PiAIError.unsupported("Unknown tool: \(call.name)")
+        }
+
+        let rawResult = try await tool.execute(toolCallId: call.id, args: call.arguments)
+        switch rawResult {
+        case let .immediate(toolResult):
+          let truncated = await applyToolResultTruncation(
+            result: toolResult,
+            direction: tool.truncationDirection,
+            toolCallId: call.id,
+            sessionDir: sessionDir,
+          )
+          let resultHash = truncated.hashValue
+          await persistToolSuccess(
+            call: call,
+            toolResult: truncated,
+            argsHash: argsHash,
+            resultHash: resultHash,
+            tracker: tracker,
+            sessionID: sessionID,
+            store: store,
+            send: send,
+          )
+
+        case .pending:
+          // Fire-and-forget tool (e.g., bash). Result will arrive via callback.
+          // Tool call stays in .started status. Just clear the executing guard.
+          await send(.tools(.statusSet(id: call.id, status: .started)))
+        }
+      } catch {
+        await persistToolFailure(
+          call: call,
+          error: error,
+          argsHash: argsHash,
+          sessionID: sessionID,
+          store: store,
+          send: send,
+        )
+      }
+    }
+  }
+
+  /// Execute tool calls in parallel. Each sends `.tools(.completed)` or
+  /// `.tools(.failed)` with the result. Repetition tracking data is sent
+  /// back in the actions so the reducer can update the tracker.
+  func executeToolCalls(_ calls: [ToolCall], state: AgentState) -> AgentEffect {
+    let sessionID = sessionID
+    let store = store
+    let runtimeConfig = runtimeConfig
+    let tracker = state.tools.repetitionTracker
+
+    let taskID = "tools:\(UUID().uuidString.lowercased())"
+    return .run(taskID) { send in
       // Mark all as started in DB
       for call in calls {
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
@@ -145,11 +257,11 @@ extension AgentBehavior {
   }
 
   /// Inject an error result for an orphaned tool call stuck in started/pending.
-  func recoverStaleToolCall(id: String, state: AgentState) -> Effect<AgentAction> {
+  func recoverStaleToolCall(id: String, state: AgentState) -> AgentEffect {
     let sessionID = sessionID
     let store = store
 
-    return Effect { send in
+    return .run("recover-tool:\(id)") { send in
       // Check if result already exists in transcript (avoid double-repair).
       let hasResult = state.transcript.entries.contains { entry in
         guard case let .message(m) = entry.payload else { return false }
@@ -205,11 +317,11 @@ extension AgentBehavior {
   }
 
   /// Persist a bash result that was delivered from the worker (typically after server restart).
-  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: AgentState) -> Effect<AgentAction> {
+  func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: AgentState) -> AgentEffect {
     let sessionID = sessionID
     let store = store
 
-    return Effect { send in
+    return .run("persist-bash-result:\(toolCallID)") { send in
       // Check if result already exists in transcript (avoid double-persist).
       let hasResult = state.transcript.entries.contains { entry in
         guard case let .message(m) = entry.payload else { return false }

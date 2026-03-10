@@ -8,8 +8,18 @@ struct InferenceState: Sendable, Equatable {
   var retryAfter: ContinuousClock.Instant?
   var lastError: InferenceError?
 
+  /// Final assistant message produced by the model that still needs to be
+  /// persisted to the transcript.
+  var pendingCompletion: AssistantMessage?
+
   static var empty: InferenceState {
-    .init(status: .idle, retryCount: 0, retryAfter: nil, lastError: nil)
+    .init(
+      status: .idle,
+      retryCount: 0,
+      retryAfter: nil,
+      lastError: nil,
+      pendingCompletion: nil,
+    )
   }
 }
 

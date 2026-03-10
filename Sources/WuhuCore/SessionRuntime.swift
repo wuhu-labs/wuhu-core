@@ -323,9 +323,6 @@ actor SessionRuntime {
         }
       }
 
-    case .queue(.drainFinished):
-      break
-
     case let .settings(.updated(settings)):
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .settingsUpdated(settings))
 
@@ -353,6 +350,9 @@ actor SessionRuntime {
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
 
     case .inference(.retryReady):
+      break
+
+    case .inference(.persisted):
       break
 
     case .tools:

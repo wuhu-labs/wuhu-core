@@ -3,23 +3,15 @@ import Foundation
 /// A lightweight, generic effect loop runtime.
 ///
 /// Holds state, runs a ``LoopBehavior``, serializes mutations,
-/// and fans out observations. Think of it as a minimal TCA Store
-/// tailored for server-side agent loops.
+/// and fans out observations.
 ///
-/// ## Lifecycle
+/// ## Key semantics
 ///
-/// 1. Create the loop with a behavior and initial state.
-/// 2. Call ``start()`` — this runs the step loop until cancelled.
-/// 3. Send actions via ``send(_:)``.
-/// 4. Observe via ``subscribe()``.
-///
-/// ## Serialization
-///
-/// All state mutations happen on the actor. Effects run concurrently
-/// but feed actions back through ``send(_:)``, which is serialized.
-/// The `nextEffect` call happens synchronously after each reduce,
-/// so guard tokens set in `nextEffect` are visible before any
-/// concurrent effect can send another action.
+/// - `send(_:)` enqueues actions; it does not reduce immediately.
+/// - `.sync` effects are awaited inline and yield committed actions.
+/// - `.run` effects are deferred until all `.sync` work drains.
+/// - The loop drains greedily until there are no queued actions and
+///   `nextEffect` returns `nil`.
 public actor EffectLoop<B: LoopBehavior> {
   public private(set) var state: B.State
   private let behavior: B
@@ -28,9 +20,13 @@ public actor EffectLoop<B: LoopBehavior> {
 
   private var signal: AsyncStream<Void>.Continuation?
 
-  // MARK: - In-flight effect tasks
+  // MARK: - Pending actions
 
-  private var inflightTasks: [UUID: Task<Void, Never>] = [:]
+  private var pendingActions: [B.Action] = []
+
+  // MARK: - Named tasks
+
+  private var tasks: [B.TaskID: Task<Void, Never>] = [:]
 
   // MARK: - Observation
 
@@ -49,99 +45,174 @@ public actor EffectLoop<B: LoopBehavior> {
 
   // MARK: - Send
 
-  /// Send an action into the loop.
-  ///
-  /// Reduces immediately, notifies observers, then wakes the step
-  /// loop to pull the next effect.
+  /// Enqueue an action and wake the loop.
   public func send(_ action: B.Action) {
-    behavior.reduce(state: &state, action: action)
-    notifyObservers(action)
+    pendingActions.append(action)
     signal?.yield(())
   }
 
   // MARK: - Lifecycle
 
   /// Start the loop. Blocks until cancelled.
-  ///
-  /// After each wake (from ``send(_:)`` or effect completion), the
-  /// loop calls `nextEffect` repeatedly until nil. When cancelled,
-  /// all in-flight effect tasks are cancelled before returning.
   public func start() async {
     let (stream, continuation) = AsyncStream<Void>.makeStream(
       bufferingPolicy: .bufferingNewest(1),
     )
     signal = continuation
 
-    defer { cancelAllInflightTasks() }
+    defer { cancelAllTasks() }
 
     // Initial step — behavior may have work from initial state.
-    step()
+    await step()
 
     for await _ in stream {
-      step()
+      await step()
     }
   }
 
   // MARK: - Step
 
-  /// Pull effects from the behavior until idle.
-  private func step() {
-    while let effect = behavior.nextEffect(state: &state) {
-      execute(effect)
+  private struct DeferredRun {
+    let id: B.TaskID
+    let work: @Sendable (Send<B.Action>) async throws -> Void
+  }
+
+  /// Drain queued actions and planner effects until idle.
+  private func step() async {
+    var deferredRuns: [DeferredRun] = []
+    var deferredIDs: Set<B.TaskID> = []
+
+    while true {
+      // 1) Drain actions.
+      var actionIndex = 0
+      while actionIndex < pendingActions.count {
+        let action = pendingActions[actionIndex]
+        actionIndex += 1
+
+        let effect = behavior.reduce(state: &state, action: action)
+        notifyObservers(action)
+        await handle(effect, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
+
+        // After each action, greedily pull planner effects.
+        while let planned = behavior.nextEffect(state: &state) {
+          await handle(planned, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
+          if pendingActions.count > actionIndex { break }
+        }
+      }
+      if actionIndex > 0 {
+        pendingActions.removeFirst(actionIndex)
+      }
+
+      // 2) No queued actions. Pull planner effects.
+      guard let planned = behavior.nextEffect(state: &state) else {
+        break
+      }
+      await handle(planned, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
+    }
+
+    // 3) After all sync work is drained, start deferred runs.
+    flushDeferredRuns(&deferredRuns)
+  }
+
+  private func handle(
+    _ effect: Effect<B.State, B.Action, B.TaskID>,
+    deferredRuns: inout [DeferredRun],
+    deferredIDs: inout Set<B.TaskID>,
+  ) async {
+    switch effect {
+    case .none:
+      return
+
+    case let .cancel(ids):
+      for id in ids {
+        // Cancel in-flight tasks.
+        tasks.removeValue(forKey: id)?.cancel()
+
+        // Remove any scheduled-but-not-yet-started work.
+        if deferredIDs.contains(id) {
+          deferredIDs.remove(id)
+          deferredRuns.removeAll(where: { $0.id == id })
+        }
+      }
+      return
+
+    case let .run(id, work):
+      precondition(tasks[id] == nil, "Task already running for id: \(id)")
+      precondition(!deferredIDs.contains(id), "Task already scheduled for id: \(id)")
+      deferredIDs.insert(id)
+      deferredRuns.append(DeferredRun(id: id, work: work))
+      return
+
+    case let .sync(work):
+      let snapshot = state
+      let actions: [B.Action]
+      do {
+        actions = try await work(snapshot)
+      } catch is CancellationError {
+        return
+      } catch {
+        // Domain-specific error handling should be encoded via returned actions.
+        // Unhandled errors are dropped.
+        return
+      }
+
+      // Commit returned actions immediately.
+      for action in actions {
+        let eff = behavior.reduce(state: &state, action: action)
+        notifyObservers(action)
+        await handle(eff, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
+      }
+      return
     }
   }
 
-  // MARK: - Execute
+  private func flushDeferredRuns(_ deferredRuns: inout [DeferredRun]) {
+    for run in deferredRuns {
+      let id = run.id
+      let work = run.work
 
-  private func execute(_ effect: Effect<B.Action>) {
-    switch effect.operation {
-    case .none:
-      break
-    case let .send(action):
-      send(action)
-    case let .run(work):
-      let taskID = UUID()
+      precondition(tasks[id] == nil, "Task already running for id: \(id)")
+
       let sendFn = Send<B.Action> { [weak self] action in
         await self?.send(action)
       }
       let behavior = behavior
+
       let task = Task { [weak self] in
-        defer { Task { [weak self] in await self?.removeInflightTask(taskID) } }
+        defer { Task { [weak self] in await self?.removeTask(id) } }
         do {
           try await behavior.run {
             try await work(sendFn)
           }
         } catch is CancellationError {
-          // Silently ignore cancellation.
+          // Normal cancellation.
         } catch {
-          // Effects are responsible for their own error handling
-          // by sending error actions. Unhandled errors are dropped.
+          // Spawned tasks handle errors by sending error actions.
+          // Unhandled errors are dropped.
         }
       }
-      inflightTasks[taskID] = task
+
+      tasks[id] = task
     }
+    deferredRuns.removeAll()
   }
 
-  /// Remove a completed task from the in-flight set.
-  private func removeInflightTask(_ id: UUID) {
-    inflightTasks.removeValue(forKey: id)
+  private func removeTask(_ id: B.TaskID) {
+    tasks.removeValue(forKey: id)
   }
 
-  /// Cancel all in-flight effect tasks and clear the tracking set.
-  private func cancelAllInflightTasks() {
-    for (_, task) in inflightTasks {
+  private func cancelAllTasks() {
+    for (_, task) in tasks {
       task.cancel()
     }
-    inflightTasks.removeAll()
+    tasks.removeAll()
   }
 
   // MARK: - Observation
 
   /// Subscribe to actions as they are reduced.
   ///
-  /// Returns the current state snapshot and a stream of subsequent
-  /// actions. The registration is atomic — no actions are missed
-  /// between the snapshot and the first stream element.
+  /// Returns the current state snapshot and a stream of subsequent actions.
   public func subscribe() -> (state: B.State, actions: AsyncStream<B.Action>) {
     let id = UUID()
     let (stream, continuation) = AsyncStream<B.Action>.makeStream()

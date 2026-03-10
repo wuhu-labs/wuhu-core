@@ -6,12 +6,12 @@ import PiAI
 extension AgentBehavior {
   /// Calls PiAI streaming API, sends `.inference(.delta)` for each text chunk,
   /// `.inference(.completed)` on success, `.inference(.failed)` on error.
-  func runInference(state: AgentState) -> Effect<AgentAction> {
+  func runInference(state: AgentState) -> AgentEffect {
     let sessionID = sessionID
     let store = store
     let runtimeConfig = runtimeConfig
     let entries = state.transcript.entries
-    return Effect { send in
+    return .run("inference") { send in
       @Dependency(\.streamFn) var streamFn
       await send(AgentAction.inference(.started))
 
@@ -64,47 +64,64 @@ extension AgentBehavior {
           throw PiAIError.unsupported("No model output")
         }
 
-        // Persist assistant entry
-        let (_, entry) = try await store.appendEntryWithSession(
-          sessionID: sessionID,
-          payload: .message(.fromPi(.assistant(message))),
-          createdAt: message.timestamp,
-        )
-        await send(AgentAction.transcript(.append(entry)))
-
-        // Track cost for this inference (use resolved model from the response, not the session alias)
-        if let usage = message.usage {
-          let entryCost = PricingTable.computeEntryCost(
-            provider: session.provider,
-            model: message.model,
-            usage: WuhuUsage.fromPi(usage),
-          )
-          if entryCost > 0 {
-            await send(AgentAction.cost(.spent(entryCost)))
-          }
-        }
-
-        // Upsert tool call statuses for any tool calls in the response
-        let calls = message.content.compactMap { block -> ToolCall? in
-          if case let .toolCall(c) = block { return c }
-          return nil
-        }
-        if !calls.isEmpty {
-          let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
-          for update in updates {
-            await send(AgentAction.tools(.statusSet(id: update.id, status: update.status)))
-          }
-        }
-
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(AgentAction.status(.updated(status)))
-
+        // Hand off persistence to the loop (sync effect). The run task only
+        // produces streaming deltas and the final assistant message.
         await send(AgentAction.inference(.completed(message)))
       } catch is CancellationError {
         throw CancellationError()
       } catch {
         await send(AgentAction.inference(.failed(InferenceError.from(error))))
       }
+    }
+  }
+
+  /// Persist a completed assistant message (and derived side effects) to SQLite.
+  ///
+  /// This runs as a `.sync` effect so it is serialized with other short DB work.
+  func persistInferenceCompletion(_ message: AssistantMessage) -> AgentEffect {
+    let sessionID = sessionID
+    let store = store
+
+    return .sync { _ in
+      let session = try await store.getSession(id: sessionID.rawValue)
+
+      let (_, entry) = try await store.appendEntryWithSession(
+        sessionID: sessionID,
+        payload: .message(.fromPi(.assistant(message))),
+        createdAt: message.timestamp,
+      )
+
+      var actions: [AgentAction] = [.transcript(.append(entry))]
+
+      // Cost (use resolved model from the response, not the session alias)
+      if let usage = message.usage {
+        let entryCost = PricingTable.computeEntryCost(
+          provider: session.provider,
+          model: message.model,
+          usage: WuhuUsage.fromPi(usage),
+        )
+        if entryCost > 0 {
+          actions.append(.cost(.spent(entryCost)))
+        }
+      }
+
+      // Tool call statuses for any tool calls in the response.
+      let calls = message.content.compactMap { block -> ToolCall? in
+        if case let .toolCall(c) = block { return c }
+        return nil
+      }
+      if !calls.isEmpty {
+        let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
+        for update in updates {
+          actions.append(.tools(.statusSet(id: update.id, status: update.status)))
+        }
+      }
+
+      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
+      actions.append(.status(.updated(status)))
+
+      actions.append(.inference(.persisted))
+      return actions
     }
   }
 }

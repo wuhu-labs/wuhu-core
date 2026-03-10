@@ -6,9 +6,6 @@ struct QueueState: Sendable, Equatable {
   var steer: UserQueueBackfill
   var followUp: UserQueueBackfill
 
-  /// Guard token: set before returning a drain effect to prevent re-scheduling.
-  var isDraining: Bool = false
-
   static var empty: QueueState {
     .init(
       system: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),

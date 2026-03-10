@@ -4,50 +4,58 @@ import WuhuAPI
 /// Effect factories for draining queue items (interrupts and turn boundary).
 extension AgentBehavior {
   /// Drain interrupt-priority items (system + steer queues), persist to DB,
-  /// and send transcript/queue/status actions back.
-  func persistAndDrainInterrupts(state: AgentState) -> Effect<AgentAction> {
+  /// and return actions that update transcript/queue/status.
+  func persistAndDrainInterrupts() -> AgentEffect {
     let sessionID = sessionID
     let store = store
-    return Effect { send in
-      defer { Task { await send(AgentAction.queue(.drainFinished)) } }
 
-      guard state.status.snapshot.status != .stopped else { return }
+    return .sync { snapshot in
+      guard snapshot.status.snapshot.status != .stopped else { return [] }
+
       let drained = try await store.drainInterruptCheckpoint(sessionID: sessionID)
-      guard drained.didDrain else { return }
+      guard drained.didDrain else { return [] }
+
+      var actions: [AgentAction] = []
 
       // Reset repetition tracker when user messages arrive (interrupt/steer).
-      await send(AgentAction.tools(.resetRepetitions))
+      actions.append(.tools(.resetRepetitions))
 
       for entry in drained.entries {
-        await send(AgentAction.transcript(.append(entry)))
+        actions.append(.transcript(.append(entry)))
       }
-      await send(AgentAction.queue(.systemUpdated(drained.systemUrgent)))
-      await send(AgentAction.queue(.steerUpdated(drained.steer)))
+      actions.append(.queue(.systemUpdated(drained.systemUrgent)))
+      actions.append(.queue(.steerUpdated(drained.steer)))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
+      actions.append(.status(.updated(status)))
+
+      return actions
     }
   }
 
   /// Drain turn-boundary items (followUp queue), persist to DB,
-  /// and send transcript/queue/status actions back.
-  func persistAndDrainTurn(state: AgentState) -> Effect<AgentAction> {
+  /// and return actions that update transcript/queue/status.
+  func persistAndDrainTurn() -> AgentEffect {
     let sessionID = sessionID
     let store = store
-    return Effect { send in
-      defer { Task { await send(AgentAction.queue(.drainFinished)) } }
 
-      guard state.status.snapshot.status != .stopped else { return }
+    return .sync { snapshot in
+      guard snapshot.status.snapshot.status != .stopped else { return [] }
+
       let drained = try await store.drainTurnBoundary(sessionID: sessionID)
-      guard drained.didDrain else { return }
+      guard drained.didDrain else { return [] }
+
+      var actions: [AgentAction] = []
 
       for entry in drained.entries {
-        await send(AgentAction.transcript(.append(entry)))
+        actions.append(.transcript(.append(entry)))
       }
-      await send(AgentAction.queue(.followUpUpdated(drained.followUp)))
+      actions.append(.queue(.followUpUpdated(drained.followUp)))
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
+      actions.append(.status(.updated(status)))
+
+      return actions
     }
   }
 }
