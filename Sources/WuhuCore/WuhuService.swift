@@ -6,7 +6,6 @@ import WuhuAPI
 public actor WuhuService {
   let store: SQLiteSessionStore
   let blobStore: WuhuBlobStore
-  private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
   private let dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
@@ -25,7 +24,6 @@ public actor WuhuService {
   public init(
     store: SQLiteSessionStore,
     blobStore: WuhuBlobStore,
-    llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
     workspaceRoot: String? = nil,
@@ -37,7 +35,6 @@ public actor WuhuService {
   ) {
     self.store = store
     self.blobStore = blobStore
-    self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
     self.workspaceRoot = workspaceRoot
@@ -154,7 +151,6 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
-      llmRequestLogger: llmRequestLogger,
       dependencyOverrides: dependencyOverrides,
       defaultCostLimitCents: defaultCostLimitCents,
       onIdle: nil,

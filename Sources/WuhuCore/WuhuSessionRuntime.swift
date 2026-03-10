@@ -33,7 +33,6 @@ actor WuhuSessionRuntime {
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
-    llmRequestLogger: WuhuLLMRequestLogger? = nil,
     dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)? = nil,
     defaultCostLimitCents: Int64? = nil,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
@@ -47,7 +46,6 @@ actor WuhuSessionRuntime {
     behavior = WuhuBehavior(
       sessionID: sessionID, store: store,
       runtimeConfig: runtimeConfig, blobStore: blobStore,
-      llmRequestLogger: llmRequestLogger,
       dependencyOverrides: dependencyOverrides,
     )
   }

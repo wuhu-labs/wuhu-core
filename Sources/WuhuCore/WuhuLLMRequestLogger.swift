@@ -1,9 +1,6 @@
 import Foundation
-import Logging
 import PiAI
 import WuhuAPI
-
-private let logger = WuhuDebugLogger.logger("LLMRequest")
 
 public actor WuhuLLMRequestLogger {
   public enum Purpose: String, Sendable, Codable, Hashable {
@@ -19,119 +16,7 @@ public actor WuhuLLMRequestLogger {
     try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
   }
 
-  public nonisolated func makeLoggedStreamFn(
-    base: @escaping StreamFn,
-    sessionID: String,
-    purpose: Purpose,
-  ) -> StreamFn {
-    { model, context, options in
-      let startedAt = Date()
-      let requestID = UUID().uuidString.lowercased()
-      let messageCount = context.messages.count
-      let toolCount = context.tools?.count ?? 0
-
-      logger.debug(
-        "inference started",
-        metadata: [
-          "requestID": "\(requestID)",
-          "sessionID": "\(sessionID)",
-          "purpose": "\(purpose.rawValue)",
-          "provider": "\(model.provider.rawValue)",
-          "model": "\(model.id)",
-          "messageCount": "\(messageCount)",
-          "toolCount": "\(toolCount)",
-        ],
-      )
-
-      let request = WuhuLLMRequestSnapshot(
-        model: .init(from: model),
-        context: .init(from: context),
-        options: .init(from: options),
-      )
-
-      let underlying = try await base(model, context, options)
-
-      return AsyncThrowingStream(AssistantMessageEvent.self, bufferingPolicy: .bufferingNewest(1024)) { continuation in
-        let task = Task {
-          var finalMessage: AssistantMessage?
-          do {
-            for try await event in underlying {
-              if case let .done(message) = event {
-                finalMessage = message
-              }
-              continuation.yield(event)
-            }
-
-            let finishedAt = Date()
-            let durationMs = Int((finishedAt.timeIntervalSince(startedAt)) * 1000)
-            let inputTokens = finalMessage?.usage?.inputTokens ?? 0
-            let outputTokens = finalMessage?.usage?.outputTokens ?? 0
-
-            logger.debug(
-              "inference completed",
-              metadata: [
-                "requestID": "\(requestID)",
-                "sessionID": "\(sessionID)",
-                "purpose": "\(purpose.rawValue)",
-                "durationMs": "\(durationMs)",
-                "inputTokens": "\(inputTokens)",
-                "outputTokens": "\(outputTokens)",
-                "stopReason": "\(finalMessage?.stopReason.rawValue ?? "unknown")",
-              ],
-            )
-
-            await self.writeLog(
-              .init(
-                version: 1,
-                sessionID: sessionID,
-                purpose: purpose,
-                startedAt: startedAt,
-                finishedAt: finishedAt,
-                request: request,
-                response: finalMessage.map { .init(from: $0) },
-                error: nil,
-              ),
-            )
-            continuation.finish()
-          } catch {
-            let finishedAt = Date()
-            let durationMs = Int((finishedAt.timeIntervalSince(startedAt)) * 1000)
-
-            logger.debug(
-              "inference failed",
-              metadata: [
-                "requestID": "\(requestID)",
-                "sessionID": "\(sessionID)",
-                "purpose": "\(purpose.rawValue)",
-                "durationMs": "\(durationMs)",
-                "error": "\(error)",
-              ],
-            )
-
-            await self.writeLog(
-              .init(
-                version: 1,
-                sessionID: sessionID,
-                purpose: purpose,
-                startedAt: startedAt,
-                finishedAt: finishedAt,
-                request: request,
-                response: finalMessage.map { .init(from: $0) },
-                error: "\(error)",
-              ),
-            )
-            continuation.finish(throwing: error)
-          }
-        }
-
-        continuation.onTermination = { _ in
-          task.cancel()
-        }
-      }
-    }
-  }
-
-  private func writeLog(_ log: WuhuLLMRequestLog) async {
+  public func writeLog(_ log: WuhuLLMRequestLog) async {
     sequence += 1
     let seq = sequence
 

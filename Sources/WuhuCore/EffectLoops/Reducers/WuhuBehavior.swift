@@ -1,6 +1,7 @@
 import Dependencies
 import Foundation
 import PiAI
+import ServiceContextModule
 import WuhuAPI
 
 /// LoopBehavior implementation for the Wuhu agent loop.
@@ -20,7 +21,6 @@ struct WuhuBehavior: LoopBehavior {
   let store: SQLiteSessionStore
   let runtimeConfig: WuhuSessionRuntimeConfig
   let blobStore: WuhuBlobStore
-  var llmRequestLogger: WuhuLLMRequestLogger? = nil
   var dependencyOverrides: (@Sendable (inout DependencyValues) -> Void)?
 
   // MARK: - Reduce
@@ -214,12 +214,17 @@ struct WuhuBehavior: LoopBehavior {
   // MARK: - Run (dependency injection)
 
   func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
-    if let overrides = dependencyOverrides {
-      try await withDependencies(overrides) {
+    var ctx = ServiceContext.current ?? .topLevel
+    ctx.sessionID = sessionID.rawValue
+
+    try await ServiceContext.$current.withValue(ctx) {
+      if let overrides = dependencyOverrides {
+        try await withDependencies(overrides) {
+          try await work()
+        }
+      } else {
         try await work()
       }
-    } else {
-      try await work()
     }
   }
 }

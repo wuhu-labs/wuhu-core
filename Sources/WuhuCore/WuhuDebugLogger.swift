@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import ServiceContextModule
 
 /// Provides a shared debug logger gated behind the `WUHU_DEBUG=1` environment variable.
 ///
@@ -14,11 +15,25 @@ public enum WuhuDebugLogger {
   /// the swift-log bootstrap with the appropriate log level.
   public static func bootstrapIfNeeded() {
     guard isEnabled else { return }
-    LoggingSystem.bootstrap { label in
-      var handler = StreamLogHandler.standardError(label: label)
+
+    let metadataProvider = Logger.MetadataProvider {
+      var metadata: Logger.Metadata = [:]
+      if let ctx = ServiceContext.current {
+        if let sessionID = ctx.sessionID {
+          metadata["sessionID"] = "\(sessionID)"
+        }
+        if let purpose = ctx.llmPurpose {
+          metadata["purpose"] = "\(purpose.rawValue)"
+        }
+      }
+      return metadata
+    }
+
+    LoggingSystem.bootstrap({ label, metadataProvider in
+      var handler = StreamLogHandler.standardError(label: label, metadataProvider: metadataProvider)
       handler.logLevel = .debug
       return handler
-    }
+    }, metadataProvider: metadataProvider)
   }
 
   /// Create a subsystem logger with the given label.

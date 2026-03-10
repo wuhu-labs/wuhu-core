@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import Hummingbird
 import HummingbirdCore
@@ -59,6 +60,10 @@ public struct WuhuServer: Sendable {
       return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
     }
 
+    prepareDependencies {
+      $0.streamFn = observedStreamFn($0.streamFn, diskLogger: requestLogger)
+    }
+
     // Runner registry — connect to configured remote runners
     let runnerRegistry = RunnerRegistry()
     let logger = Logger(label: "WuhuServer")
@@ -104,7 +109,6 @@ public struct WuhuServer: Sendable {
     let service = WuhuService(
       store: store,
       blobStore: blobStore,
-      llmRequestLogger: requestLogger,
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
