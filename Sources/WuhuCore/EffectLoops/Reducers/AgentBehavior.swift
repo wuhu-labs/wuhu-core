@@ -63,9 +63,29 @@ struct AgentBehavior: LoopBehavior {
     return .none
   }
 
-  // MARK: - Next Effect (Priority Ladder)
+  // MARK: - Next Effect
 
   func nextEffect(state: inout AgentState) -> AgentEffect? {
+    switch state.phase {
+    case .needsDrain:
+      return persistAndDrainAll()
+
+    case .needsInference:
+      if state.isOverBudget { return nil }
+      if state.inference.status == .idle {
+        state.inference.status = .running
+        return runInference(state: state)
+      }
+      return nil
+
+    case .unknown:
+      fatalError("unimplemented: unknown phase")
+    }
+  }
+
+  // MARK: - Next Effect (Legacy — to be removed)
+
+  func nextEffectBackup(state: inout AgentState) -> AgentEffect? {
     // 0. Cost gate — if over budget, idle until limit is updated/cleared.
     if state.isOverBudget {
       return nil
