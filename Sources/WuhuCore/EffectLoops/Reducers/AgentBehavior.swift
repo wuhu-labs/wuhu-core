@@ -31,20 +31,32 @@ struct AgentBehavior: LoopBehavior {
     switch action {
     case let .queue(a):
       reduceQueue(state: &state, action: a)
+
     case let .inference(a):
+      // Proof-of-concept: short-lived “flip” state (like `pendingCompletion`) is removed.
+      // Persist inference completions immediately as a `.sync` effect.
+      if case let .completed(message) = a {
+        reduceInference(state: &state, action: a)
+        return persistInferenceCompletion(message)
+      }
       reduceInference(state: &state, action: a)
+
     case let .tools(a):
       reduceTools(state: &state, action: a)
       if case let .willExecute(call) = a {
         return executeToolCall(call, state: state)
       }
       return .none
+
     case let .cost(a):
       reduceCost(state: &state, action: a)
+
     case let .transcript(a):
       reduceTranscript(state: &state, action: a)
+
     case let .settings(a):
       reduceSettings(state: &state, action: a)
+
     case let .status(a):
       reduceStatus(state: &state, action: a)
     }
@@ -54,12 +66,7 @@ struct AgentBehavior: LoopBehavior {
   // MARK: - Next Effect (Priority Ladder)
 
   func nextEffect(state: inout AgentState) -> AgentEffect? {
-    // 0. Inference completion persistence.
-    if let message = state.inference.pendingCompletion {
-      return persistInferenceCompletion(message)
-    }
-
-    // 1. Cost gate — if paused, emit exceeded entry then idle
+    // 0. Cost gate — if paused, emit exceeded entry then idle
     if state.cost.isPaused {
       if !state.cost.exceededEntryEmitted {
         state.cost.exceededEntryEmitted = true
@@ -68,7 +75,7 @@ struct AgentBehavior: LoopBehavior {
       return nil
     }
 
-    // 2. Retry backoff — if retryAfter is set, clear guard token and sleep
+    // 1. Retry backoff — if retryAfter is set, clear guard token and sleep
     if let retryAfter = state.inference.retryAfter {
       state.inference.retryAfter = nil // guard token
       return sleepUntil(retryAfter)
@@ -99,37 +106,37 @@ struct AgentBehavior: LoopBehavior {
       return nil
     }
 
-    // 3. Pending bash results — delivered from worker after restart
+    // 2. Pending bash results — delivered from worker after restart
     if let (toolCallID, result) = state.tools.pendingBashResults.first {
       state.tools.pendingBashResults.removeValue(forKey: toolCallID)
       return persistDeliveredBashResult(toolCallID: toolCallID, result: result, state: state)
     }
 
-    // 4. Stale tool recovery — orphaned tool calls with no result
+    // 3. Stale tool recovery — orphaned tool calls with no result
     let staleIDs = staleToolCallIDs(in: state)
     if let firstStale = staleIDs.first {
       state.tools.recoveringIDs.insert(firstStale) // guard token
       return recoverStaleToolCall(id: firstStale, state: state)
     }
 
-    // 5. Drain interrupts — system + steer queues
+    // 4. Drain interrupts — system + steer queues
     if !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty {
       return persistAndDrainInterrupts()
     }
 
-    // 6. Drain turn items — followUp queue (only if no interrupts pending)
+    // 5. Drain turn items — followUp queue (only if no interrupts pending)
     if !state.queue.followUp.pending.isEmpty {
       return persistAndDrainTurn()
     }
 
-    // 7. Inference — if needed and not already running.
+    // 6. Inference — if needed and not already running.
     //    Drain runs via `.sync`, so inference can safely run after drains.
     if state.inference.status == .idle, needsInference(state: state) {
       state.inference.status = .running // guard token
       return runInference(state: state)
     }
 
-    // 8. Tool execution — pending tool calls (one per nextEffect call).
+    // 7. Tool execution — pending tool calls (one per nextEffect call).
     //
     // We start tools one-by-one via `.sync` (persist started), but because the loop
     // drains greedily and defers `.run` tasks until sync drains, multiple tool calls
@@ -138,7 +145,7 @@ struct AgentBehavior: LoopBehavior {
       return startToolCall(call)
     }
 
-    // 9. Compaction — if transcript exceeds threshold
+    // 8. Compaction — if transcript exceeds threshold
     if !state.transcript.isCompacting, shouldCompact(state: state) {
       state.transcript.isCompacting = true // guard token
       return runCompaction(state: state)

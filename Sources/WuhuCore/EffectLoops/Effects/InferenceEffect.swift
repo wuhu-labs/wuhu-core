@@ -64,8 +64,9 @@ extension AgentBehavior {
           throw PiAIError.unsupported("No model output")
         }
 
-        // Hand off persistence to the loop (sync effect). The run task only
-        // produces streaming deltas and the final assistant message.
+        // Hand off persistence to the loop. The run task only produces streaming
+        // deltas and the final assistant message; `AgentBehavior.reduce` triggers
+        // the `.sync` persistence effect when it sees `.inference(.completed)`.
         await send(AgentAction.inference(.completed(message)))
       } catch is CancellationError {
         throw CancellationError()
