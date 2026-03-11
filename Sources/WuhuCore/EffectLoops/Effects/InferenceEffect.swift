@@ -85,8 +85,6 @@ extension AgentBehavior {
     let store = store
 
     return .sync { state in
-      let session = try await store.getSession(id: sessionID.rawValue)
-
       let (_, entry) = try await store.appendEntryWithSession(
         sessionID: sessionID,
         payload: .message(.fromPi(.assistant(message))),
@@ -94,24 +92,6 @@ extension AgentBehavior {
       )
 
       state.transcript.entries.append(entry)
-
-      // Cost (use resolved model from the response, not the session alias)
-      if let usage = message.usage {
-        let entryCost = PricingTable.computeEntryCost(
-          provider: session.provider,
-          model: message.model,
-          usage: WuhuUsage.fromPi(usage),
-        )
-        if entryCost > 0 {
-          state.cost.totalSpent += entryCost
-          if let budget = state.cost.budgetRemaining {
-            state.cost.budgetRemaining = budget - entryCost
-            if budget - entryCost <= 0 {
-              state.cost.isPaused = true
-            }
-          }
-        }
-      }
 
       // Tool call statuses for any tool calls in the response.
       let calls = message.content.compactMap { block -> ToolCall? in

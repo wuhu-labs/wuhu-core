@@ -1,28 +1,10 @@
 /// Sub-reducer for cost actions.
 func reduceCost(state: inout AgentState, action: CostAction) {
   switch action {
-  case let .approved(amount):
-    state.cost.budgetRemaining = (state.cost.budgetRemaining ?? 0) + amount
-    state.cost.isPaused = false
-    state.cost.exceededEntryEmitted = false
-
   case let .limitUpdated(newLimit):
-    state.cost.budgetRemaining = newLimit - state.cost.totalSpent
-    state.cost.isPaused = (state.cost.budgetRemaining ?? 0) <= 0
-    if !state.cost.isPaused {
-      state.cost.exceededEntryEmitted = false
-    }
+    state.cost.budgetLimit = newLimit
 
   case .limitCleared:
-    state.cost.budgetRemaining = nil
-    state.cost.isPaused = false
-    state.cost.exceededEntryEmitted = false
-
-  case .pause:
-    state.cost.isPaused = true
-
-  case .resume:
-    state.cost.isPaused = false
-    state.cost.exceededEntryEmitted = false
+    state.cost.budgetLimit = nil
   }
 }

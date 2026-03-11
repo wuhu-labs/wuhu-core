@@ -1,10 +1,7 @@
-/// Actions for the cost subsystem — budget tracking and pause gating.
+/// Actions for the cost subsystem — budget limit management.
 ///
 /// All monetary values are in **hundredths-of-a-cent** (Int64).
 enum CostAction: Sendable {
-  case approved(Int64)
   case limitUpdated(Int64)
   case limitCleared
-  case pause
-  case resume
 }

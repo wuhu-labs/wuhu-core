@@ -63,18 +63,15 @@ actor SessionRuntime {
           let parts = try await store.loadLoopStateParts(sessionID: sessionID)
           let defaultLimit = runtimeConfig.defaultCostLimitCents
 
-          // Compute cost from transcript and populate CostState
-          let totalSpent = PricingTable.computeCost(entries: parts.entries)
+          // Compute cost limit for CostState
           let costLimit = parts.costLimitCents ?? defaultLimit
-          let budgetRemaining: Int64? = costLimit.map { $0 - totalSpent }
-          let isPaused = budgetRemaining.map { $0 <= 0 } ?? false
 
           let initialState = AgentState(
             transcript: .init(entries: parts.entries),
             queue: .init(system: parts.systemUrgent, steer: parts.steer, followUp: parts.followUp),
             inference: .empty,
             tools: .init(statuses: parts.toolCallStatus, repetitionTracker: ToolCallRepetitionTracker()),
-            cost: .init(budgetRemaining: budgetRemaining, totalSpent: totalSpent, isPaused: isPaused, exceededEntryEmitted: false),
+            cost: .init(budgetLimit: costLimit),
             settings: .init(snapshot: parts.settings),
             status: .init(snapshot: parts.status),
           )

@@ -11,6 +11,17 @@ struct AgentState: Sendable, Equatable {
   var settings: SettingsState
   var status: StatusState
 
+  /// Total cost derived from assistant message usage in the transcript.
+  var totalSpent: Int64 {
+    PricingTable.computeCost(entries: transcript.entries)
+  }
+
+  /// Whether spending has exceeded the budget limit.
+  var isOverBudget: Bool {
+    guard let limit = cost.budgetLimit else { return false }
+    return totalSpent >= limit
+  }
+
   static var empty: AgentState {
     .init(
       transcript: .empty,

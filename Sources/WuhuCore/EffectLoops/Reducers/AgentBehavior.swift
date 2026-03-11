@@ -66,12 +66,8 @@ struct AgentBehavior: LoopBehavior {
   // MARK: - Next Effect (Priority Ladder)
 
   func nextEffect(state: inout AgentState) -> AgentEffect? {
-    // 0. Cost gate — if paused, emit exceeded entry then idle
-    if state.cost.isPaused {
-      if !state.cost.exceededEntryEmitted {
-        state.cost.exceededEntryEmitted = true
-        return emitCostExceededEntry()
-      }
+    // 0. Cost gate — if over budget, idle until limit is updated/cleared.
+    if state.isOverBudget {
       return nil
     }
 
