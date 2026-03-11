@@ -78,12 +78,13 @@ extension AgentBehavior {
 
   /// Persist a completed assistant message (and derived side effects) to SQLite.
   ///
-  /// This runs as a `.sync` effect so it is serialized with other short DB work.
+  /// This runs as a `.sync` effect so it has exclusive mutable access to state.
+  /// DB writes happen during the async window; state is mutated directly.
   func persistInferenceCompletion(_ message: AssistantMessage) -> AgentEffect {
     let sessionID = sessionID
     let store = store
 
-    return .sync { _ in
+    return .sync { state in
       let session = try await store.getSession(id: sessionID.rawValue)
 
       let (_, entry) = try await store.appendEntryWithSession(
@@ -92,7 +93,7 @@ extension AgentBehavior {
         createdAt: message.timestamp,
       )
 
-      var actions: [AgentAction] = [.transcript(.append(entry))]
+      state.transcript.entries.append(entry)
 
       // Cost (use resolved model from the response, not the session alias)
       if let usage = message.usage {
@@ -102,7 +103,13 @@ extension AgentBehavior {
           usage: WuhuUsage.fromPi(usage),
         )
         if entryCost > 0 {
-          actions.append(.cost(.spent(entryCost)))
+          state.cost.totalSpent += entryCost
+          if let budget = state.cost.budgetRemaining {
+            state.cost.budgetRemaining = budget - entryCost
+            if budget - entryCost <= 0 {
+              state.cost.isPaused = true
+            }
+          }
         }
       }
 
@@ -114,15 +121,14 @@ extension AgentBehavior {
       if !calls.isEmpty {
         let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
         for update in updates {
-          actions.append(.tools(.statusSet(id: update.id, status: update.status)))
+          state.tools.statuses[update.id] = ToolCallRecord(status: update.status)
         }
       }
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      actions.append(.status(.updated(status)))
+      state.status.snapshot = status
 
-      actions.append(.inference(.persisted))
-      return actions
+      return []
     }
   }
 }

@@ -144,10 +144,13 @@ public actor EffectLoop<B: LoopBehavior> {
       return
 
     case let .sync(work):
-      let snapshot = state
+      // Copy dance: Swift forbids passing actor-isolated state as inout
+      // into an async closure. We copy out, let the closure mutate, then
+      // copy back — the actor provides exclusive access throughout.
+      var copy = state
       let actions: [B.Action]
       do {
-        actions = try await work(snapshot)
+        actions = try await work(&copy)
       } catch is CancellationError {
         return
       } catch {
@@ -155,6 +158,7 @@ public actor EffectLoop<B: LoopBehavior> {
         // Unhandled errors are dropped.
         return
       }
+      state = copy
 
       // Commit returned actions immediately.
       for action in actions {

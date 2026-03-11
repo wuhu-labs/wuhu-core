@@ -9,8 +9,8 @@ extension AgentBehavior {
     let sessionID = sessionID
     let store = store
 
-    return .sync { snapshot in
-      guard snapshot.status.snapshot.status != .stopped else { return [] }
+    return .sync { state in
+      guard state.status.snapshot.status != .stopped else { return [] }
 
       let drained = try await store.drainInterruptCheckpoint(sessionID: sessionID)
       guard drained.didDrain else { return [] }
@@ -39,8 +39,8 @@ extension AgentBehavior {
     let sessionID = sessionID
     let store = store
 
-    return .sync { snapshot in
-      guard snapshot.status.snapshot.status != .stopped else { return [] }
+    return .sync { state in
+      guard state.status.snapshot.status != .stopped else { return [] }
 
       let drained = try await store.drainTurnBoundary(sessionID: sessionID)
       guard drained.didDrain else { return [] }

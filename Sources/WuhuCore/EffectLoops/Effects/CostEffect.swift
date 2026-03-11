@@ -9,9 +9,9 @@ extension AgentBehavior {
     let sessionID = sessionID
     let store = store
 
-    return .sync { snapshot in
-      let totalSpent = snapshot.cost.totalSpent
-      let budgetRemaining = snapshot.cost.budgetRemaining
+    return .sync { state in
+      let totalSpent = state.cost.totalSpent
+      let budgetRemaining = state.cost.budgetRemaining
 
       let custom = WuhuCustomMessage(
         customType: WuhuCustomMessageTypes.costLimitExceeded,

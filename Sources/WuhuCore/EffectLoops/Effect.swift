@@ -15,7 +15,7 @@ public struct Send<Action: Sendable>: Sendable {
 /// A unit of work produced by a ``LoopBehavior``.
 ///
 /// This effect model intentionally stays primitive:
-/// - `.sync` is awaited inline and yields committed actions.
+/// - `.sync` is awaited inline with exclusive mutable access to state.
 /// - `.run` is spawned as a named task (deferred until sync work drains).
 /// - `.cancel` cancels named tasks (batch).
 ///
@@ -24,11 +24,13 @@ public indirect enum Effect<State: Sendable, Action: Sendable, TaskID: Hashable 
   /// No-op.
   case none
 
-  /// Serialized async work that returns actions to commit.
+  /// Serialized async work with exclusive mutable access to state.
   ///
-  /// The loop passes a snapshot of state into the closure. While awaiting,
-  /// incoming actions are queued but not reduced.
-  case sync(@Sendable (State) async throws -> [Action])
+  /// The closure receives `inout State` (via copy-dance in the actor) and
+  /// can mutate it directly. While awaiting, incoming actions are queued
+  /// but not reduced. Returns actions that are still reduced after the
+  /// closure completes (transitional — prefer direct state mutation).
+  case sync(@Sendable (inout State) async throws -> [Action])
 
   /// Long-running work in a named task. Use `TaskID` for cancellation.
   case run(TaskID, @Sendable (Send<Action>) async throws -> Void)
