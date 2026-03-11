@@ -13,6 +13,8 @@ Package.resolved
 
 # Xcode
 DerivedData/
+/Derived/
+/wuhu-core.xcodeproj/
 **/xcuserdata/
 *.xcuserstate
 

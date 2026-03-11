@@ -26,7 +26,7 @@ public actor SessionActor {
   private var subscriberContinuations: [UUID: AsyncStream<AgentState>.Continuation] = [:]
   private var shouldDriveAgain = false
   private var isDriving = false
-  private var inferenceTask: Task<AssistantMessage, Error>?
+  private var inferenceTask: Task<Void, Error>?
   private var canDrainFollowUp = false
   private var joinWakeEvents: [JoinWakeEvent] = []
   private var pendingJoinToolCallID: String?
@@ -60,38 +60,27 @@ public actor SessionActor {
     }
   }
 
-  public func sendUserMessage(_ text: String) {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-
-    if state.status == .paused {
-      enqueueSteerMessage(trimmed)
+  public func enqueueUserMessage(_ text: String, lane: UserMessageLane) {
+    switch lane {
+    case .steer:
+      enqueueSteerMessage(text)
+      signalJoinWakeIfNeeded(.steer(text))
       requestDrive()
-      return
-    }
 
-    if isBusy {
-      enqueueSteerMessage(trimmed)
-      signalJoinWake(.steer(trimmed))
-      requestDrive()
-      return
+    case .followUp:
+      enqueueFollowUp(text)
     }
-
-    appendUserMessage(trimmed)
-    canDrainFollowUp = false
-    requestDrive()
   }
 
   public func enqueueFollowUp(_ text: String) {
     enqueue(queue: &state.followUpQueue, text: text)
     publish()
+    requestDrive()
   }
 
   public func enqueueNotification(_ text: String) {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-    enqueue(queue: &state.notificationQueue, text: trimmed)
-    signalJoinWake(.notification(trimmed))
+    enqueue(queue: &state.notificationQueue, text: text)
+    signalJoinWakeIfNeeded(.notification(text))
     publish()
     requestDrive()
   }
@@ -100,6 +89,7 @@ public actor SessionActor {
     guard state.status != .paused else { return }
 
     state.status = .paused
+    state.assistantDraft = nil
     appendSystemMessage(kind: .control, text: "User stopped execution.")
     canDrainFollowUp = false
 
@@ -179,17 +169,21 @@ public actor SessionActor {
       }
 
       state.status = .running
+      state.lastError = nil
       publish()
 
       do {
         try await performInferenceTurn()
         shouldDriveAgain = true
       } catch is CancellationError {
+        state.assistantDraft = nil
         if state.status != .paused {
           state.status = .idle
           publish()
         }
       } catch {
+        inferenceTask = nil
+        state.assistantDraft = nil
         state.lastError = error.localizedDescription
         state.status = .idle
         publish()
@@ -209,6 +203,7 @@ public actor SessionActor {
   }
 
   private func performInferenceTurn() async throws {
+    let responseID = environment.uuid()
     let request = InferenceRequest(
       model: configuration.model,
       systemPrompt: configuration.systemPrompt,
@@ -216,13 +211,46 @@ public actor SessionActor {
       tools: tools.exposedTools
     )
 
-    let task = Task {
-      try await environment.inferenceService.complete(request)
+    let task = Task { [environment] in
+      let stream = try await environment.inferenceService.stream(request)
+      for try await event in stream {
+        try Task.checkCancellation()
+        try await self.receiveInferenceEvent(event, responseID: responseID)
+      }
     }
-    inferenceTask = task
-    let assistantMessage = try await task.value
-    inferenceTask = nil
 
+    inferenceTask = task
+    state.assistantDraft = .init(
+      responseID: responseID,
+      startedAt: environment.now(),
+      updatedAt: environment.now()
+    )
+    publish()
+
+    do {
+      try await task.value
+      inferenceTask = nil
+    } catch {
+      inferenceTask = nil
+      throw error
+    }
+  }
+
+  private func receiveInferenceEvent(_ event: AssistantMessageEvent, responseID: UUID) async throws {
+    switch event {
+    case let .start(partial):
+      updateAssistantDraft(responseID: responseID, text: assistantDraftText(from: partial))
+
+    case let .textDelta(_, partial):
+      updateAssistantDraft(responseID: responseID, text: assistantDraftText(from: partial))
+
+    case let .done(message):
+      state.assistantDraft = nil
+      try await commitAssistantMessage(message, responseID: responseID)
+    }
+  }
+
+  private func commitAssistantMessage(_ assistantMessage: AssistantMessage, responseID: UUID) async throws {
     var emittedToolCalls = false
 
     for block in assistantMessage.content {
@@ -231,7 +259,12 @@ public actor SessionActor {
         guard !text.text.isEmpty else { continue }
         state.transcript.append(
           .assistantText(
-            .init(id: environment.uuid(), text: text.text, timestamp: assistantMessage.timestamp)
+            .init(
+              id: environment.uuid(),
+              responseID: responseID,
+              text: text.text,
+              timestamp: assistantMessage.timestamp
+            )
           )
         )
 
@@ -241,6 +274,7 @@ public actor SessionActor {
           .toolCall(
             .init(
               id: environment.uuid(),
+              responseID: responseID,
               toolCallID: call.id,
               toolName: call.name,
               arguments: call.arguments,
@@ -339,7 +373,7 @@ public actor SessionActor {
       activePersistentRuns.removeValue(forKey: toolCallID)
       removeActiveToolCall(toolCallID)
       appendToolResult(toolCallID: toolCallID, toolName: toolName, result: result)
-      signalJoinWake(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
+      signalJoinWakeIfNeeded(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
       requestDrive()
 
     case let .failed(message):
@@ -350,7 +384,7 @@ public actor SessionActor {
         toolName: toolName,
         result: .init(content: [.text(message)], isError: true)
       )
-      signalJoinWake(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
+      signalJoinWakeIfNeeded(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
       requestDrive()
     }
   }
@@ -376,10 +410,9 @@ public actor SessionActor {
     publish()
   }
 
-  private func signalJoinWake(_ wakeEvent: JoinWakeEvent) {
-    joinWakeEvents.append(wakeEvent)
-
+  private func signalJoinWakeIfNeeded(_ wakeEvent: JoinWakeEvent) {
     guard let joinToolCallID = pendingJoinToolCallID else { return }
+    joinWakeEvents.append(wakeEvent)
     pendingJoinToolCallID = nil
     removeActiveToolCall(joinToolCallID)
 
@@ -394,8 +427,13 @@ public actor SessionActor {
     guard !state.steerQueue.isEmpty || !state.notificationQueue.isEmpty else { return false }
 
     for message in state.steerQueue {
-      state.transcript.append(.userMessage(.init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)))
+      state.transcript.append(
+        .userMessage(
+          .init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)
+        )
+      )
     }
+
     for message in state.notificationQueue {
       state.transcript.append(
         .systemMessage(
@@ -403,6 +441,7 @@ public actor SessionActor {
         )
       )
     }
+
     state.steerQueue.removeAll()
     state.notificationQueue.removeAll()
     canDrainFollowUp = false
@@ -412,7 +451,11 @@ public actor SessionActor {
 
   private func drainFollowUp() {
     for message in state.followUpQueue {
-      state.transcript.append(.userMessage(.init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)))
+      state.transcript.append(
+        .userMessage(
+          .init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)
+        )
+      )
     }
     state.followUpQueue.removeAll()
     canDrainFollowUp = false
@@ -421,15 +464,6 @@ public actor SessionActor {
 
   private func enqueueSteerMessage(_ text: String) {
     enqueue(queue: &state.steerQueue, text: text)
-    publish()
-  }
-
-  private func appendUserMessage(_ text: String) {
-    state.transcript.append(
-      .userMessage(
-        .init(id: environment.uuid(), text: text, timestamp: environment.now())
-      )
-    )
     publish()
   }
 
@@ -463,6 +497,27 @@ public actor SessionActor {
     guard let index = state.activeToolCalls.firstIndex(where: { $0.id == toolCallID }) else { return }
     state.activeToolCalls[index].progress.append(progressMessage)
     state.activeToolCalls[index].updatedAt = environment.now()
+  }
+
+  private func updateAssistantDraft(responseID: UUID, text: String) {
+    let now = environment.now()
+    if var draft = state.assistantDraft, draft.responseID == responseID {
+      draft.text = text
+      draft.updatedAt = now
+      state.assistantDraft = draft
+    } else {
+      state.assistantDraft = .init(responseID: responseID, text: text, startedAt: now, updatedAt: now)
+    }
+    publish()
+  }
+
+  private func assistantDraftText(from message: AssistantMessage) -> String {
+    message.content.compactMap { block -> String? in
+      if case let .text(text) = block {
+        return text.text
+      }
+      return nil
+    }.joined()
   }
 
   private func removeActiveToolCall(_ toolCallID: String) {

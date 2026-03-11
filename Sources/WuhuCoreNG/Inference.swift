@@ -18,10 +18,49 @@ public struct InferenceRequest: Sendable, Hashable {
 }
 
 public struct InferenceService: Sendable {
-  public var complete: @Sendable (InferenceRequest) async throws -> AssistantMessage
+  public var stream: @Sendable (InferenceRequest) async throws -> AsyncThrowingStream<AssistantMessageEvent, any Error>
+
+  public init(
+    stream: @escaping @Sendable (InferenceRequest) async throws -> AsyncThrowingStream<AssistantMessageEvent, any Error>
+  ) {
+    self.stream = stream
+  }
 
   public init(complete: @escaping @Sendable (InferenceRequest) async throws -> AssistantMessage) {
-    self.complete = complete
+    self.stream = { request in
+      AsyncThrowingStream { continuation in
+        Task {
+          do {
+            let message = try await complete(request)
+            continuation.yield(.done(message: message))
+            continuation.finish()
+          } catch {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
+    }
+  }
+
+  public func complete(_ request: InferenceRequest) async throws -> AssistantMessage {
+    let events = try await stream(request)
+    var finalMessage: AssistantMessage?
+
+    for try await event in events {
+      switch event {
+      case let .start(partial):
+        finalMessage = partial
+      case let .textDelta(_, partial):
+        finalMessage = partial
+      case let .done(message):
+        finalMessage = message
+      }
+    }
+
+    guard let finalMessage else {
+      throw InferenceError.emptyResponse
+    }
+    return finalMessage
   }
 }
 
@@ -70,7 +109,7 @@ public extension InferenceService {
   static func live(apiKey: String) -> Self {
     let http = AsyncHTTPClientTransport()
 
-    return Self { request in
+    return Self(stream: { request in
       let context = Context(
         systemPrompt: request.systemPrompt,
         messages: request.messages,
@@ -99,23 +138,8 @@ public extension InferenceService {
         )
       }
 
-      var finalMessage: AssistantMessage?
-      for try await event in stream {
-        switch event {
-        case let .start(partial):
-          finalMessage = partial
-        case let .textDelta(_, partial):
-          finalMessage = partial
-        case let .done(message):
-          finalMessage = message
-        }
-      }
-
-      guard let finalMessage else {
-        throw InferenceError.emptyResponse
-      }
-      return finalMessage
-    }
+      return stream
+    })
   }
 }
 
@@ -182,9 +206,9 @@ private actor SleepTaskBox {
 
 private enum InferenceServiceKey: DependencyKey {
   static let liveValue: InferenceService = .live(apiKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? "")
-  static let testValue: InferenceService = .init { _ in
+  static let testValue: InferenceService = .init(complete: { _ in
     throw ToolError.message("InferenceService.testValue was not overridden.")
-  }
+  })
 }
 
 private enum SleepToolDriverKey: DependencyKey {

@@ -7,6 +7,7 @@ public struct AgentState: Sendable, Hashable {
   public var followUpQueue: [QueuedMessage]
   public var notificationQueue: [QueuedMessage]
   public var activeToolCalls: [ToolRuntimeState]
+  public var assistantDraft: AssistantDraft?
   public var status: SessionStatus
   public var lastError: String?
 
@@ -16,6 +17,7 @@ public struct AgentState: Sendable, Hashable {
     followUpQueue: [QueuedMessage] = [],
     notificationQueue: [QueuedMessage] = [],
     activeToolCalls: [ToolRuntimeState] = [],
+    assistantDraft: AssistantDraft? = nil,
     status: SessionStatus = .idle,
     lastError: String? = nil
   ) {
@@ -24,6 +26,7 @@ public struct AgentState: Sendable, Hashable {
     self.followUpQueue = followUpQueue
     self.notificationQueue = notificationQueue
     self.activeToolCalls = activeToolCalls
+    self.assistantDraft = assistantDraft
     self.status = status
     self.lastError = lastError
   }
@@ -34,6 +37,11 @@ public enum SessionStatus: String, Sendable, Hashable {
   case running
   case waitingForTools
   case paused
+}
+
+public enum UserMessageLane: String, Sendable, Hashable {
+  case steer
+  case followUp
 }
 
 public struct QueuedMessage: Identifiable, Sendable, Hashable {
@@ -76,6 +84,21 @@ public struct ToolRuntimeState: Identifiable, Sendable, Hashable {
 public enum ToolRuntimeKind: String, Sendable, Hashable {
   case persistent
   case join
+}
+
+public struct AssistantDraft: Identifiable, Sendable, Hashable {
+  public var id: UUID { responseID }
+  public var responseID: UUID
+  public var text: String
+  public var startedAt: Date
+  public var updatedAt: Date
+
+  public init(responseID: UUID, text: String = "", startedAt: Date, updatedAt: Date) {
+    self.responseID = responseID
+    self.text = text
+    self.startedAt = startedAt
+    self.updatedAt = updatedAt
+  }
 }
 
 public struct Transcript: Sendable, Hashable {
@@ -196,11 +219,13 @@ public struct UserMessageEntry: Identifiable, Sendable, Hashable {
 
 public struct AssistantTextEntry: Identifiable, Sendable, Hashable {
   public var id: UUID
+  public var responseID: UUID
   public var text: String
   public var timestamp: Date
 
-  public init(id: UUID, text: String, timestamp: Date) {
+  public init(id: UUID, responseID: UUID, text: String, timestamp: Date) {
     self.id = id
+    self.responseID = responseID
     self.text = text
     self.timestamp = timestamp
   }
@@ -208,13 +233,15 @@ public struct AssistantTextEntry: Identifiable, Sendable, Hashable {
 
 public struct ToolCallEntry: Identifiable, Sendable, Hashable {
   public var id: UUID
+  public var responseID: UUID
   public var toolCallID: String
   public var toolName: String
   public var arguments: JSONValue
   public var timestamp: Date
 
-  public init(id: UUID, toolCallID: String, toolName: String, arguments: JSONValue, timestamp: Date) {
+  public init(id: UUID, responseID: UUID, toolCallID: String, toolName: String, arguments: JSONValue, timestamp: Date) {
     self.id = id
+    self.responseID = responseID
     self.toolCallID = toolCallID
     self.toolName = toolName
     self.arguments = arguments

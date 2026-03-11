@@ -5,10 +5,16 @@ import Testing
 struct ScriptedTurn: Sendable {
   var blocks: [ContentBlock]
   var stopReason: StopReason
+  var streamedTextDeltas: [String]
 
-  init(blocks: [ContentBlock], stopReason: StopReason = .stop) {
+  init(
+    blocks: [ContentBlock],
+    stopReason: StopReason = .stop,
+    streamedTextDeltas: [String] = []
+  ) {
     self.blocks = blocks
     self.stopReason = stopReason
+    self.streamedTextDeltas = streamedTextDeltas
   }
 }
 
@@ -20,20 +26,64 @@ actor ScriptedInference {
     self.turns = turns
   }
 
-  func complete(_ request: InferenceRequest) throws -> AssistantMessage {
+  func stream(_ request: InferenceRequest) throws -> AsyncThrowingStream<AssistantMessageEvent, any Error> {
     requests.append(request)
     guard !turns.isEmpty else {
       throw ToolError.message("No scripted inference turn remains.")
     }
 
     let turn = turns.removeFirst()
-    return AssistantMessage(
-      provider: request.model.provider,
-      model: request.model.id,
-      content: turn.blocks,
-      stopReason: turn.stopReason,
-      timestamp: .now
-    )
+    return AsyncThrowingStream { continuation in
+      let provider = request.model.provider
+      let model = request.model.id
+      let timestamp = Date()
+
+      Task {
+        if !turn.streamedTextDeltas.isEmpty {
+          var partialText = ""
+          continuation.yield(
+            .start(
+              partial: AssistantMessage(
+                provider: provider,
+                model: model,
+                content: [],
+                stopReason: turn.stopReason,
+                timestamp: timestamp
+              )
+            )
+          )
+
+          for delta in turn.streamedTextDeltas {
+            partialText += delta
+            continuation.yield(
+              .textDelta(
+                delta: delta,
+                partial: AssistantMessage(
+                  provider: provider,
+                  model: model,
+                  content: partialText.isEmpty ? [] : [.text(partialText)],
+                  stopReason: turn.stopReason,
+                  timestamp: timestamp
+                )
+              )
+            )
+          }
+        }
+
+        continuation.yield(
+          .done(
+            message: AssistantMessage(
+              provider: provider,
+              model: model,
+              content: turn.blocks,
+              stopReason: turn.stopReason,
+              timestamp: timestamp
+            )
+          )
+        )
+        continuation.finish()
+      }
+    }
   }
 }
 
@@ -153,9 +203,9 @@ struct SessionHarness {
     let inference = ScriptedInference(turns: turns)
     let sleep = ManualSleepDriver()
     let environment = SessionEnvironment(
-      inferenceService: .init { request in
-        try await inference.complete(request)
-      },
+      inferenceService: .init(stream: { request in
+        try await inference.stream(request)
+      }),
       sleepToolDriver: .init { toolCallID, minutes in
         await sleep.start(toolCallID: toolCallID, minutes: minutes)
       },
@@ -176,12 +226,12 @@ struct SessionHarness {
     self.tracker = tracker
   }
 
-  func send(_ text: String) async {
-    await session.sendUserMessage(text)
+  func enqueueSteer(_ text: String) async {
+    await session.enqueueUserMessage(text, lane: .steer)
   }
 
   func enqueueFollowUp(_ text: String) async {
-    await session.enqueueFollowUp(text)
+    await session.enqueueUserMessage(text, lane: .followUp)
   }
 
   func enqueueNotification(_ text: String) async {
@@ -204,6 +254,7 @@ struct SessionHarness {
     await tracker.waitUntil { state in
       state.status == .idle
         && state.activeToolCalls.isEmpty
+        && state.assistantDraft == nil
         && state.transcript.entries.count >= minimumTranscriptEntries
     }
   }
@@ -218,6 +269,10 @@ struct SessionHarness {
 
   func waitUntilPaused() async -> AgentState {
     await tracker.waitUntil { $0.status == .paused }
+  }
+
+  func waitUntilDraftText(_ text: String) async -> AgentState {
+    await tracker.waitUntil { $0.assistantDraft?.text == text }
   }
 }
 

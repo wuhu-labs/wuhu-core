@@ -21,7 +21,7 @@ import Testing
       ]
     )
 
-    await harness.send("Read the README.")
+    await harness.enqueueSteer("Read the README.")
     let state = await harness.waitUntilIdle(minimumTranscriptEntries: 5)
 
     #expect(state.transcript.debugSummary == [
@@ -52,7 +52,7 @@ import Testing
       ]
     )
 
-    await harness.send("Sleep for 2 minutes.")
+    await harness.enqueueSteer("Sleep for 2 minutes.")
     let waiting = await harness.waitUntilWaitingForTools(minimumTranscriptEntries: 3)
     #expect(waiting.activeToolCalls.count == 1)
     #expect(waiting.activeToolCalls[0].progress.isEmpty)
@@ -93,10 +93,10 @@ import Testing
       ]
     )
 
-    await harness.send("Begin sleeping.")
+    await harness.enqueueSteer("Begin sleeping.")
     _ = await harness.waitUntilWaitingForTools(minimumTranscriptEntries: 3)
 
-    await harness.send("Please note this steer message.")
+    await harness.enqueueSteer("Please note this steer message.")
     await harness.enqueueFollowUp("Remember to summarize later.")
     await harness.enqueueNotification("The outside world changed.")
     await harness.stop()
@@ -129,12 +129,12 @@ import Testing
       ]
     )
 
-    await harness.send("Start a sleep.")
+    await harness.enqueueSteer("Start a sleep.")
     _ = await harness.waitUntilWaitingForTools(minimumTranscriptEntries: 3)
     await harness.stop()
     _ = await harness.waitUntilPaused()
 
-    await harness.send("Actually do this instead.")
+    await harness.enqueueSteer("Actually do this instead.")
     await harness.resume()
     let finished = await harness.waitUntilIdle(minimumTranscriptEntries: 6)
 
@@ -168,7 +168,7 @@ import Testing
       ]
     )
 
-    await harness.send("Wait for the sleep.")
+    await harness.enqueueSteer("Wait for the sleep.")
     _ = await harness.waitUntilWaitingForTools(minimumTranscriptEntries: 4)
     await harness.advanceSleep(toolCallID: "call-sleep")
     let finished = await harness.waitUntilIdle(minimumTranscriptEntries: 7)
@@ -181,6 +181,62 @@ import Testing
       "tool-result[call-sleep]: sleep -> Completed 1 minute sleep.",
       "tool-result[call-join]: join -> Woke because sleep finished.",
       "assistant: The join woke up after the tool completed.",
+    ])
+  }
+
+  @Test func inferenceStreamingPublishesDraftBeforeCommit() async throws {
+    let harness = await SessionHarness(
+      turns: [
+        .init(
+          blocks: [
+            .text("Streaming is live."),
+          ],
+          streamedTextDeltas: ["Streaming", " is", " live."]
+        ),
+      ]
+    )
+
+    await harness.enqueueSteer("Say something with streaming.")
+    let drafting = await harness.waitUntilDraftText("Streaming is live.")
+    #expect(drafting.transcript.debugSummary == [
+      "user: Say something with streaming.",
+    ])
+
+    let finished = await harness.waitUntilIdle(minimumTranscriptEntries: 2)
+    #expect(finished.assistantDraft == nil)
+    #expect(finished.transcript.debugSummary == [
+      "user: Say something with streaming.",
+      "assistant: Streaming is live.",
+    ])
+  }
+
+  @Test func followUpDrainsAfterNoToolAssistantTurn() async throws {
+    let harness = await SessionHarness(
+      turns: [
+        .init(
+          blocks: [
+            .text("First answer."),
+          ]
+        ),
+        .init(
+          blocks: [
+            .text("Follow-up handled."),
+          ]
+        ),
+      ]
+    )
+
+    await harness.enqueueSteer("Start.")
+    _ = await harness.waitUntilIdle(minimumTranscriptEntries: 2)
+
+    await harness.enqueueFollowUp("Do one more thing.")
+    let finished = await harness.waitUntilIdle(minimumTranscriptEntries: 4)
+
+    #expect(finished.transcript.debugSummary == [
+      "user: Start.",
+      "assistant: First answer.",
+      "user: Do one more thing.",
+      "assistant: Follow-up handled.",
     ])
   }
 }
