@@ -25,9 +25,6 @@ func reduceTools(state: inout AgentState, action: ToolsAction) {
       state.tools.executingIDs.remove(id)
     }
 
-  case .resetRepetitions:
-    state.tools.repetitionTracker.reset()
-
   case let .bashResultDelivered(toolCallID, result):
     // Store the pending result for the effect to persist.
     // The recoveringIDs guard prevents duplicate handling.

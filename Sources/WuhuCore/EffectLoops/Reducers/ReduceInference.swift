@@ -23,10 +23,6 @@ func reduceInference(state: inout AgentState, action: InferenceAction) {
     state.inference.retryAfter = nil
     state.inference.lastError = nil
 
-  case .persisted:
-    // Persistence is triggered directly by `AgentBehavior.reduce` when it sees `.completed`.
-    break
-
   case let .failed(error):
     state.inference.lastError = error
     if error.isTransient, state.inference.retryCount < maxInferenceRetries {

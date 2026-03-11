@@ -352,9 +352,6 @@ actor SessionRuntime {
     case .inference(.retryReady):
       break
 
-    case .inference(.persisted):
-      break
-
     case .tools:
       break
 

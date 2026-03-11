@@ -2,7 +2,6 @@
 ///
 /// All monetary values are in **hundredths-of-a-cent** (Int64).
 enum CostAction: Sendable {
-  case spent(Int64)
   case approved(Int64)
   case limitUpdated(Int64)
   case limitCleared
