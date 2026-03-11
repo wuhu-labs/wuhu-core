@@ -128,7 +128,7 @@ extension AgentBehavior {
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
       state.status.snapshot = status
 
-      return []
+      return .none
     }
   }
 }

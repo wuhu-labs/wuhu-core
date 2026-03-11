@@ -31,7 +31,9 @@ extension AgentBehavior {
         createdAt: Date(),
       )
 
-      return [.transcript(.append(entry))]
+      state.transcript.entries.append(entry)
+
+      return .none
     }
   }
 }

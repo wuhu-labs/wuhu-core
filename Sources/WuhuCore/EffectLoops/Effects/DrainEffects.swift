@@ -10,26 +10,31 @@ extension AgentBehavior {
     let store = store
 
     return .sync { state in
-      guard state.status.snapshot.status != .stopped else { return [] }
+      guard state.status.snapshot.status != .stopped else { return .none }
 
       let drained = try await store.drainInterruptCheckpoint(sessionID: sessionID)
-      guard drained.didDrain else { return [] }
-
-      var actions: [AgentAction] = []
+      guard drained.didDrain else { return .none }
 
       // Reset repetition tracker when user messages arrive (interrupt/steer).
-      actions.append(.tools(.resetRepetitions))
+      state.tools.repetitionTracker.reset()
 
       for entry in drained.entries {
-        actions.append(.transcript(.append(entry)))
+        state.transcript.entries.append(entry)
       }
-      actions.append(.queue(.systemUpdated(drained.systemUrgent)))
-      actions.append(.queue(.steerUpdated(drained.steer)))
+      state.queue.system = drained.systemUrgent
+      state.queue.steer = drained.steer
+
+      // Reset failed inference when new work arrives.
+      if state.inference.status == .failed {
+        state.inference.status = .idle
+        state.inference.retryCount = 0
+        state.inference.lastError = nil
+      }
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      actions.append(.status(.updated(status)))
+      state.status.snapshot = status
 
-      return actions
+      return .none
     }
   }
 
@@ -40,22 +45,27 @@ extension AgentBehavior {
     let store = store
 
     return .sync { state in
-      guard state.status.snapshot.status != .stopped else { return [] }
+      guard state.status.snapshot.status != .stopped else { return .none }
 
       let drained = try await store.drainTurnBoundary(sessionID: sessionID)
-      guard drained.didDrain else { return [] }
-
-      var actions: [AgentAction] = []
+      guard drained.didDrain else { return .none }
 
       for entry in drained.entries {
-        actions.append(.transcript(.append(entry)))
+        state.transcript.entries.append(entry)
       }
-      actions.append(.queue(.followUpUpdated(drained.followUp)))
+      state.queue.followUp = drained.followUp
+
+      // Reset failed inference when new work arrives.
+      if state.inference.status == .failed {
+        state.inference.status = .idle
+        state.inference.retryCount = 0
+        state.inference.lastError = nil
+      }
 
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      actions.append(.status(.updated(status)))
+      state.status.snapshot = status
 
-      return actions
+      return .none
     }
   }
 }

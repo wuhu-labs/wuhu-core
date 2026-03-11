@@ -148,24 +148,20 @@ public actor EffectLoop<B: LoopBehavior> {
       // into an async closure. We copy out, let the closure mutate, then
       // copy back — the actor provides exclusive access throughout.
       var copy = state
-      let actions: [B.Action]
+      let next: Effect<B.State, B.Action, B.TaskID>
       do {
-        actions = try await work(&copy)
+        next = try await work(&copy)
       } catch is CancellationError {
         return
       } catch {
-        // Domain-specific error handling should be encoded via returned actions.
+        // Domain-specific error handling should be encoded via state mutation.
         // Unhandled errors are dropped.
         return
       }
       state = copy
 
-      // Commit returned actions immediately.
-      for action in actions {
-        let eff = behavior.reduce(state: &state, action: action)
-        notifyObservers(action)
-        await handle(eff, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
-      }
+      // Continue draining the returned effect (could be another sync, a run to defer, etc.).
+      await handle(next, deferredRuns: &deferredRuns, deferredIDs: &deferredIDs)
       return
     }
   }

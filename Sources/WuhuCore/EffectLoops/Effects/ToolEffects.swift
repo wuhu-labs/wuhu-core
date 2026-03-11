@@ -4,21 +4,25 @@ import WuhuAPI
 
 /// Effect factories for tool execution and stale tool recovery.
 extension AgentBehavior {
-  /// Persist `.started` for a pending tool call, then enqueue `.tools(.willExecute)`.
+  /// Persist `.started` for a pending tool call, then return the execute effect.
   ///
   /// This is deliberately a `.sync` effect: it establishes durable intent
-  /// (DB status) before any tool work is spawned.
+  /// (DB status) and mutates state before the tool `.run` is spawned.
   func startToolCall(_ call: ToolCall) -> AgentEffect {
     let sessionID = sessionID
     let store = store
+    let behavior = self
 
-    return .sync { _ in
+    return .sync { state in
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
+
+      state.tools.statuses[call.id] = ToolCallRecord(status: .started)
+      state.tools.executingIDs.insert(call.id)
+
       let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      return [
-        .tools(.willExecute(call)),
-        .status(.updated(status)),
-      ]
+      state.status.snapshot = status
+
+      return behavior.executeToolCall(call, state: state)
     }
   }
 

@@ -28,9 +28,8 @@ public indirect enum Effect<State: Sendable, Action: Sendable, TaskID: Hashable 
   ///
   /// The closure receives `inout State` (via copy-dance in the actor) and
   /// can mutate it directly. While awaiting, incoming actions are queued
-  /// but not reduced. Returns actions that are still reduced after the
-  /// closure completes (transitional — prefer direct state mutation).
-  case sync(@Sendable (inout State) async throws -> [Action])
+  /// but not reduced. Returns the next effect to chain (use `.none` when done).
+  case sync(@Sendable (inout State) async throws -> Effect)
 
   /// Long-running work in a named task. Use `TaskID` for cancellation.
   case run(TaskID, @Sendable (Send<Action>) async throws -> Void)
