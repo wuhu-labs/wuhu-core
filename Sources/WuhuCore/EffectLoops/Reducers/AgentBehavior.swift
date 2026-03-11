@@ -63,23 +63,12 @@ struct AgentBehavior: LoopBehavior {
     return .none
   }
 
-  // MARK: - Next Effect (Priority Ladder)
+  // MARK: - Next Effect
 
   func nextEffect(state: inout AgentState) -> AgentEffect? {
-    // 0. Cost gate — if over budget, idle until limit is updated/cleared.
-    if state.isOverBudget {
-      return nil
-    }
-
-    // 1. Retry backoff — if retryAfter is set, clear guard token and sleep
-    if let retryAfter = state.inference.retryAfter {
-      state.inference.retryAfter = nil // guard token
-      return sleepUntil(retryAfter)
-    }
-
-    // Only do work when the session is running.
-    // If stopped, cancel any known named tasks (best-effort) and idle.
-    if state.status.snapshot.status != .running {
+    switch state.phase {
+    case .stopped:
+      // Cancel any in-flight work.
       var cancelIDs: [String] = []
       if state.inference.status == .running {
         cancelIDs.append("inference")
@@ -100,54 +89,39 @@ struct AgentBehavior: LoopBehavior {
         return .cancel(cancelIDs)
       }
       return nil
-    }
 
-    // 2. Pending bash results — delivered from worker after restart
-    if let (toolCallID, result) = state.tools.pendingBashResults.first {
-      state.tools.pendingBashResults.removeValue(forKey: toolCallID)
-      return persistDeliveredBashResult(toolCallID: toolCallID, result: result, state: state)
-    }
+    case .waitingForTools:
+      // Tools are .run tasks — they'll send actions when done.
+      // Start any pending (not yet started) tool calls.
+      if let call = pendingToolCalls(in: state).first {
+        return startToolCall(call)
+      }
+      return nil
 
-    // 3. Stale tool recovery — orphaned tool calls with no result
-    let staleIDs = staleToolCallIDs(in: state)
-    if let firstStale = staleIDs.first {
-      state.tools.recoveringIDs.insert(firstStale) // guard token
-      return recoverStaleToolCall(id: firstStale, state: state)
-    }
+    case .needsDrain:
+      return persistAndDrainAll()
 
-    // 4. Drain interrupts — system + steer queues
-    if !state.queue.system.pending.isEmpty || !state.queue.steer.pending.isEmpty {
-      return persistAndDrainInterrupts()
-    }
+    case .needsInference:
+      if state.isOverBudget { return nil }
+      // Retry backoff.
+      if let retryAfter = state.inference.retryAfter {
+        state.inference.retryAfter = nil
+        return sleepUntil(retryAfter)
+      }
+      if state.inference.status == .idle {
+        state.inference.status = .running
+        return runInference(state: state)
+      }
+      return nil
 
-    // 5. Drain turn items — followUp queue (only if no interrupts pending)
-    if !state.queue.followUp.pending.isEmpty {
-      return persistAndDrainTurn()
+    case .idle:
+      // Compaction — if transcript exceeds threshold.
+      if !state.transcript.isCompacting, shouldCompact(state: state) {
+        state.transcript.isCompacting = true
+        return runCompaction(state: state)
+      }
+      return nil
     }
-
-    // 6. Inference — if needed and not already running.
-    //    Drain runs via `.sync`, so inference can safely run after drains.
-    if state.inference.status == .idle, needsInference(state: state) {
-      state.inference.status = .running // guard token
-      return runInference(state: state)
-    }
-
-    // 7. Tool execution — pending tool calls (one per nextEffect call).
-    //
-    // We start tools one-by-one via `.sync` (persist started), but because the loop
-    // drains greedily and defers `.run` tasks until sync drains, multiple tool calls
-    // will still be spawned back-to-back and execute in parallel.
-    if let call = pendingToolCalls(in: state).first {
-      return startToolCall(call)
-    }
-
-    // 8. Compaction — if transcript exceeds threshold
-    if !state.transcript.isCompacting, shouldCompact(state: state) {
-      state.transcript.isCompacting = true // guard token
-      return runCompaction(state: state)
-    }
-
-    return nil
   }
 
   // MARK: - State Queries
@@ -183,32 +157,6 @@ struct AgentBehavior: LoopBehavior {
       guard now.timeIntervalSince(record.updatedAt) > Self.staleToolCallDeadline else { return nil }
       return id
     }.sorted()
-  }
-
-  /// Whether the transcript is mid-turn and needs an inference call.
-  func needsInference(state: AgentState) -> Bool {
-    for entry in state.transcript.entries.reversed() {
-      switch entry.payload {
-      case let .message(m):
-        switch m {
-        case .toolResult:
-          return true
-        case .user:
-          return true
-        case .assistant:
-          return false
-        case let .customMessage(c):
-          // System input messages (like async bash callbacks) need inference
-          if c.customType == WuhuCustomMessageTypes.systemInput { return true }
-          continue
-        case .unknown:
-          continue
-        }
-      default:
-        continue
-      }
-    }
-    return false
   }
 
   /// Find tool calls in `.pending` status (not yet started).
