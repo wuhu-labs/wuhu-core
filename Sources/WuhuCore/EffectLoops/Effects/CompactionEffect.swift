@@ -50,9 +50,6 @@ extension AgentBehavior {
         createdAt: Date(),
       )
       await send(AgentAction.transcript(.append(entry)))
-
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
     }
   }
 }

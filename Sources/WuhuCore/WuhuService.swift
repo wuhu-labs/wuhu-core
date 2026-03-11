@@ -404,64 +404,11 @@ public actor WuhuService {
     return .init(activePromptCount: 0)
   }
 
-  public func stopSession(sessionID: String, user: String? = nil) async throws -> WuhuStopSessionResponse {
-    let hadRuntime = runtimes[sessionID] != nil
+  public func stopSession(sessionID: String, user _: String? = nil) async throws -> WuhuStopSessionResponse {
     if let runtime = runtimes[sessionID] {
-      await runtime.stop()
-      runtimes[sessionID] = nil
+      await runtime.requestStop()
     }
-
-    _ = try await store.getSession(id: sessionID)
-
-    var transcript = try await store.getEntries(sessionID: sessionID)
-    let inferred = WuhuSessionExecutionInference.infer(from: transcript)
-
-    let shouldAppendStopMarker = hadRuntime || inferred.state == .executing
-    guard shouldAppendStopMarker else {
-      return .init(repairedEntries: [], stopEntry: nil)
-    }
-
-    let toolRepair = try await ToolRepairer.repairMissingToolResultsIfNeeded(
-      sessionID: sessionID,
-      transcript: transcript,
-      mode: .stopped,
-      store: store,
-      eventHub: eventHub,
-    )
-    transcript = toolRepair.transcript
-
-    for toolCallId in inferred.pendingToolCallIds.sorted() {
-      _ = try await store.setToolCallStatus(sessionID: .init(rawValue: sessionID), id: toolCallId, status: .errored)
-    }
-
-    let stoppedBy = (user ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    var details: [String: JSONValue] = ["wuhu_event": .string("execution_stopped")]
-    if !stoppedBy.isEmpty {
-      details["user"] = .string(stoppedBy)
-    }
-
-    let stopMessage = WuhuPersistedMessage.customMessage(.init(
-      customType: WuhuCustomMessageTypes.executionStopped,
-      content: [.text(text: "Execution stopped", signature: nil)],
-      details: .object(details),
-      display: true,
-      timestamp: Date(),
-    ))
-    let stopEntry = try await store.appendEntry(sessionID: sessionID, payload: .message(stopMessage))
-    try await store.setSessionExecutionStatus(sessionID: .init(rawValue: sessionID), status: .stopped)
-
-    await eventHub.publish(sessionID: sessionID, event: .entryAppended(stopEntry))
-    await eventHub.publish(sessionID: sessionID, event: .idle)
-
-    await subscriptionHub.publish(
-      sessionID: sessionID,
-      event: .transcriptAppended([stopEntry]),
-    )
-    if let status = try? await store.loadStatusSnapshot(sessionID: .init(rawValue: sessionID)) {
-      await subscriptionHub.publish(sessionID: sessionID, event: .statusUpdated(status))
-    }
-
-    return .init(repairedEntries: toolRepair.repairEntries, stopEntry: stopEntry)
+    return .init(repairedEntries: [], stopEntry: nil)
   }
 
   public func followSessionStream(

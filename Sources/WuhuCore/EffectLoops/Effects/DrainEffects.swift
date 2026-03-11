@@ -4,7 +4,7 @@ import WuhuAPI
 /// Effect factories for draining queue items (interrupts and turn boundary).
 extension AgentBehavior {
   /// Drain interrupt-priority items (system + steer queues), persist to DB,
-  /// and return actions that update transcript/queue/status.
+  /// and mutate state directly.
   func persistAndDrainInterrupts() -> AgentEffect {
     let sessionID = sessionID
     let store = store
@@ -31,15 +31,12 @@ extension AgentBehavior {
         state.inference.lastError = nil
       }
 
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      state.status.snapshot = status
-
       return .none
     }
   }
 
   /// Drain turn-boundary items (followUp queue), persist to DB,
-  /// and return actions that update transcript/queue/status.
+  /// and mutate state directly.
   func persistAndDrainTurn() -> AgentEffect {
     let sessionID = sessionID
     let store = store
@@ -61,9 +58,6 @@ extension AgentBehavior {
         state.inference.retryCount = 0
         state.inference.lastError = nil
       }
-
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      state.status.snapshot = status
 
       return .none
     }

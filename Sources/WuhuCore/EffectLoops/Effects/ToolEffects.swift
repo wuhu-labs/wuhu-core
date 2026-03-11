@@ -19,9 +19,6 @@ extension AgentBehavior {
       state.tools.statuses[call.id] = ToolCallRecord(status: .started)
       state.tools.executingIDs.insert(call.id)
 
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      state.status.snapshot = status
-
       return behavior.executeToolCall(call, state: state)
     }
   }
@@ -59,9 +56,6 @@ extension AgentBehavior {
 
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
         await send(.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
-
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(.status(.updated(status)))
         return
       }
 
@@ -134,8 +128,6 @@ extension AgentBehavior {
       for call in calls {
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
         await send(AgentAction.tools(.willExecute(call)))
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(AgentAction.status(.updated(status)))
       }
 
       // Partition calls into blocked vs. allowed based on repetition history.
@@ -173,9 +165,6 @@ extension AgentBehavior {
 
         _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
         await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
-
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(AgentAction.status(.updated(status)))
       }
 
       // Execute allowed calls in parallel.
@@ -314,9 +303,6 @@ extension AgentBehavior {
 
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
       await send(AgentAction.tools(.failed(id: id, status: .errored, toolName: toolName, argsHash: 0)))
-
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
     }
   }
 
@@ -340,8 +326,6 @@ extension AgentBehavior {
           id: toolCallID, status: .completed,
           toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
         )))
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await send(AgentAction.status(.updated(status)))
         return
       }
 
@@ -404,9 +388,6 @@ extension AgentBehavior {
         id: toolCallID, status: .completed,
         toolName: "bash", argsHash: 0, resultHash: result.output.hashValue,
       )))
-
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
     }
   }
 }
@@ -471,9 +452,6 @@ private func persistToolSuccess(
       id: call.id, status: .completed,
       toolName: call.name, argsHash: argsHash, resultHash: resultHash,
     )))
-
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    await send(AgentAction.status(.updated(status)))
   } catch {
     // If persistence fails, record as failure
     await persistToolFailure(
@@ -511,9 +489,6 @@ private func persistToolFailure(
 
     _ = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
     await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
-
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    await send(AgentAction.status(.updated(status)))
   } catch {
     // Best-effort: if even error persistence fails, just send the failure action.
     await send(AgentAction.tools(.failed(id: call.id, status: .errored, toolName: call.name, argsHash: argsHash)))
