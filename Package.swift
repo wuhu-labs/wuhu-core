@@ -15,14 +15,15 @@ let grdbDependency: Package.Dependency = .package(url: "https://github.com/groue
 let package = Package(
   name: "wuhu-core",
   platforms: [
-    .macOS(.v14),
-    .iOS(.v16),
+    .macOS("14.0"),
+    .iOS("16.0"),
   ],
   products: [
     .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
     .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
     .library(name: "WuhuCore", targets: ["WuhuCore"]),
+    .library(name: "WuhuCoreNG", targets: ["WuhuCoreNG"]),
     .library(name: "WuhuClient", targets: ["WuhuClient"]),
     .library(name: "WuhuServer", targets: ["WuhuServer"]),
     .library(name: "WuhuRunner", targets: ["WuhuRunner"]),
@@ -97,6 +98,15 @@ let package = Package(
       swiftSettings: strictConcurrency,
     ),
     .target(
+      name: "WuhuCoreNG",
+      dependencies: [
+        .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "Dependencies", package: "swift-dependencies"),
+      ],
+      swiftSettings: strictConcurrency,
+    ),
+    .target(
       name: "WuhuClient",
       dependencies: [
         "WuhuAPI",
@@ -156,6 +166,14 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "PiAI", package: "wuhu-ai"),
+      ],
+      swiftSettings: strictConcurrency,
+    ),
+    .testTarget(
+      name: "WuhuCoreNGTests",
+      dependencies: [
+        "WuhuCoreNG",
+        .product(name: "Testing", package: "swift-testing"),
       ],
       swiftSettings: strictConcurrency,
     ),
