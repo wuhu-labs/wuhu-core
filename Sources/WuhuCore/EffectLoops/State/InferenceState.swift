@@ -9,7 +9,12 @@ struct InferenceState: Sendable, Equatable {
   var lastError: InferenceError?
 
   static var empty: InferenceState {
-    .init(status: .idle, retryCount: 0, retryAfter: nil, lastError: nil)
+    .init(
+      status: .idle,
+      retryCount: 0,
+      retryAfter: nil,
+      lastError: nil,
+    )
   }
 }
 

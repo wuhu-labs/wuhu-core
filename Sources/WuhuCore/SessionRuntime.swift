@@ -63,18 +63,15 @@ actor SessionRuntime {
           let parts = try await store.loadLoopStateParts(sessionID: sessionID)
           let defaultLimit = runtimeConfig.defaultCostLimitCents
 
-          // Compute cost from transcript and populate CostState
-          let totalSpent = PricingTable.computeCost(entries: parts.entries)
+          // Compute cost limit for CostState
           let costLimit = parts.costLimitCents ?? defaultLimit
-          let budgetRemaining: Int64? = costLimit.map { $0 - totalSpent }
-          let isPaused = budgetRemaining.map { $0 <= 0 } ?? false
 
           let initialState = AgentState(
             transcript: .init(entries: parts.entries),
             queue: .init(system: parts.systemUrgent, steer: parts.steer, followUp: parts.followUp),
             inference: .empty,
             tools: .init(statuses: parts.toolCallStatus, repetitionTracker: ToolCallRepetitionTracker()),
-            cost: .init(budgetRemaining: budgetRemaining, totalSpent: totalSpent, isPaused: isPaused, exceededEntryEmitted: false),
+            cost: .init(budgetLimit: costLimit),
             settings: .init(snapshot: parts.settings),
             status: .init(snapshot: parts.status),
           )
@@ -179,7 +176,6 @@ actor SessionRuntime {
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     _ = try await store.enqueueUserMessage(sessionID: sessionID, id: id, message: message, lane: lane)
     let backfill = try await store.loadUserQueueBackfill(sessionID: sessionID, lane: lane)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
     guard let loop else { return id }
     switch lane {
     case .steer:
@@ -187,7 +183,6 @@ actor SessionRuntime {
     case .followUp:
       await loop.send(.queue(.followUpUpdated(backfill)))
     }
-    await loop.send(.status(.updated(status)))
     return id
   }
 
@@ -195,7 +190,6 @@ actor SessionRuntime {
     await ensureStarted()
     try await store.cancelUserMessage(sessionID: sessionID, id: id, lane: lane)
     let backfill = try await store.loadUserQueueBackfill(sessionID: sessionID, lane: lane)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
     guard let loop else { return }
     switch lane {
     case .steer:
@@ -203,7 +197,6 @@ actor SessionRuntime {
     case .followUp:
       await loop.send(.queue(.followUpUpdated(backfill)))
     }
-    await loop.send(.status(.updated(status)))
   }
 
   func enqueueSystem(input: SystemUrgentInput, enqueuedAt: Date = Date()) async throws {
@@ -211,10 +204,8 @@ actor SessionRuntime {
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     _ = try await store.enqueueSystemInput(sessionID: sessionID, id: id, input: input, enqueuedAt: enqueuedAt)
     let backfill = try await store.loadSystemQueueBackfill(sessionID: sessionID)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
     guard let loop else { return }
     await loop.send(.queue(.systemUpdated(backfill)))
-    await loop.send(.status(.updated(status)))
   }
 
   func setModelSelection(_ selection: WuhuSessionSettings) async throws -> Bool {
@@ -225,8 +216,6 @@ actor SessionRuntime {
       if let loop {
         await loop.send(.transcript(.append(result.entry)))
         await loop.send(.settings(.updated(result.settings)))
-        let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-        await loop.send(.status(.updated(status)))
       }
       let updated = try await store.getSession(id: sessionID.rawValue)
       return updated.model == selection.model && updated.provider == selection.provider
@@ -253,6 +242,11 @@ actor SessionRuntime {
       await loop.send(.transcript(.append(result.entry)))
       await loop.send(.settings(.updated(result.settings)))
     }
+  }
+
+  func requestStop() async {
+    guard let loop else { return }
+    await loop.send(.status(.stop))
   }
 
   func stop() async {
@@ -323,14 +317,11 @@ actor SessionRuntime {
         }
       }
 
-    case .queue(.drainFinished):
-      break
-
     case let .settings(.updated(settings)):
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .settingsUpdated(settings))
 
-    case let .status(.updated(status)):
-      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(status))
+    case .status(.stop):
+      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(.init(status: .stopped)))
 
     case .inference(.started):
       streaming = true

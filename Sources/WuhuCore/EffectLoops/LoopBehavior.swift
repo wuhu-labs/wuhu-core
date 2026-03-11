@@ -3,43 +3,33 @@
 /// A behavior defines:
 /// - **State**: the full in-memory state of the loop.
 /// - **Action**: every possible state mutation.
-/// - **reduce**: pure, synchronous state transition.
-/// - **nextEffect**: inspects state and returns the next side effect
-///   to run, or `nil` if idle.
+/// - **reduce**: pure, synchronous state transition that may return an effect.
+/// - **nextEffect**: a planner that can schedule more effects based on state.
 ///
-/// The loop calls `nextEffect` greedily after every reduce — it
-/// keeps pulling effects until `nil`, then waits for the next action.
-///
-/// ## Design
-///
-/// All scheduling logic lives in `nextEffect`. The priority ordering
-/// of what to do next (crash recovery → interrupt drain → inference →
-/// compaction) is expressed as early returns in a single function body.
-/// No wide protocol surface, no scattered lifecycle hooks.
+/// The loop drains effects greedily until `nextEffect` returns `nil`.
 public protocol LoopBehavior<State, Action>: Sendable {
   associatedtype State: Sendable
   associatedtype Action: Sendable
 
-  /// Pure reducer. Apply an action to state.
+  /// Named tasks are tracked by the loop for cancellation.
+  associatedtype TaskID: Hashable & Sendable = String
+
+  /// Pure reducer. Apply an action to state and optionally return an effect.
   ///
   /// Must be synchronous — no IO, no suspension.
-  func reduce(state: inout State, action: Action)
+  func reduce(state: inout State, action: Action) -> Effect<State, Action, TaskID>
 
   /// Inspect current state and return the next effect to run,
   /// or `nil` if the loop should idle.
   ///
-  /// Called after every reduce. The loop calls this repeatedly
-  /// until it returns `nil`, then waits for an external action.
-  ///
-  /// - Important: This mutates state so you can set guard tokens
-  ///   (e.g. `state.isGenerating = true`) to prevent re-entry
-  ///   on the next call.
-  func nextEffect(state: inout State) -> Effect<Action>?
+  /// May mutate state to set guard tokens (e.g. marking a task as scheduled)
+  /// so greedy draining does not repeatedly schedule the same work.
+  func nextEffect(state: inout State) -> Effect<State, Action, TaskID>?
 
-  /// Wraps the execution of an effect's async work.
+  /// Wraps the execution of a spawned task.
   ///
-  /// The default implementation calls through directly. Override to
-  /// inject context (e.g. dependency overrides) around effect execution.
+  /// The default implementation calls through directly. Override to inject
+  /// context (e.g. dependency overrides) around effect execution.
   func run(_ work: @escaping @Sendable () async throws -> Void) async throws
 }
 

@@ -1,53 +1,107 @@
 import Foundation
 import WuhuAPI
 
-/// Effect factories for draining queue items (interrupts and turn boundary).
+/// Effect factories for draining queue items.
 extension AgentBehavior {
-  /// Drain interrupt-priority items (system + steer queues), persist to DB,
-  /// and send transcript/queue/status actions back.
-  func persistAndDrainInterrupts(state: AgentState) -> Effect<AgentAction> {
+  /// Drain all pending queue items (interrupts first, then turn boundary),
+  /// persist to DB, and mutate state directly.
+  func persistAndDrainAll() -> AgentEffect {
     let sessionID = sessionID
     let store = store
-    return Effect { send in
-      defer { Task { await send(AgentAction.queue(.drainFinished)) } }
 
-      guard state.status.snapshot.status != .stopped else { return }
+    return .sync { state in
+      guard state.status.snapshot.status != .stopped else { return .none }
+
+      // Drain interrupts (system + steer).
+      let interrupts = try await store.drainInterruptCheckpoint(sessionID: sessionID)
+      if interrupts.didDrain {
+        state.tools.repetitionTracker.reset()
+        for entry in interrupts.entries {
+          state.transcript.entries.append(entry)
+        }
+        state.queue.system = interrupts.systemUrgent
+        state.queue.steer = interrupts.steer
+      }
+
+      // Drain turn boundary (followUp).
+      let turn = try await store.drainTurnBoundary(sessionID: sessionID)
+      if turn.didDrain {
+        for entry in turn.entries {
+          state.transcript.entries.append(entry)
+        }
+        state.queue.followUp = turn.followUp
+      }
+
+      // Reset failed inference when new work arrives.
+      if interrupts.didDrain || turn.didDrain {
+        if state.inference.status == .failed {
+          state.inference.status = .idle
+          state.inference.retryCount = 0
+          state.inference.lastError = nil
+        }
+      }
+
+      return .none
+    }
+  }
+
+  /// Drain interrupt-priority items (system + steer queues), persist to DB,
+  /// and mutate state directly.
+  func persistAndDrainInterrupts() -> AgentEffect {
+    let sessionID = sessionID
+    let store = store
+
+    return .sync { state in
+      guard state.status.snapshot.status != .stopped else { return .none }
+
       let drained = try await store.drainInterruptCheckpoint(sessionID: sessionID)
-      guard drained.didDrain else { return }
+      guard drained.didDrain else { return .none }
 
       // Reset repetition tracker when user messages arrive (interrupt/steer).
-      await send(AgentAction.tools(.resetRepetitions))
+      state.tools.repetitionTracker.reset()
 
       for entry in drained.entries {
-        await send(AgentAction.transcript(.append(entry)))
+        state.transcript.entries.append(entry)
       }
-      await send(AgentAction.queue(.systemUpdated(drained.systemUrgent)))
-      await send(AgentAction.queue(.steerUpdated(drained.steer)))
+      state.queue.system = drained.systemUrgent
+      state.queue.steer = drained.steer
 
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
+      // Reset failed inference when new work arrives.
+      if state.inference.status == .failed {
+        state.inference.status = .idle
+        state.inference.retryCount = 0
+        state.inference.lastError = nil
+      }
+
+      return .none
     }
   }
 
   /// Drain turn-boundary items (followUp queue), persist to DB,
-  /// and send transcript/queue/status actions back.
-  func persistAndDrainTurn(state: AgentState) -> Effect<AgentAction> {
+  /// and mutate state directly.
+  func persistAndDrainTurn() -> AgentEffect {
     let sessionID = sessionID
     let store = store
-    return Effect { send in
-      defer { Task { await send(AgentAction.queue(.drainFinished)) } }
 
-      guard state.status.snapshot.status != .stopped else { return }
+    return .sync { state in
+      guard state.status.snapshot.status != .stopped else { return .none }
+
       let drained = try await store.drainTurnBoundary(sessionID: sessionID)
-      guard drained.didDrain else { return }
+      guard drained.didDrain else { return .none }
 
       for entry in drained.entries {
-        await send(AgentAction.transcript(.append(entry)))
+        state.transcript.entries.append(entry)
       }
-      await send(AgentAction.queue(.followUpUpdated(drained.followUp)))
+      state.queue.followUp = drained.followUp
 
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      await send(AgentAction.status(.updated(status)))
+      // Reset failed inference when new work arrives.
+      if state.inference.status == .failed {
+        state.inference.status = .idle
+        state.inference.retryCount = 0
+        state.inference.lastError = nil
+      }
+
+      return .none
     }
   }
 }

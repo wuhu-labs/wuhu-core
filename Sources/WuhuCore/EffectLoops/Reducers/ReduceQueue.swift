@@ -10,8 +10,6 @@ func reduceQueue(state: inout AgentState, action: QueueAction) {
   case let .followUpUpdated(backfill):
     state.queue.followUp = backfill
     resetInferenceIfFailed(state: &state)
-  case .drainFinished:
-    state.queue.isDraining = false
   }
 }
 

@@ -4,6 +4,8 @@ import PiAI
 enum InferenceAction: Sendable {
   case started
   case delta(String)
+  /// Model stream finished and produced a final assistant message.
+  /// Persistence is handled separately.
   case completed(AssistantMessage)
   case failed(InferenceError)
   case retryReady

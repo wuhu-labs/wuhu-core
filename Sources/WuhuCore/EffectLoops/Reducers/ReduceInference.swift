@@ -16,6 +16,8 @@ func reduceInference(state: inout AgentState, action: InferenceAction) {
     break
 
   case .completed:
+    // NOTE: The assistant message is persisted by an effect returned directly
+    // from `AgentBehavior.reduce`.
     state.inference.status = .idle
     state.inference.retryCount = 0
     state.inference.retryAfter = nil
