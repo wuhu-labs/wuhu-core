@@ -3,9 +3,9 @@ import Subprocess
 import WuhuSessionCore
 
 #if canImport(System)
-  import System
+  @preconcurrency import System
 #else
-  import SystemPackage
+  @preconcurrency import SystemPackage
 #endif
 
 public struct LocalSessionProjection: Sendable, Hashable {
