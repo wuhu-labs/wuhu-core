@@ -14,7 +14,7 @@
 /// - At count ≥ ``blockThreshold`` (5): callers should block execution.
 ///
 /// Call ``reset()`` when a user message arrives (interrupt/steer).
-struct ToolCallRepetitionTracker: Sendable, Equatable {
+struct ToolCallRepetitionTracker: Sendable {
   // MARK: - Thresholds
 
   static let warningThreshold = 3
@@ -27,7 +27,7 @@ struct ToolCallRepetitionTracker: Sendable, Equatable {
     var argsHash: Int
   }
 
-  private struct SlotState: Sendable, Equatable {
+  private struct SlotState: Sendable {
     var lastResultHash: Int
     var consecutiveCount: Int
   }

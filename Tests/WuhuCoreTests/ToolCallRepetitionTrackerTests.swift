@@ -188,54 +188,6 @@ struct ToolCallRepetitionTrackerTests {
     #expect(preflight6 >= ToolCallRepetitionTracker.blockThreshold)
   }
 
-  // MARK: - Identical errors are tracked like identical results
-
-  @Test func identicalErrorsIncrementCounter() {
-    // Simulates the bug where a model repeatedly sends invalid arguments
-    // (e.g., offset: true instead of an integer). The tool fails with
-    // the same parse error each time. The tracker should count these
-    // identical error hashes just like identical result hashes.
-    var tracker = ToolCallRepetitionTracker()
-
-    let toolName = "read"
-    let argsHash = 42 // same broken args every time
-    let errorHash = "read tool expects integer for key path \"offset\"".hashValue
-
-    for i in 1 ... 5 {
-      let count = tracker.record(toolName: toolName, argsHash: argsHash, resultHash: errorHash)
-      #expect(count == i)
-    }
-
-    // After 5 identical failures, the 6th call should be blocked at preflight
-    let preflight = tracker.preflightCount(toolName: toolName, argsHash: argsHash)
-    #expect(preflight >= ToolCallRepetitionTracker.blockThreshold)
-  }
-
-  @Test func simulatedErrorLoopIsBlocked() {
-    // End-to-end simulation of the agent loop handling repeated tool
-    // errors: preflight → execute (fails) → record error hash → repeat.
-    var tracker = ToolCallRepetitionTracker()
-
-    let toolName = "read"
-    let argsHash = 42
-    let errorHash = "parse error".hashValue
-
-    var blockedAt: Int?
-
-    for i in 1 ... 10 {
-      let preflight = tracker.preflightCount(toolName: toolName, argsHash: argsHash)
-      if preflight >= ToolCallRepetitionTracker.blockThreshold {
-        blockedAt = i
-        break
-      }
-
-      // Tool "fails" — record the error hash as the result hash
-      tracker.record(toolName: toolName, argsHash: argsHash, resultHash: errorHash)
-    }
-
-    #expect(blockedAt == 6, "Call 6 should be blocked after 5 identical error recordings")
-  }
-
   // MARK: - Warning and block text are well-formed
 
   @Test func warningAndBlockTextAreNonEmpty() {

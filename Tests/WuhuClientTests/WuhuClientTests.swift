@@ -102,7 +102,7 @@ struct WuhuClientTests {
       },
       sseHandler: { request in
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/follow?sinceCursor=1&stopAfterIdle=1")
-        #expect(request.headers["Accept"] == ["text/event-stream"])
+        #expect(request.headers["Accept"] == "text/event-stream")
 
         return AsyncThrowingStream { continuation in
           continuation.yield(.init(data: #"{"type":"assistant_text_delta","delta":"Hi"}"#))
@@ -170,7 +170,7 @@ struct WuhuClientTests {
     let http = MockHTTPClient(
       sseHandler: { request in
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/follow")
-        #expect(request.headers["Accept"] == ["text/event-stream"])
+        #expect(request.headers["Accept"] == "text/event-stream")
 
         return AsyncThrowingStream { continuation in
           continuation.yield(.init(data: #"{"type":"idle"}"#))
@@ -221,11 +221,10 @@ private struct MockHTTPClient: HTTPClient {
     return try await dataHandler(request)
   }
 
-  func sse(for request: HTTPRequest) async throws -> SSEResponse {
+  func sse(for request: HTTPRequest) async throws -> AsyncThrowingStream<SSEMessage, any Error> {
     guard let sseHandler else {
       throw PiAIError.unsupported("MockHTTPClient.sseHandler not set")
     }
-    let events = try await sseHandler(request)
-    return SSEResponse(response: HTTPResponse(statusCode: 200, headers: [:]), events: events)
+    return try await sseHandler(request)
   }
 }

@@ -1,0 +1,1276 @@
+import Dependencies
+import Foundation
+import PiAI
+
+/// Closure that resolves the current working directory for the session.
+/// Returns nil when no mount has been set yet.
+public typealias CwdProvider = @Sendable () async throws -> String?
+
+public extension WuhuTools {
+  static func codingAgentTools(
+    cwdProvider: @escaping CwdProvider,
+    mountResolver: MountResolver? = nil,
+    asyncBash: WuhuAsyncBashToolContext = .init(),
+    braveSearchAPIKey: String? = nil,
+  ) -> [AnyAgentTool] {
+    var tools: [AnyAgentTool] = [
+      readTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      writeTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      editTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      lsTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      findTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      grepTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      bashTool(cwdProvider: cwdProvider, mountResolver: mountResolver),
+      asyncBashTool(cwdProvider: cwdProvider, context: asyncBash),
+      asyncBashStatusTool(context: asyncBash),
+    ]
+    if let braveSearchAPIKey, !braveSearchAPIKey.isEmpty {
+      tools.append(webSearchTool(apiKey: braveSearchAPIKey))
+    }
+    if let mountResolver {
+      tools.append(copyTool(mountResolver: mountResolver))
+    }
+    return tools
+  }
+}
+
+private let noCwdError = "No working directory set. Call the mount tool first — use mount({}) for a scratch directory, or mount({\"path\": \"/some/dir\"}) for a specific directory."
+
+/// Resolve the live cwd, throwing a tool error if nil.
+private func requireCwd(_ provider: CwdProvider) async throws -> String {
+  guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
+  return cwd
+}
+
+/// Resolve cwd for a filesystem tool that accepts a path argument.
+///
+/// - If the path is absolute (starts with `/` or `~`), it is expanded and returned directly
+///   without requiring a cwd.
+/// - If the path is relative, the cwd is required and the path is resolved against it.
+private func resolvePathOrRequireCwd(_ path: String?, defaultPath: String = ".", provider: CwdProvider) async throws -> (cwd: String, resolvedPath: String) {
+  let raw = (path ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
+  let expanded = ToolPath.expand(raw)
+
+  if expanded.hasPrefix("/") {
+    // Absolute path — cwd not required. Use "/" as a dummy cwd for ToolPath.resolveToCwd compatibility.
+    let cwdOrFallback = await (try? provider()) ?? "/"
+    return (cwd: cwdOrFallback, resolvedPath: expanded)
+  }
+
+  // Relative path — cwd is required.
+  guard let cwd = try await provider() else { throw ToolError.message(noCwdError) }
+  let resolved = ToolPath.resolveToCwd(raw, cwd: cwd)
+  return (cwd: cwd, resolvedPath: resolved)
+}
+
+/// Resolve a path to an absolute path through the mount resolver (if available) or cwdProvider.
+/// Returns the resolved mount (with runner) and absolute path.
+private func resolvePathViaMountOrCwd(
+  _ rawPath: String?,
+  defaultPath: String = ".",
+  cwdProvider: CwdProvider,
+  mountResolver: MountResolver?,
+) async throws -> (resolved: ResolvedMount?, absolutePath: String) {
+  let raw = (rawPath ?? defaultPath).trimmingCharacters(in: .whitespacesAndNewlines)
+  let expanded = ToolPath.expand(raw)
+
+  if let mountResolver {
+    let resolved = try await mountResolver(nil)
+    let absPath: String = if expanded.hasPrefix("/") {
+      expanded
+    } else {
+      ToolPath.resolveToCwd(raw, cwd: resolved.cwd)
+    }
+    return (resolved: resolved, absolutePath: absPath)
+  }
+
+  // No mount resolver — use cwdProvider for local-only path resolution
+  let (_, resolvedPath) = try await resolvePathOrRequireCwd(rawPath, defaultPath: defaultPath, provider: cwdProvider)
+  return (resolved: nil, absolutePath: resolvedPath)
+}
+
+// MARK: - read
+
+private func readTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  // Tool argument types are intentionally strict (no coercion). Some models may emit incorrect JSON
+  // types (e.g. booleans for integer fields); we prefer fixing this at the prompt/schema level.
+  // See https://github.com/wuhu-labs/wuhu/issues/12
+  struct Params: Sendable {
+    var path: String
+    var offset: Int?
+    var limit: Int?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let path = try a.requireString("path")
+      let offset = try a.optionalInt("offset")
+      let limit = try a.optionalInt("limit")
+      return .init(path: path, offset: offset, limit: limit)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "path": .object([
+        "type": .string("string"),
+        "description": .string("Path to the file to read (relative or absolute)"),
+      ]),
+      "offset": .object([
+        "type": .string("integer"),
+        "minimum": .number(1),
+        "description": .string(
+          "(Optional) 1-indexed line number to start reading from. IMPORTANT: must be an integer JSON number, not true/false. Example: 2001",
+        ),
+      ]),
+      "limit": .object([
+        "type": .string("integer"),
+        "minimum": .number(1),
+        "description": .string(
+          "(Optional) Maximum number of lines to read. IMPORTANT: must be an integer JSON number, not true/false. Example: 2000",
+        ),
+      ]),
+    ]),
+    "required": .array([.string("path")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let description = [
+    "Read the contents of a text file.",
+    "Output is truncated to \(ToolTruncation.defaultMaxLines) lines or \(ToolTruncation.defaultMaxBytes / 1024)KB (whichever is hit first).",
+    "",
+    "Pagination:",
+    "- offset: integer (1-indexed). The first line number to return.",
+    "- limit: integer. The maximum number of lines to return.",
+    "",
+    "IMPORTANT:",
+    "- offset/limit MUST be integers (JSON numbers), not booleans or strings.",
+    "- To continue after truncation, copy the exact number from the tool output notice.",
+    "  Example: if the output says \"Use offset=2001 to continue\", call read with {\"path\":\"<same file>\",\"offset\":2001}.",
+    "",
+    "Image files (png, jpg, jpeg, gif, webp) are returned as image content blocks.",
+  ].joined(separator: "\n")
+
+  let tool = Tool(name: "read", description: description, parameters: schema)
+
+  return AnyAgentTool(tool: tool, label: "read") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+
+    let (mount, resolved) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+    let runner = mount?.runner
+
+    /// Helper to read string via runner or fileIO
+    func readStringContent(path: String) async throws -> String {
+      if let runner {
+        return try await runner.readString(path: path, encoding: .utf8)
+      }
+      @Dependency(\.fileIO) var fileIO
+      return try fileIO.readString(path: path, encoding: .utf8)
+    }
+
+    func readDataContent(path: String) async throws -> Data {
+      if let runner {
+        return try await runner.readData(path: path)
+      }
+      @Dependency(\.fileIO) var fileIO
+      return try fileIO.readData(path: path)
+    }
+
+    // Check if the file is an image — return as image content block.
+    let ext = (resolved as NSString).pathExtension.lowercased()
+    if WuhuBlobStore.isImageExtension(ext) {
+      guard let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) else {
+        throw ToolError.message("Unsupported image format: \(ext)")
+      }
+      let fileData = try await readDataContent(path: resolved)
+      guard fileData.count <= WuhuBlobStore.maxImageFileSize else {
+        throw ToolError.message(
+          "Image file too large: \(ToolTruncation.formatSize(fileData.count)). Max supported: \(ToolTruncation.formatSize(WuhuBlobStore.maxImageFileSize))",
+        )
+      }
+      let base64 = fileData.base64EncodedString()
+      return AgentToolResult(
+        content: [.image(.init(data: base64, mimeType: mimeType))],
+        details: .object(["type": .string("image"), "mimeType": .string(mimeType), "size": .number(Double(fileData.count))]),
+      )
+    }
+
+    let raw = try await readStringContent(path: resolved)
+    let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    let totalLines = allLines.count
+
+    let startLine = max(0, (params.offset ?? 1) - 1)
+    if startLine >= totalLines {
+      throw ToolError.message("Offset \(params.offset ?? 1) is beyond end of file (\(totalLines) lines total)")
+    }
+
+    var selected: [String]
+    var userLimitedLines: Int?
+    if let limit = params.limit {
+      let end = min(startLine + max(0, limit), totalLines)
+      selected = Array(allLines[startLine ..< end])
+      userLimitedLines = end - startLine
+    } else {
+      selected = Array(allLines[startLine...])
+    }
+
+    let selectedContent = selected.joined(separator: "\n")
+    let truncation = ToolTruncation.truncateHead(selectedContent)
+
+    let startDisplay = startLine + 1
+    let endDisplay = startDisplay + max(0, truncation.outputLines - 1)
+
+    var outputText: String
+    var details: JSONValue = .object([:])
+
+    if truncation.firstLineExceedsLimit {
+      let firstLineSize = ToolTruncation.formatSize(allLines[startLine].utf8.count)
+      outputText =
+        "[Line \(startDisplay) is \(firstLineSize), exceeds \(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit. Use bash: sed -n '\(startDisplay)p' \(params.path) | head -c \(ToolTruncation.defaultMaxBytes)]"
+      details = .object(["truncation": truncation.toJSON()])
+    } else if truncation.truncated {
+      outputText = truncation.content
+      let nextOffset = endDisplay + 1
+      if truncation.truncatedBy == "lines" {
+        outputText += "\n\n[Showing lines \(startDisplay)-\(endDisplay) of \(totalLines). Use offset=\(nextOffset) to continue.]"
+      } else {
+        outputText +=
+          "\n\n[Showing lines \(startDisplay)-\(endDisplay) of \(totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit). Use offset=\(nextOffset) to continue.]"
+      }
+      details = .object(["truncation": truncation.toJSON()])
+    } else if let userLimitedLines, startLine + userLimitedLines < totalLines {
+      outputText = truncation.content
+      let remaining = totalLines - (startLine + userLimitedLines)
+      let nextOffset = startLine + userLimitedLines + 1
+      outputText += "\n\n[\(remaining) more lines in file. Use offset=\(nextOffset) to continue.]"
+    } else {
+      outputText = truncation.content
+      details = .null
+    }
+
+    let resultDetails: JSONValue =
+      (details == .null || (details.object?.isEmpty ?? false))
+        ? .object([:])
+        : details
+
+    return AgentToolResult(
+      content: [.text(outputText)],
+      details: resultDetails,
+    )
+  }
+}
+
+// MARK: - write
+
+private func writeTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var path: String
+    var content: String
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let path = try a.requireString("path")
+      let content = try a.requireString("content")
+      return .init(path: path, content: content)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "path": .object(["type": .string("string"), "description": .string("Path to the file to write (relative or absolute)")]),
+      "content": .object(["type": .string("string"), "description": .string("Content to write to the file")]),
+    ]),
+    "required": .array([.string("path"), .string("content")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "write",
+    description: "Write content to a file. Creates parent directories if needed. Overwrites if the file already exists.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "write") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+
+    if let runner = mount?.runner {
+      try await runner.writeString(path: abs, content: params.content, createIntermediateDirectories: true, encoding: .utf8)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let dir = (abs as NSString).deletingLastPathComponent
+      try fileIO.createDirectory(atPath: dir, withIntermediateDirectories: true)
+      try fileIO.writeString(path: abs, content: params.content, atomically: true, encoding: .utf8)
+    }
+
+    let bytes = params.content.utf8.count
+    return AgentToolResult(content: [.text("Successfully wrote \(bytes) bytes to \(params.path)")], details: .object([:]))
+  }
+}
+
+// MARK: - edit
+
+private func editTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var path: String
+    var oldText: String
+    var newText: String
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let path = try a.requireString("path")
+      let oldText = try a.requireString("oldText")
+      let newText = try a.requireString("newText")
+      return .init(path: path, oldText: oldText, newText: newText)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "path": .object(["type": .string("string"), "description": .string("Path to the file to edit (relative or absolute)")]),
+      "oldText": .object(["type": .string("string"), "description": .string("Exact text to find and replace (must match exactly; minor whitespace/quote differences are tolerated)")]),
+      "newText": .object(["type": .string("string"), "description": .string("New text to replace the old text with")]),
+    ]),
+    "required": .array([.string("path"), .string("oldText"), .string("newText")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "edit",
+    description: "Edit a file by replacing a unique text span. Prefers exact match, then applies a fuzzy normalization (trailing whitespace, smart quotes, unicode dashes/spaces). Preserves original line endings and UTF-8 BOM.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "edit") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let (mount, abs) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+    let runner = mount?.runner
+
+    // Read via Data to preserve UTF-8 BOM (String(contentsOf:) may strip it).
+    let rawData: Data
+    if let runner {
+      rawData = try await runner.readData(path: abs)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      guard fileIO.exists(path: abs) else {
+        throw ToolError.message("File not found: \(params.path)")
+      }
+      rawData = try fileIO.readData(path: abs)
+    }
+    let raw = String(decoding: rawData, as: UTF8.self)
+    let (bom, contentNoBom) = stripBom(raw)
+    let originalEnding = detectLineEnding(contentNoBom)
+
+    let normalizedContent = normalizeToLF(contentNoBom)
+    let normalizedOldText = normalizeToLF(params.oldText)
+    let normalizedNewText = normalizeToLF(params.newText)
+
+    let match = fuzzyFindText(content: normalizedContent, needle: normalizedOldText)
+    guard match.found else {
+      throw ToolError.message(
+        "Could not find the exact text in \(params.path). The old text must match exactly including all whitespace and newlines.",
+      )
+    }
+
+    let fuzzyContent = normalizeForFuzzyMatch(normalizedContent)
+    let fuzzyNeedle = normalizeForFuzzyMatch(normalizedOldText)
+    let occurrences = fuzzyContent.components(separatedBy: fuzzyNeedle).count - 1
+    if occurrences > 1 {
+      throw ToolError.message(
+        "Found \(occurrences) occurrences of the text in \(params.path). The text must be unique. Please provide more context to make it unique.",
+      )
+    }
+
+    let baseContent = match.contentForReplacement
+    let range = match.range
+    let newContent = baseContent.replacingCharacters(in: range, with: normalizedNewText)
+
+    if baseContent == newContent {
+      throw ToolError.message(
+        "No changes made to \(params.path). The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.",
+      )
+    }
+
+    let firstChangedLine = 1 + baseContent[..<range.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).count - 1
+    let final = bom + restoreLineEndings(newContent, ending: originalEnding)
+    if let runner {
+      try await runner.writeString(path: abs, content: final, createIntermediateDirectories: false, encoding: .utf8)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      try fileIO.writeString(path: abs, content: final, atomically: true, encoding: .utf8)
+    }
+
+    let diff = formatSimpleDiff(oldText: normalizedOldText, newText: normalizedNewText, line: firstChangedLine)
+    return AgentToolResult(
+      content: [.text("Successfully replaced text in \(params.path).")],
+      details: .object([
+        "diff": .string(diff),
+        "firstChangedLine": .number(Double(firstChangedLine)),
+      ]),
+    )
+  }
+}
+
+// MARK: - ls
+
+private func lsTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var path: String?
+    var limit: Int?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let path = try a.optionalString("path")
+      let limit = try a.optionalInt("limit")
+      return .init(path: path, limit: limit)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "path": .object(["type": .string("string"), "description": .string("Directory to list (default: current directory)")]),
+      "limit": .object(["type": .string("number"), "description": .string("Maximum number of entries to return (default: 500)")]),
+    ]),
+    "required": .array([]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "ls",
+    description: "List directory contents (includes dotfiles). Returns entries sorted alphabetically, with '/' suffix for directories. Truncated to 500 entries or \(ToolTruncation.defaultMaxBytes / 1024)KB.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "ls") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let effectiveLimit = max(1, params.limit ?? 500)
+    let (mount, dirPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+
+    let dirEntries: [DirectoryEntry]
+    if let runner = mount?.runner {
+      dirEntries = try await runner.listDirectory(path: dirPath)
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: dirPath)
+      guard dirExists else {
+        throw ToolError.message("Path not found: \(dirPath)")
+      }
+      guard isDir else {
+        throw ToolError.message("Not a directory: \(dirPath)")
+      }
+      let entries = try fileIO.contentsOfDirectory(atPath: dirPath)
+      dirEntries = entries.map { name in
+        let full = (dirPath as NSString).appendingPathComponent(name)
+        let (_, isEntryDir) = fileIO.existsAndIsDirectory(path: full)
+        return DirectoryEntry(name: name, isDirectory: isEntryDir)
+      }
+    }
+
+    let sorted = dirEntries.sorted { $0.name.lowercased() < $1.name.lowercased() }
+
+    var results: [String] = []
+    results.reserveCapacity(min(sorted.count, effectiveLimit))
+
+    var entryLimitReached = false
+    for entry in sorted {
+      if results.count >= effectiveLimit {
+        entryLimitReached = true
+        break
+      }
+      results.append(entry.isDirectory ? "\(entry.name)/" : entry.name)
+    }
+
+    if results.isEmpty {
+      return AgentToolResult(content: [.text("(empty directory)")], details: .object([:]))
+    }
+
+    let rawOutput = results.joined(separator: "\n")
+    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
+    var output = truncation.content
+
+    var notices: [String] = []
+    var details: [String: JSONValue] = [:]
+
+    if entryLimitReached {
+      notices.append("\(effectiveLimit) entries limit reached. Use limit=\(effectiveLimit * 2) for more")
+      details["entryLimitReached"] = .number(Double(effectiveLimit))
+    }
+    if truncation.truncated {
+      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
+      details["truncation"] = truncation.toJSON()
+    }
+
+    if !notices.isEmpty {
+      output += "\n\n[\(notices.joined(separator: ". "))]"
+    }
+
+    return AgentToolResult(
+      content: [.text(output)],
+      details: details.isEmpty ? .object([:]) : .object(details),
+    )
+  }
+}
+
+// MARK: - find
+
+private func findTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var pattern: String
+    var path: String?
+    var limit: Int?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let pattern = try a.requireString("pattern")
+      let path = try a.optionalString("path")
+      let limit = try a.optionalInt("limit")
+      return .init(pattern: pattern, path: path, limit: limit)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "pattern": .object(["type": .string("string"), "description": .string("Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'")]),
+      "path": .object(["type": .string("string"), "description": .string("Directory to search in (default: current directory)")]),
+      "limit": .object(["type": .string("number"), "description": .string("Maximum number of results (default: 1000)")]),
+    ]),
+    "required": .array([.string("pattern")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "find",
+    description: "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects basic .gitignore patterns. Truncated to 1000 results or \(ToolTruncation.defaultMaxBytes / 1024)KB.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "find") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let effectiveLimit = max(1, params.limit ?? 1000)
+    let (mount, searchRoot) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+
+    let findResult: FindResult
+    if let runner = mount?.runner {
+      findResult = try await runner.find(params: FindParams(root: searchRoot, pattern: params.pattern, limit: effectiveLimit))
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let (dirExists, isDir) = fileIO.existsAndIsDirectory(path: searchRoot)
+      guard dirExists else {
+        throw ToolError.message("Path not found: \(searchRoot)")
+      }
+      guard isDir else {
+        throw ToolError.message("Not a directory: \(searchRoot)")
+      }
+
+      let ignore = GitIgnore(searchRoot: searchRoot, fileIO: fileIO)
+
+      let matches = try walkFiles(
+        root: searchRoot,
+        fileIO: fileIO,
+        shouldSkipDescendants: { rel, abs, isDir in
+          guard isDir else { return false }
+          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
+          return ignore.isIgnored(absolutePath: abs, isDirectory: true)
+        },
+        include: { rel, abs, isDir in
+          if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
+          if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
+          if isDir { return false }
+          return ToolGlob.matches(pattern: params.pattern, path: rel, anchored: true)
+        },
+      )
+
+      let sorted = matches.sorted { $0.lowercased() < $1.lowercased() }
+      let limited = Array(sorted.prefix(effectiveLimit))
+      findResult = FindResult(entries: limited.map { FindEntry(relativePath: $0) }, totalBeforeLimit: sorted.count)
+    }
+
+    let limited = findResult.entries.map(\.relativePath)
+
+    if limited.isEmpty {
+      return AgentToolResult(content: [.text("No files found matching pattern")], details: .object([:]))
+    }
+
+    let resultLimitReached = findResult.totalBeforeLimit > effectiveLimit
+    let rawOutput = limited.joined(separator: "\n")
+    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
+    var output = truncation.content
+
+    var notices: [String] = []
+    var details: [String: JSONValue] = [:]
+
+    if resultLimitReached {
+      notices.append("\(effectiveLimit) results limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern")
+      details["resultLimitReached"] = .number(Double(effectiveLimit))
+    }
+    if truncation.truncated {
+      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
+      details["truncation"] = truncation.toJSON()
+    }
+    if !notices.isEmpty {
+      output += "\n\n[\(notices.joined(separator: ". "))]"
+    }
+
+    return AgentToolResult(content: [.text(output)], details: details.isEmpty ? .object([:]) : .object(details))
+  }
+}
+
+// MARK: - grep
+
+private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var pattern: String
+    var path: String?
+    var glob: String?
+    var ignoreCase: Bool?
+    var literal: Bool?
+    var context: Int?
+    var limit: Int?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let pattern = try a.requireString("pattern")
+      let path = try a.optionalString("path")
+      let glob = try a.optionalString("glob")
+      let ignoreCase = try a.optionalBool("ignoreCase")
+      let literal = try a.optionalBool("literal")
+      let context = try a.optionalInt("context")
+      let limit = try a.optionalInt("limit")
+      return .init(
+        pattern: pattern,
+        path: path,
+        glob: glob,
+        ignoreCase: ignoreCase,
+        literal: literal,
+        context: context,
+        limit: limit,
+      )
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "pattern": .object(["type": .string("string"), "description": .string("Search pattern (regex or literal string)")]),
+      "path": .object(["type": .string("string"), "description": .string("Directory or file to search (default: current directory)")]),
+      "glob": .object(["type": .string("string"), "description": .string("Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'")]),
+      "ignoreCase": .object(["type": .string("boolean"), "description": .string("Case-insensitive search (default: false)")]),
+      "literal": .object(["type": .string("boolean"), "description": .string("Treat pattern as literal string instead of regex (default: false)")]),
+      "context": .object(["type": .string("number"), "description": .string("Number of lines to show before and after each match (default: 0)")]),
+      "limit": .object(["type": .string("number"), "description": .string("Maximum number of matches to return (default: 100)")]),
+    ]),
+    "required": .array([.string("pattern")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "grep",
+    description: "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects basic .gitignore patterns. Truncated to 100 matches or \(ToolTruncation.defaultMaxBytes / 1024)KB.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "grep") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let contextLines = max(0, params.context ?? 0)
+    let effectiveLimit = max(1, params.limit ?? 100)
+    let ignoreCase = params.ignoreCase ?? false
+    let literal = params.literal ?? false
+
+    let (mount, searchPath) = try await resolvePathViaMountOrCwd(params.path, cwdProvider: cwdProvider, mountResolver: mountResolver)
+
+    let grepResult: GrepResult
+    if let runner = mount?.runner {
+      grepResult = try await runner.grep(params: GrepParams(
+        root: searchPath,
+        pattern: params.pattern,
+        glob: params.glob,
+        ignoreCase: ignoreCase,
+        literal: literal,
+        contextLines: contextLines,
+        limit: effectiveLimit,
+      ))
+    } else {
+      @Dependency(\.fileIO) var fileIO
+      let (pathExists, isDir) = fileIO.existsAndIsDirectory(path: searchPath)
+      guard pathExists else {
+        throw ToolError.message("Path not found: \(searchPath)")
+      }
+
+      let rootForRelPaths = isDir ? searchPath : (searchPath as NSString).deletingLastPathComponent
+      let ignore = GitIgnore(searchRoot: rootForRelPaths, fileIO: fileIO)
+
+      let files: [String] = if isDir {
+        try walkFiles(
+          root: searchPath,
+          fileIO: fileIO,
+          shouldSkipDescendants: { rel, abs, isDir in
+            guard isDir else { return false }
+            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return true }
+            return ignore.isIgnored(absolutePath: abs, isDirectory: true)
+          },
+          include: { rel, abs, isDir in
+            if rel.hasPrefix(".git/") || rel.hasPrefix("node_modules/") { return false }
+            if ignore.isIgnored(absolutePath: abs, isDirectory: isDir) { return false }
+            if isDir { return false }
+            if let glob = params.glob {
+              return ToolGlob.matches(pattern: glob, path: rel, anchored: true)
+            }
+            return true
+          },
+        )
+        .map { URL(fileURLWithPath: searchPath).appendingPathComponent($0).path }
+      } else {
+        [searchPath]
+      }
+
+      var allMatches: [GrepMatch] = []
+      var matchCount = 0
+      var matchLimitReached = false
+      var linesTruncated = false
+
+      let regex: NSRegularExpression? = {
+        if literal { return nil }
+        let opts: NSRegularExpression.Options = ignoreCase ? [.caseInsensitive] : []
+        return try? NSRegularExpression(pattern: params.pattern, options: opts)
+      }()
+
+      for file in files {
+        if matchCount >= effectiveLimit { break }
+
+        let content: String
+        do {
+          content = try fileIO.readString(path: file, encoding: .utf8)
+        } catch {
+          continue
+        }
+
+        let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        func matchesLine(_ line: String) -> Bool {
+          if literal {
+            if ignoreCase { return line.lowercased().contains(params.pattern.lowercased()) }
+            return line.contains(params.pattern)
+          }
+          guard let regex else { return false }
+          let ns = line as NSString
+          let range = NSRange(location: 0, length: ns.length)
+          return regex.firstMatch(in: line, options: [], range: range) != nil
+        }
+
+        for (idx, line) in lines.enumerated() {
+          if matchCount >= effectiveLimit {
+            matchLimitReached = true
+            break
+          }
+          if !matchesLine(line) { continue }
+          matchCount += 1
+
+          let rel = ToolGlob.normalize(relativePathForGrep(file: file, root: rootForRelPaths, isDirectoryRoot: isDir))
+          let lineNumber = idx + 1
+
+          let start = max(1, lineNumber - contextLines)
+          let end = min(lines.count, lineNumber + contextLines)
+
+          for current in start ... end {
+            let rawLine = lines[current - 1]
+            let (trunc, wasTruncated) = ToolTruncation.truncateLine(rawLine)
+            if wasTruncated { linesTruncated = true }
+            allMatches.append(GrepMatch(file: rel, lineNumber: current, line: trunc, isContext: current != lineNumber))
+          }
+        }
+      }
+
+      grepResult = GrepResult(matches: allMatches, matchCount: matchCount, limitReached: matchLimitReached, linesTruncated: linesTruncated)
+    }
+
+    if grepResult.matchCount == 0 {
+      return AgentToolResult(content: [.text("No matches found")], details: .object([:]))
+    }
+
+    // Format output from GrepMatch entries
+    var outputLines: [String] = []
+    for m in grepResult.matches {
+      if m.isContext {
+        outputLines.append("\(m.file)-\(m.lineNumber)- \(m.line)")
+      } else {
+        outputLines.append("\(m.file):\(m.lineNumber): \(m.line)")
+      }
+    }
+
+    let rawOutput = outputLines.joined(separator: "\n")
+    let truncation = ToolTruncation.truncateHead(rawOutput, options: .init(maxLines: .max, maxBytes: ToolTruncation.defaultMaxBytes))
+    var output = truncation.content
+
+    var notices: [String] = []
+    var details: [String: JSONValue] = [:]
+
+    if grepResult.limitReached {
+      notices.append("\(effectiveLimit) matches limit reached. Use limit=\(effectiveLimit * 2) for more, or refine pattern")
+      details["matchLimitReached"] = .number(Double(effectiveLimit))
+    }
+    if truncation.truncated {
+      notices.append("\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit reached")
+      details["truncation"] = truncation.toJSON()
+    }
+    if grepResult.linesTruncated {
+      notices.append("Some lines truncated to \(ToolTruncation.grepMaxLineLength) chars. Use read tool to see full lines")
+      details["linesTruncated"] = .bool(true)
+    }
+
+    if !notices.isEmpty {
+      output += "\n\n[\(notices.joined(separator: ". "))]"
+    }
+
+    return AgentToolResult(content: [.text(output)], details: details.isEmpty ? .object([:]) : .object(details))
+  }
+}
+
+// MARK: - bash
+
+private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
+  struct Params: Sendable {
+    var command: String
+    var timeout: Double?
+    var mount: String?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let command = try a.requireString("command")
+      let timeout = try a.optionalDouble("timeout")
+      let mount = try a.optionalString("mount")
+      return .init(command: command, timeout: timeout, mount: mount)
+    }
+  }
+
+  var properties: [String: JSONValue] = [
+    "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
+    "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
+  ]
+  if mountResolver != nil {
+    properties["mount"] = .object(["type": .string("string"), "description": .string("Mount name to execute on (optional, defaults to primary mount)")])
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object(properties),
+    "required": .array([.string("command")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "bash",
+    description: "Execute a bash command in the current working directory. Returns stdout and stderr (combined). Output is truncated to last \(ToolTruncation.defaultMaxLines) lines or \(ToolTruncation.defaultMaxBytes / 1024)KB. Optionally provide a timeout in seconds.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "bash") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+
+    // If a mount is specified and we have a mount resolver, use it
+    if let mountResolver, params.mount != nil {
+      let resolved = try await mountResolver(params.mount)
+      let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+      return try formatBashResult(run)
+    }
+
+    // If no mount specified but we have a resolver, resolve primary mount (may be remote)
+    if let mountResolver {
+      do {
+        let resolved = try await mountResolver(nil)
+        if resolved.mount?.runnerID != .local {
+          // Remote primary mount — execute through runner
+          let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
+          return try formatBashResult(run)
+        }
+      } catch {
+        // Fall through to local execution if mount resolution fails
+      }
+    }
+
+    // Local execution path (original behavior)
+    let cwd = try await requireCwd(cwdProvider)
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
+      throw ToolError.message("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
+    }
+
+    let run = try await LocalBash.run(
+      command: params.command,
+      cwd: cwd,
+      timeoutSeconds: params.timeout,
+    )
+    return try formatBashResult(run)
+  }
+}
+
+/// Format a BashResult into an AgentToolResult with truncation handling.
+private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
+  let exitCode = run.exitCode
+  let output = run.output
+  let timedOut = run.timedOut
+  let terminated = run.terminated
+  let fullOutputPath = run.fullOutputPath ?? ""
+
+  let truncation = ToolTruncation.truncateTail(output)
+  var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
+
+  var details: [String: JSONValue] = [:]
+  if truncation.truncated {
+    details["truncation"] = truncation.toJSON()
+    if !fullOutputPath.isEmpty {
+      details["fullOutputPath"] = .string(fullOutputPath)
+    }
+
+    let startLine = truncation.totalLines - truncation.outputLines + 1
+    let endLine = truncation.totalLines
+    if truncation.lastLinePartial {
+      let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+      let lastSize = ToolTruncation.formatSize(last.utf8.count)
+      if !outputText.isEmpty { outputText += "\n\n" }
+      outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize))."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else if truncation.truncatedBy == "lines" {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    } else {
+      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit)."
+      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
+      outputText += "]"
+    }
+  }
+
+  if timedOut {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand timed out")
+  }
+  if terminated {
+    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
+    throw ToolError.message(outputText + "\n\nCommand aborted")
+  }
+  if exitCode != 0 {
+    throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
+  }
+
+  if !truncation.truncated, !fullOutputPath.isEmpty {
+    try? FileManager.default.removeItem(atPath: fullOutputPath)
+  }
+  return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
+}
+
+// MARK: - async_bash
+
+private func asyncBashTool(cwdProvider: @escaping CwdProvider, context: WuhuAsyncBashToolContext) -> AnyAgentTool {
+  struct Params: Sendable {
+    var command: String
+    var timeout: Double?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let command = try a.requireString("command")
+      let timeout = try a.optionalDouble("timeout")
+      return .init(command: command, timeout: timeout)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "command": .object(["type": .string("string"), "description": .string("Bash command to execute in the background")]),
+      "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional). If set, the process is terminated after this duration.")]),
+    ]),
+    "required": .array([.string("command")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "async_bash",
+    description: "Start a bash command in the background. Returns immediately with a task id. When the task finishes, Wuhu may insert a user-level JSON message into the session transcript.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "async_bash") { _, args in
+    let cwd = try await requireCwd(cwdProvider)
+    let params = try Params.parse(toolName: tool.name, args: args)
+    let started = try await context.registry.start(
+      command: params.command,
+      cwd: cwd,
+      sessionID: context.sessionID,
+      ownerID: context.ownerID,
+      timeoutSeconds: params.timeout,
+    )
+
+    let response: JSONValue = .object([
+      "id": .string(started.id),
+      "message": .string("Task started. You will receive a message when it finishes; you do not need to wait or poll."),
+    ])
+
+    return AgentToolResult(
+      content: [.text(wuhuEncodeToolJSON(response))],
+      details: .object([
+        "id": .string(started.id),
+        "pid": .number(Double(started.pid)),
+        "started_at": .number(started.startedAt.timeIntervalSince1970),
+        "stdout_file": .string(started.stdoutFile),
+        "stderr_file": .string(started.stderrFile),
+      ]),
+    )
+  }
+}
+
+// MARK: - async_bash_status
+
+private func asyncBashStatusTool(context: WuhuAsyncBashToolContext) -> AnyAgentTool {
+  struct Params: Sendable {
+    var id: String
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let id = try a.requireString("id")
+      return .init(id: id)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "id": .object(["type": .string("string"), "description": .string("Task id returned by async_bash")]),
+    ]),
+    "required": .array([.string("id")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "async_bash_status",
+    description: "Query the status of an async_bash task. Returns whether the task is running or finished, plus pid (if running) and stdout/stderr file paths.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "async_bash_status") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+    guard let status = await context.registry.status(id: params.id) else {
+      throw ToolError.message("Unknown async_bash task id: \(params.id)")
+    }
+
+    let fmt = ISO8601DateFormatter()
+    fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+    var obj: [String: JSONValue] = [
+      "id": .string(status.id),
+      "state": .string(status.state.rawValue),
+      "stdout_file": .string(status.stdoutFile),
+      "stderr_file": .string(status.stderrFile),
+      "started_at": .string(fmt.string(from: status.startedAt)),
+      "timed_out": .bool(status.timedOut),
+    ]
+
+    if let pid = status.pid {
+      obj["pid"] = .number(Double(pid))
+    }
+    if let endedAt = status.endedAt {
+      obj["ended_at"] = .string(fmt.string(from: endedAt))
+    }
+    if let duration = status.durationSeconds {
+      obj["duration_seconds"] = .number(duration)
+    }
+    if let exitCode = status.exitCode {
+      obj["exit_code"] = .number(Double(exitCode))
+    }
+
+    let response: JSONValue = .object(obj)
+    return AgentToolResult(content: [.text(wuhuEncodeToolJSON(response))], details: response)
+  }
+}
+
+// MARK: - helpers
+
+private enum ToolError: Error, Sendable, CustomStringConvertible {
+  case message(String)
+  var description: String {
+    switch self {
+    case let .message(m): m
+    }
+  }
+}
+
+// walkFiles is defined in WalkFiles.swift (module-internal).
+
+// relativePathForGrep is defined in WalkFiles.swift (module-internal).
+
+private func stripBom(_ content: String) -> (bom: String, text: String) {
+  if content.hasPrefix("\u{FEFF}") {
+    return ("\u{FEFF}", String(content.dropFirst()))
+  }
+  return ("", content)
+}
+
+private func detectLineEnding(_ content: String) -> String {
+  content.contains("\r\n") ? "\r\n" : "\n"
+}
+
+private func normalizeToLF(_ text: String) -> String {
+  text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+}
+
+private func restoreLineEndings(_ text: String, ending: String) -> String {
+  ending == "\r\n" ? text.replacingOccurrences(of: "\n", with: "\r\n") : text
+}
+
+private func normalizeForFuzzyMatch(_ text: String) -> String {
+  let stripped = text
+    .split(separator: "\n", omittingEmptySubsequences: false)
+    .map { trimEnd(String($0)) }
+    .joined(separator: "\n")
+
+  return stripped
+    .replacingOccurrences(of: "[\u{2018}\u{2019}\u{201A}\u{201B}]", with: "'", options: .regularExpression)
+    .replacingOccurrences(of: "[\u{201C}\u{201D}\u{201E}\u{201F}]", with: "\"", options: .regularExpression)
+    .replacingOccurrences(of: "[\u{2010}\u{2011}\u{2012}\u{2013}\u{2014}\u{2015}\u{2212}]", with: "-", options: .regularExpression)
+    .replacingOccurrences(of: "[\u{00A0}\u{2002}-\u{200A}\u{202F}\u{205F}\u{3000}]", with: " ", options: .regularExpression)
+}
+
+private func trimEnd(_ s: String) -> String {
+  var end = s.endIndex
+  while end > s.startIndex {
+    let before = s.index(before: end)
+    let ch = s[before]
+    if ch == " " || ch == "\t" {
+      end = before
+      continue
+    }
+    break
+  }
+  return String(s[..<end])
+}
+
+private struct FuzzyMatch: Sendable {
+  var found: Bool
+  var range: Range<String.Index>
+  var usedFuzzy: Bool
+  var contentForReplacement: String
+}
+
+private func fuzzyFindText(content: String, needle: String) -> FuzzyMatch {
+  if let range = content.range(of: needle) {
+    return .init(found: true, range: range, usedFuzzy: false, contentForReplacement: content)
+  }
+
+  let fuzzyContent = normalizeForFuzzyMatch(content)
+  let fuzzyNeedle = normalizeForFuzzyMatch(needle)
+  if let range = fuzzyContent.range(of: fuzzyNeedle) {
+    return .init(found: true, range: range, usedFuzzy: true, contentForReplacement: fuzzyContent)
+  }
+
+  return .init(found: false, range: content.startIndex ..< content.startIndex, usedFuzzy: false, contentForReplacement: content)
+}
+
+private func formatSimpleDiff(oldText: String, newText: String, line: Int) -> String {
+  let oldLines = oldText.split(separator: "\n", omittingEmptySubsequences: false)
+  let newLines = newText.split(separator: "\n", omittingEmptySubsequences: false)
+
+  var out: [String] = []
+  out.append("@@ line \(line) @@")
+  for l in oldLines {
+    out.append("-\(l)")
+  }
+  for l in newLines {
+    out.append("+\(l)")
+  }
+  return out.joined(separator: "\n")
+}
+
+private func shellEscape(_ s: String) -> String {
+  if s.isEmpty { return "''" }
+  if s.range(of: #"[^A-Za-z0-9_\/\.\-]"#, options: .regularExpression) == nil { return s }
+  return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+// Bash execution is provided by LocalBash (Sources/WuhuCore/LocalBash.swift).
+// The bash tool calls LocalBash.run() for local execution and Runner.runBash()
+// for remote execution via the mount resolver.
+
+// MARK: - copy tool
+
+private func copyTool(mountResolver: @escaping MountResolver) -> AnyAgentTool {
+  struct Params: Sendable {
+    var source: String
+    var destination: String
+    var sourceMount: String?
+    var destMount: String?
+
+    static func parse(toolName: String, args: JSONValue) throws -> Params {
+      let a = try ToolArgs(toolName: toolName, args: args)
+      let source = try a.requireString("source")
+      let destination = try a.requireString("destination")
+      let sourceMount = try a.optionalString("sourceMount")
+      let destMount = try a.optionalString("destMount")
+      return .init(source: source, destination: destination, sourceMount: sourceMount, destMount: destMount)
+    }
+  }
+
+  let schema: JSONValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+      "source": .object(["type": .string("string"), "description": .string("Source file path (absolute, or relative to source mount)")]),
+      "destination": .object(["type": .string("string"), "description": .string("Destination file path (absolute, or relative to destination mount)")]),
+      "sourceMount": .object(["type": .string("string"), "description": .string("Source mount name (optional, defaults to primary mount)")]),
+      "destMount": .object(["type": .string("string"), "description": .string("Destination mount name (optional, defaults to primary mount)")]),
+    ]),
+    "required": .array([.string("source"), .string("destination")]),
+    "additionalProperties": .bool(false),
+  ])
+
+  let tool = Tool(
+    name: "copy",
+    description: "Copy a file between mounts (potentially on different runners/machines). For same-runner copies, this is efficient. For cross-runner copies, the file is streamed through the server.",
+    parameters: schema,
+  )
+
+  return AnyAgentTool(tool: tool, label: "copy") { _, args in
+    let params = try Params.parse(toolName: tool.name, args: args)
+
+    let srcResolved = try await mountResolver(params.sourceMount)
+    let dstResolved = try await mountResolver(params.destMount)
+
+    // Resolve paths
+    let srcPath: String = if params.source.hasPrefix("/") {
+      params.source
+    } else {
+      URL(fileURLWithPath: srcResolved.cwd).appendingPathComponent(params.source).standardizedFileURL.path
+    }
+
+    let dstPath: String = if params.destination.hasPrefix("/") {
+      params.destination
+    } else {
+      URL(fileURLWithPath: dstResolved.cwd).appendingPathComponent(params.destination).standardizedFileURL.path
+    }
+
+    // Read from source runner, write to destination runner
+    let data = try await srcResolved.runner.readData(path: srcPath)
+    try await dstResolved.runner.writeData(path: dstPath, data: data, createIntermediateDirectories: true)
+
+    let size = data.count
+    let sizeStr = ToolTruncation.formatSize(size)
+    return AgentToolResult(
+      content: [.text("Copied \(sizeStr) from \(params.source) to \(params.destination)")],
+      details: .object([
+        "sourcePath": .string(srcPath),
+        "destinationPath": .string(dstPath),
+        "bytes": .number(Double(size)),
+      ]),
+    )
+  }
+}
+
+private extension String {
+  func nilIfEqual(_ other: String) -> String? {
+    self == other ? nil : self
+  }
+}

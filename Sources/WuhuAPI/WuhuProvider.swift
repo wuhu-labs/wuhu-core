@@ -15,15 +15,4 @@ public enum WuhuProvider: String, Sendable, Codable, CaseIterable, Hashable {
       .anthropic
     }
   }
-
-  public init(from piProvider: Provider) {
-    switch piProvider {
-    case .openai:
-      self = .openai
-    case .openaiCodex:
-      self = .openaiCodex
-    case .anthropic:
-      self = .anthropic
-    }
-  }
 }
