@@ -84,8 +84,7 @@ public struct ToolRuntimeState: Identifiable, Sendable, Hashable {
 }
 
 public enum ToolRuntimeKind: String, Sendable, Hashable {
-  case persistent
-  case join
+  case process
 }
 
 public struct AssistantDraft: Identifiable, Sendable, Hashable {
@@ -100,6 +99,57 @@ public struct AssistantDraft: Identifiable, Sendable, Hashable {
     self.text = text
     self.startedAt = startedAt
     self.updatedAt = updatedAt
+  }
+}
+
+public protocol SemanticEntry: Sendable, Hashable {}
+
+public struct AnySemanticEntry: Sendable, Hashable {
+  private let box: any SemanticEntryBox
+  public let typeDescription: String
+
+  public init<Entry: SemanticEntry>(_ entry: Entry) {
+    self.box = ConcreteSemanticEntryBox(entry)
+    self.typeDescription = String(reflecting: Entry.self)
+  }
+
+  public func unwrap<Entry: SemanticEntry>(as type: Entry.Type = Entry.self) -> Entry? {
+    box.unwrap(as: type)
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.box.isEqual(to: rhs.box)
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    box.hash(into: &hasher)
+  }
+}
+
+private protocol SemanticEntryBox: Sendable {
+  func isEqual(to other: any SemanticEntryBox) -> Bool
+  func hash(into hasher: inout Hasher)
+  func unwrap<Entry: SemanticEntry>(as type: Entry.Type) -> Entry?
+}
+
+private struct ConcreteSemanticEntryBox<Entry: SemanticEntry>: SemanticEntryBox {
+  let entry: Entry
+
+  init(_ entry: Entry) {
+    self.entry = entry
+  }
+
+  func isEqual(to other: any SemanticEntryBox) -> Bool {
+    guard let otherEntry: Entry = other.unwrap(as: Entry.self) else { return false }
+    return entry == otherEntry
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(entry)
+  }
+
+  func unwrap<T: SemanticEntry>(as type: T.Type) -> T? {
+    entry as? T
   }
 }
 
@@ -176,6 +226,9 @@ public struct Transcript: Sendable, Hashable {
       case let .systemMessage(message):
         flushAssistant()
         messages.append(.user(.init(content: [.text(message.text)], timestamp: message.timestamp)))
+
+      case .semantic:
+        continue
       }
     }
 
@@ -189,6 +242,7 @@ public enum TranscriptEntry: Identifiable, Sendable, Hashable {
   case assistantText(AssistantTextEntry)
   case toolCall(ToolCallEntry)
   case toolResult(ToolResultEntry)
+  case semantic(SemanticEntryRecord)
   case systemMessage(SystemMessageEntry)
 
   public var id: UUID {
@@ -200,6 +254,8 @@ public enum TranscriptEntry: Identifiable, Sendable, Hashable {
     case let .toolCall(entry):
       entry.id
     case let .toolResult(entry):
+      entry.id
+    case let .semantic(entry):
       entry.id
     case let .systemMessage(entry):
       entry.id
@@ -298,6 +354,18 @@ public struct ToolResultEntry: Identifiable, Sendable, Hashable {
     self.content = content
     self.details = details
     self.isError = isError
+    self.timestamp = timestamp
+  }
+}
+
+public struct SemanticEntryRecord: Identifiable, Sendable, Hashable {
+  public var id: UUID
+  public var entry: AnySemanticEntry
+  public var timestamp: Date
+
+  public init(id: UUID, entry: AnySemanticEntry, timestamp: Date) {
+    self.id = id
+    self.entry = entry
     self.timestamp = timestamp
   }
 }

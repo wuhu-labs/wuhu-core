@@ -1,15 +1,14 @@
 import Foundation
-import Testing
-@testable import WuhuCoreNG
+import WuhuSessionCore
 
-struct ScriptedTurn: Sendable {
-  let id: UUID
-  var blocks: [ContentBlock]
-  var stopReason: StopReason
-  var streamedTextDeltas: [String]
-  var holdBeforeDone: Bool
+public struct ScriptedTurn: Sendable {
+  public let id: UUID
+  public var blocks: [ContentBlock]
+  public var stopReason: StopReason
+  public var streamedTextDeltas: [String]
+  public var holdBeforeDone: Bool
 
-  init(
+  public init(
     blocks: [ContentBlock],
     stopReason: StopReason = .stop,
     streamedTextDeltas: [String] = [],
@@ -23,30 +22,32 @@ struct ScriptedTurn: Sendable {
   }
 }
 
-actor InferenceHoldController {
+public actor InferenceHoldController {
   private var continuations: [UUID: AsyncStream<Void>.Continuation] = [:]
 
-  func holdStream(for id: UUID) -> AsyncStream<Void> {
+  public init() {}
+
+  public func holdStream(for id: UUID) -> AsyncStream<Void> {
     AsyncStream { continuation in
       continuations[id] = continuation
     }
   }
 
-  func release(_ id: UUID) {
+  public func release(_ id: UUID) {
     continuations.removeValue(forKey: id)?.finish()
   }
 }
 
-actor ScriptedInference {
+public actor ScriptedInference {
   private var turns: [ScriptedTurn]
   private let holdController = InferenceHoldController()
-  private(set) var requests: [InferenceRequest] = []
+  public private(set) var requests: [InferenceRequest] = []
 
-  init(turns: [ScriptedTurn]) {
+  public init(turns: [ScriptedTurn]) {
     self.turns = turns
   }
 
-  func stream(_ request: InferenceRequest) throws -> AsyncThrowingStream<AssistantMessageEvent, any Error> {
+  public func stream(_ request: InferenceRequest) throws -> AsyncThrowingStream<AssistantMessageEvent, any Error> {
     requests.append(request)
     guard !turns.isEmpty else {
       throw ToolError.message("No scripted inference turn remains.")
@@ -115,90 +116,99 @@ actor ScriptedInference {
     }
   }
 
-  func releaseTurn(id: UUID) async {
+  public func releaseTurn(id: UUID) async {
     await holdController.release(id)
   }
 }
 
-actor ManualSleepDriver {
-  struct Run {
-    var minutes: Int
-    var elapsed: Int
-    var continuation: AsyncStream<PersistentToolEvent>.Continuation
+public actor ManualRuntimeToolController {
+  private var continuations: [String: CheckedContinuation<ToolExecutionOutcome, Error>] = [:]
+
+  public init() {}
+
+  public func makeTool(named name: String = "wait") -> AnyToolExecutor {
+    let tool = Tool(
+      name: name,
+      description: "Test-only controllable runtime tool.",
+      parameters: .object([
+        "type": .string("object"),
+        "properties": .object([:]),
+        "additionalProperties": .bool(false),
+      ])
+    )
+
+    return AnyToolExecutor(tool: tool, lifecycle: .runtime(.process)) { call in
+      try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ToolExecutionOutcome, Error>) in
+          Task { await self.store(continuation, for: call.id) }
+        }
+      } onCancel: {
+        Task { await self.cancel(toolCallID: call.id) }
+      }
+    }
   }
 
-  private var runs: [String: Run] = [:]
-
-  func start(toolCallID: String, minutes: Int) -> PersistentToolSession {
-    let events = AsyncStream<PersistentToolEvent> { continuation in
-      self.runs[toolCallID] = Run(minutes: minutes, elapsed: 0, continuation: continuation)
-    }
-
-    return PersistentToolSession(
-      events: events,
-      interrupt: {
-        await self.interrupt(toolCallID: toolCallID)
-      }
+  public func complete(toolCallID: String, toolName: String = "wait", text: String = "Completed runtime tool.") {
+    continuations.removeValue(forKey: toolCallID)?.resume(
+      returning: .init(
+        result: .init(
+          content: [.text(text)],
+          details: .object([
+            "toolCallID": .string(toolCallID),
+            "toolName": .string(toolName),
+          ])
+        )
+      )
     )
   }
 
-  func advance(toolCallID: String, by minutes: Int = 1) {
-    guard var run = runs[toolCallID] else { return }
-
-    for _ in 0 ..< minutes {
-      run.elapsed += 1
-      if run.elapsed < run.minutes {
-        run.continuation.yield(.progress("\(run.elapsed) minute has passed"))
-      } else {
-        run.continuation.yield(.progress("\(run.elapsed) minute has passed"))
-        run.continuation.yield(
-          .completed(
-            ToolCallResult(
-              content: [.text("Completed \(run.minutes) minute sleep.")],
-              details: .object([
-                "toolCallID": .string(toolCallID),
-                "minutes": .number(Double(run.minutes)),
-              ])
-            )
-          )
+  public func fail(toolCallID: String, message: String) {
+    continuations.removeValue(forKey: toolCallID)?.resume(
+      returning: .init(
+        result: .init(
+          content: [.text(message)],
+          isError: true
         )
-        run.continuation.finish()
-        runs.removeValue(forKey: toolCallID)
-        return
-      }
-    }
-
-    runs[toolCallID] = run
+      )
+    )
   }
 
-  func interrupt(toolCallID: String) {
-    guard let run = runs.removeValue(forKey: toolCallID) else { return }
-    run.continuation.finish()
+  private func store(_ continuation: CheckedContinuation<ToolExecutionOutcome, Error>, for toolCallID: String) {
+    continuations[toolCallID] = continuation
+  }
+
+  private func cancel(toolCallID: String) {
+    continuations.removeValue(forKey: toolCallID)?.resume(throwing: CancellationError())
   }
 }
 
-actor StateTracker {
+public actor StateTracker<Value: Sendable> {
   private struct Waiter {
-    var predicate: @Sendable (AgentState) -> Bool
-    var continuation: CheckedContinuation<AgentState, Never>
+    var predicate: @Sendable (Value) -> Bool
+    var continuation: CheckedContinuation<Value, Never>
   }
 
-  private var latest: AgentState = .init()
+  private var latest: Value
   private var waiters: [Waiter] = []
+  private var task: Task<Void, Never>?
 
-  init(stream: AsyncStream<AgentState>) {
-    Task {
-      for await state in stream {
-        await self.receive(state)
+  public init(initial: Value) {
+    self.latest = initial
+  }
+
+  public func start(stream: AsyncStream<Value>) {
+    task = Task {
+      for await value in stream {
+        self.receive(value)
       }
     }
   }
 
-  func current() -> AgentState {
+  public func current() -> Value {
     latest
   }
 
-  func waitUntil(_ predicate: @escaping @Sendable (AgentState) -> Bool) async -> AgentState {
+  public func waitUntil(_ predicate: @escaping @Sendable (Value) -> Bool) async -> Value {
     if predicate(latest) {
       return latest
     }
@@ -208,13 +218,18 @@ actor StateTracker {
     }
   }
 
-  private func receive(_ state: AgentState) {
-    latest = state
+  public func finish() {
+    task?.cancel()
+    task = nil
+  }
+
+  private func receive(_ value: Value) {
+    latest = value
 
     var remaining: [Waiter] = []
     for waiter in waiters {
-      if waiter.predicate(state) {
-        waiter.continuation.resume(returning: state)
+      if waiter.predicate(value) {
+        waiter.continuation.resume(returning: value)
       } else {
         remaining.append(waiter)
       }
@@ -223,73 +238,64 @@ actor StateTracker {
   }
 }
 
-struct SessionHarness {
-  let session: SessionActor
-  let inference: ScriptedInference
-  let sleep: ManualSleepDriver
-  let tracker: StateTracker
-  let turns: [ScriptedTurn]
+public struct SessionHarness {
+  public let session: SessionActor
+  public let inference: ScriptedInference
+  public let tracker: StateTracker<AgentState>
 
-  init(
+  public init(
     turns: [ScriptedTurn],
-    virtualFileSystem: VirtualFileSystem = .seededPlayground
+    tools: ToolRegistry = .init(exposedTools: [], executors: [:]),
+    configuration: SessionConfiguration = .init()
   ) async {
     let inference = ScriptedInference(turns: turns)
-    let sleep = ManualSleepDriver()
     let environment = SessionEnvironment(
       inferenceService: .init(stream: { request in
         try await inference.stream(request)
       }),
-      sleepToolDriver: .init { toolCallID, minutes in
-        await sleep.start(toolCallID: toolCallID, minutes: minutes)
-      },
       now: Date.init,
       uuid: UUID.init
     )
 
     let session = SessionActor(
-      configuration: .init(virtualFileSystem: virtualFileSystem),
-      environment: environment
+      configuration: configuration,
+      environment: environment,
+      tools: tools
     )
 
-    let tracker = StateTracker(stream: await session.subscribe())
+    let tracker = StateTracker<AgentState>(initial: .init())
+    await tracker.start(stream: await session.subscribe())
 
     self.session = session
     self.inference = inference
-    self.sleep = sleep
     self.tracker = tracker
-    self.turns = turns
   }
 
-  func enqueueSteer(_ text: String) async {
+  public func enqueueSteer(_ text: String) async {
     await session.enqueueUserMessage(text, lane: .steer)
   }
 
-  func enqueueFollowUp(_ text: String) async {
+  public func enqueueFollowUp(_ text: String) async {
     await session.enqueueUserMessage(text, lane: .followUp)
   }
 
-  func enqueueNotification(_ text: String) async {
+  public func enqueueNotification(_ text: String) async {
     await session.enqueueNotification(text)
   }
 
-  func stop() async {
+  public func stop() async {
     await session.stop()
   }
 
-  func resume() async {
+  public func resume() async {
     await session.resume()
   }
 
-  func advanceSleep(toolCallID: String, by minutes: Int = 1) async {
-    await sleep.advance(toolCallID: toolCallID, by: minutes)
-  }
-
-  func releaseTurn(_ turn: ScriptedTurn) async {
+  public func releaseTurn(_ turn: ScriptedTurn) async {
     await inference.releaseTurn(id: turn.id)
   }
 
-  func waitUntilIdle(minimumTranscriptEntries: Int = 1) async -> AgentState {
+  public func waitUntilIdle(minimumTranscriptEntries: Int = 1) async -> AgentState {
     await tracker.waitUntil { state in
       state.status == .idle
         && state.activeToolCalls.isEmpty
@@ -298,7 +304,7 @@ struct SessionHarness {
     }
   }
 
-  func waitUntilWaitingForTools(minimumTranscriptEntries: Int = 1) async -> AgentState {
+  public func waitUntilWaitingForTools(minimumTranscriptEntries: Int = 1) async -> AgentState {
     await tracker.waitUntil { state in
       state.status == .waitingForTools
         && !state.activeToolCalls.isEmpty
@@ -306,16 +312,20 @@ struct SessionHarness {
     }
   }
 
-  func waitUntilPaused() async -> AgentState {
+  public func waitUntilPaused() async -> AgentState {
     await tracker.waitUntil { $0.status == .paused }
   }
 
-  func waitUntilDraftText(_ text: String) async -> AgentState {
+  public func waitUntilDraftText(_ text: String) async -> AgentState {
     await tracker.waitUntil { $0.assistantDraft?.text == text }
+  }
+
+  public func finish() async {
+    await tracker.finish()
   }
 }
 
-extension Transcript {
+public extension Transcript {
   var debugSummary: [String] {
     entries.map { entry in
       switch entry {
@@ -333,6 +343,8 @@ extension Transcript {
           return nil
         }.joined(separator: "\n")
         return "tool-result[\(result.toolCallID)]: \(result.toolName) -> \(text)"
+      case let .semantic(record):
+        return "semantic: \(record.entry.typeDescription)"
       case let .systemMessage(message):
         return "system[\(message.kind.rawValue)]: \(message.text)"
       }
@@ -340,6 +352,6 @@ extension Transcript {
   }
 }
 
-func toolCall(_ id: String, _ name: String, args: JSONValue = .object([:])) -> ContentBlock {
+public func toolCall(_ id: String, _ name: String, args: JSONValue = .object([:])) -> ContentBlock {
   .toolCall(.init(id: id, name: name, arguments: args))
 }

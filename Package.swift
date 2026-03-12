@@ -12,7 +12,8 @@ let package = Package(
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
     .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
     .library(name: "WuhuCore", targets: ["WuhuCore"]),
-    .library(name: "WuhuCoreNG", targets: ["WuhuCoreNG"]),
+    .library(name: "WuhuSessionCore", targets: ["WuhuSessionCore"]),
+    .library(name: "WuhuLocalTools", targets: ["WuhuLocalTools"]),
     .library(name: "WuhuClient", targets: ["WuhuClient"]),
     .library(name: "WuhuServer", targets: ["WuhuServer"]),
     .library(name: "WuhuRunner", targets: ["WuhuRunner"]),
@@ -83,11 +84,24 @@ let package = Package(
       ]
     ),
     .target(
-      name: "WuhuCoreNG",
+      name: "WuhuSessionCore",
       dependencies: [
         .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "Dependencies", package: "swift-dependencies"),
+      ]
+    ),
+    .target(
+      name: "WuhuSessionCoreTestingSupport",
+      dependencies: [
+        "WuhuSessionCore",
+      ]
+    ),
+    .target(
+      name: "WuhuLocalTools",
+      dependencies: [
+        "WuhuSessionCore",
+        .product(name: "Subprocess", package: "swift-subprocess"),
       ]
     ),
     .target(
@@ -149,9 +163,19 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "WuhuCoreNGTests",
+      name: "WuhuSessionCoreTests",
       dependencies: [
-        "WuhuCoreNG",
+        "WuhuSessionCore",
+        "WuhuSessionCoreTestingSupport",
+        .product(name: "Testing", package: "swift-testing"),
+      ]
+    ),
+    .testTarget(
+      name: "WuhuLocalToolsTests",
+      dependencies: [
+        "WuhuLocalTools",
+        "WuhuSessionCore",
+        "WuhuSessionCoreTestingSupport",
         .product(name: "Testing", package: "swift-testing"),
       ]
     ),
