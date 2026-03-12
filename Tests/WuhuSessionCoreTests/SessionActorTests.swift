@@ -1,5 +1,5 @@
 import Testing
-@testable import WuhuCoreNG
+@testable import WuhuSessionCore
 
 @Suite struct SessionActorTests {
   @Test func nonPersistentReadToolRoundTrip() async throws {

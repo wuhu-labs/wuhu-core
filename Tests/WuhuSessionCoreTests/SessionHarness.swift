@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import WuhuCoreNG
+@testable import WuhuSessionCore
 
 struct ScriptedTurn: Sendable {
   let id: UUID

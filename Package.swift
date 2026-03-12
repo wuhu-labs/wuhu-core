@@ -12,7 +12,7 @@ let package = Package(
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
     .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
     .library(name: "WuhuCore", targets: ["WuhuCore"]),
-    .library(name: "WuhuCoreNG", targets: ["WuhuCoreNG"]),
+    .library(name: "WuhuSessionCore", targets: ["WuhuSessionCore"]),
     .library(name: "WuhuClient", targets: ["WuhuClient"]),
     .library(name: "WuhuServer", targets: ["WuhuServer"]),
     .library(name: "WuhuRunner", targets: ["WuhuRunner"]),
@@ -83,7 +83,7 @@ let package = Package(
       ]
     ),
     .target(
-      name: "WuhuCoreNG",
+      name: "WuhuSessionCore",
       dependencies: [
         .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
@@ -149,9 +149,9 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "WuhuCoreNGTests",
+      name: "WuhuSessionCoreTests",
       dependencies: [
-        "WuhuCoreNG",
+        "WuhuSessionCore",
         .product(name: "Testing", package: "swift-testing"),
       ]
     ),
