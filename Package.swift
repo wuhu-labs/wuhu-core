@@ -32,14 +32,19 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.3.2"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     .package(url: "https://github.com/swiftlang/swift-testing.git", revision: "48a471ab313e858258ab0b9b0bf2cea55a50cefb"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
+    .package(url: "https://github.com/hummingbird-project/swift-websocket.git", from: "1.0.0"),
     .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
+    // Pin swift-collections < 1.4.0 to work around Hummingbird's missing
+    // `import DequeModule` — see https://github.com/hummingbird-project/hummingbird/issues/791
+    .package(url: "https://github.com/apple/swift-collections.git", "1.0.0" ..< "1.4.0"),
     grdbDependency,
   ],
   targets: [
@@ -73,6 +78,7 @@ let package = Package(
         "WuhuCoreClient",
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "GRDB", package: "GRDB.swift"),
         .product(name: "Crypto", package: "swift-crypto"),
@@ -93,9 +99,11 @@ let package = Package(
       name: "WuhuServer",
       dependencies: [
         "WuhuCore",
+        .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
-        .product(name: "HummingbirdWSClient", package: "hummingbird-websocket"),
+        .product(name: "WSClient", package: "swift-websocket"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
         .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
@@ -106,6 +114,8 @@ let package = Package(
       name: "WuhuRunner",
       dependencies: [
         "WuhuCore",
+        .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "Yams", package: "Yams"),
@@ -137,6 +147,11 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         "WuhuCoreClient",
+        .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxWebSocket", package: "wuhu-yamux"),
+        .product(name: "Hummingbird", package: "hummingbird"),
+        .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+        .product(name: "WSClient", package: "swift-websocket"),
         .product(name: "Testing", package: "swift-testing"),
         .product(name: "Dependencies", package: "swift-dependencies"),
       ],

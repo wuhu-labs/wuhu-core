@@ -394,6 +394,16 @@ public actor AgentLoop<B: AgentBehavior> {
           try await behavior.toolDidExecute(call, result: finalResult, state: state)
         }
       case let .failure(error):
+        // Track failed tool calls in the repetition tracker so that
+        // degenerate loops (e.g., the model repeatedly sending invalid
+        // arguments that fail parsing) are detected and blocked.
+        let argsHash = call.arguments.hashValue
+        let errorHash = String(describing: error).hashValue
+        repetitionTracker.record(
+          toolName: call.name,
+          argsHash: argsHash,
+          resultHash: errorHash,
+        )
         try await serialized { [behavior] state in
           try await behavior.toolDidFail(call, error: error, state: state)
         }
