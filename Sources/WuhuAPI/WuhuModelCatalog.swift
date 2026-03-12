@@ -87,6 +87,10 @@ public enum WuhuModelCatalog {
     .init(modelID: "gpt-5-codex", maxInputTokens: 400_000, maxOutputTokens: 128_000),
     .init(modelID: "gpt-5.1-codex", maxInputTokens: 400_000, maxOutputTokens: 128_000),
     .init(modelID: "gpt-5.2-codex", maxInputTokens: 400_000, maxOutputTokens: 128_000),
+
+    // OpenAI — 1M input, 128k output
+    .init(modelID: "gpt-5.4", maxInputTokens: 1_000_000, maxOutputTokens: 128_000),
+    .init(modelID: "gpt-5.4-codex", maxInputTokens: 1_000_000, maxOutputTokens: 128_000),
   ]
 
   /// Fallback default max tokens when the model is not in the spec table.
@@ -123,6 +127,8 @@ public enum WuhuModelCatalog {
         .init(id: "gpt-5.1-codex", displayName: "GPT-5.1 Codex"),
         .init(id: "gpt-5.2", displayName: "GPT-5.2"),
         .init(id: "gpt-5.2-codex", displayName: "GPT-5.2 Codex"),
+        .init(id: "gpt-5.4", displayName: "GPT-5.4"),
+        .init(id: "gpt-5.4-codex", displayName: "GPT-5.4 Codex"),
       ]
 
     case .openaiCodex:
@@ -133,6 +139,8 @@ public enum WuhuModelCatalog {
         .init(id: "gpt-5.2", displayName: "GPT-5.2"),
         .init(id: "gpt-5.2-codex", displayName: "GPT-5.2 Codex"),
         .init(id: "gpt-5.3-codex", displayName: "GPT-5.3 Codex"),
+        .init(id: "gpt-5.4", displayName: "GPT-5.4"),
+        .init(id: "gpt-5.4-codex", displayName: "GPT-5.4 Codex"),
       ]
 
     case .anthropic:
@@ -160,12 +168,12 @@ public enum WuhuModelCatalog {
     case .openai, .openaiCodex:
       guard modelID.hasPrefix("gpt-5") else { return [] }
 
-      let supportsXhigh = modelID.hasPrefix("gpt-5.2") || modelID.hasPrefix("gpt-5.3")
+      let supportsXhigh = modelID.hasPrefix("gpt-5.2") || modelID.hasPrefix("gpt-5.3") || modelID.hasPrefix("gpt-5.4")
       var efforts: [ReasoningEffort] = [.minimal, .low, .medium, .high]
 
       if supportsXhigh {
         efforts.append(.xhigh)
-        // GPT-5.2/5.3 families don't support `minimal` (maps to `low`).
+        // GPT-5.2/5.3/5.4 families don't support `minimal` (maps to `low`).
         efforts.removeAll { $0 == .minimal }
       }
 
