@@ -162,8 +162,8 @@ public struct GrepResult: Sendable, Hashable, Codable {
 /// Minimal execution proxy for filesystem operations and process execution.
 ///
 /// `LocalRunner` implements this directly on the local machine.
-/// `RemoteRunnerClient` implements this by forwarding calls over WebSocket
-/// to a `RunnerServerHandler` wrapping any `Runner`.
+/// `MuxRunnerClient` implements this by forwarding calls over a
+/// mux session to a remote runner process.
 public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 

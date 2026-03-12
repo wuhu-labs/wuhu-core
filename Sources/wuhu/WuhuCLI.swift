@@ -18,11 +18,14 @@ extension WuhuMountTemplateType: ExpressibleByArgument {}
 struct WuhuCLI: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "wuhu",
-    abstract: "Wuhu (Swift) – server + client for persisted coding-agent sessions.",
+    abstract: "Wuhu – server + client for persisted coding-agent sessions.",
+    version: "wuhu \(WuhuVersion.display)",
     subcommands: [
       Server.self,
       Client.self,
       RunnerCommand.self,
+      VersionCommand.self,
+      UpgradeCommand.self,
     ],
   )
 
@@ -53,7 +56,7 @@ struct WuhuCLI: AsyncParsableCommand {
     var config: String?
 
     func run() async throws {
-      try await WuhuRunnerServer().run(configPath: config)
+      try await WuhuMuxRunnerServer().run(configPath: config)
     }
   }
 
