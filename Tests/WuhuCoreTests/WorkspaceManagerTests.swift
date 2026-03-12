@@ -22,7 +22,7 @@ struct WorkspaceManagerTests {
 
     defer { try? fm.removeItem(at: base) }
 
-    let workspacePath = try await WorkspaceManager.materializeFolderTemplateWorkspace(
+    let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
       sessionID: "sess-1",
       templatePath: template.path,
       startupScript: "startup.sh",

@@ -1,13 +1,10 @@
-import Dependencies
 import Foundation
 import Hummingbird
 import HummingbirdCore
 import HummingbirdWebSocket
 import Logging
-import Mux
-import MuxSocket
 import NIOCore
-import PiAI
+import NIOWebSocket
 import WuhuAPI
 import WuhuCore
 
@@ -17,15 +14,6 @@ public struct WuhuServer: Sendable {
   public func run(configPath: String?, llmRequestLogDir: String? = nil) async throws {
     let path = (configPath?.isEmpty == false) ? configPath! : WuhuServerConfig.defaultPath()
     let config = try WuhuServerConfig.load(path: path)
-
-    // Bootstrap logging (must happen before any Logger is created)
-    DebugLogger.bootstrap(logLevel: config.logLevel)
-
-    // Bootstrap OTel if endpoint is configured
-    if let endpoint = config.otelEndpoint, !endpoint.isEmpty {
-      setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint, 1)
-      setenv("OTEL_SERVICE_NAME", "wuhu", 1)
-    }
 
     if let openai = config.llm?.openai, !openai.isEmpty {
       setenv("OPENAI_API_KEY", openai, 1)
@@ -43,10 +31,11 @@ public struct WuhuServer: Sendable {
 
     let store = try SQLiteSessionStore(path: dbPath)
 
-    let dataRoot: String = {
+    let blobRoot: String = {
       let dbDir = URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent()
-      return dbDir.path
+      return dbDir.appendingPathComponent("blobs", isDirectory: true).path
     }()
+    let blobStore = WuhuBlobStore(rootDirectory: blobRoot)
 
     let workspaceRoot = config.resolveWorkspaceRoot(databasePath: dbPath)
 
@@ -56,25 +45,15 @@ public struct WuhuServer: Sendable {
     try workspaceDocsStore.ensureDefaultDirectories()
     workspaceDocsStore.startWatching()
 
-    // Configure LLM payload store (raw HTTP request/response capture)
     let effectiveLogDir: String? = {
       if let llmRequestLogDir, !llmRequestLogDir.isEmpty { return llmRequestLogDir }
       if let fromConfig = config.llmRequestLogDir, !fromConfig.isEmpty { return fromConfig }
       return nil
     }()
 
-    let llmHTTPClient: any PiAI.HTTPClient = {
-      if let logDir = effectiveLogDir {
-        let expanded = (logDir as NSString).expandingTildeInPath
-        let payloadStore = LocalDataBucket(rootDirectory: expanded)
-        return InstrumentedHTTPClient(base: sharedHTTPClient, payloadStore: payloadStore)
-      }
-      return sharedHTTPClient
-    }()
-
-    prepareDependencies {
-      $0.streamFn = tracedStreamFn(makeStreamFn(http: llmHTTPClient))
-      $0.dataBucket = LocalDataBucket(rootDirectory: dataRoot)
+    let requestLogger: WuhuLLMRequestLogger? = effectiveLogDir.flatMap { raw in
+      let expanded = (raw as NSString).expandingTildeInPath
+      return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
     }
 
     // Runner registry — connect to configured remote runners
@@ -86,56 +65,33 @@ public struct WuhuServer: Sendable {
       await runnerRegistry.declareConfigured(runners.map(\.name))
     }
 
-    // Bash tag coordinator — bridges fire-and-forget startBash with tool-level await.
-    // Created early so runner connectors can wire callbacks to it.
-    let bashCoordinator = BashTagCoordinator()
-
     // Runner tasks are retained to keep the connections alive for the server lifetime.
     // They auto-cancel when the process exits.
     var _runnerTasks: [Task<Void, Never>] = []
     if let runners = config.runners, !runners.isEmpty {
-      let muxRunners = runners.map { r -> (name: String, host: String, port: Int) in
-        let (h, p) = Self.parseHostPort(r.address, defaultPort: 5532)
-        return (name: r.name, host: h, port: p)
-      }
-      _runnerTasks = WuhuMuxRunnerConnector.connectAll(
-        runners: muxRunners,
+      _runnerTasks = WuhuRunnerConnector.connectAll(
+        runners: runners,
         registry: runnerRegistry,
-        bashCoordinator: bashCoordinator,
         logger: logger,
       )
     }
 
-    // Spawn local runner as a child process over UDS
-    let localRunnerSpawner = WuhuLocalRunnerSpawner(
-      socketPath: config.localRunnerSocket,
-      registry: runnerRegistry,
-      bashCoordinator: bashCoordinator,
-      logger: logger,
-    )
-    try await localRunnerSpawner.start()
-
-    // Start runner connection tasks for configured outbound runners
-    let port = config.port ?? 5530
-    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
-
     let service = WuhuService(
       store: store,
+      blobStore: blobStore,
+      llmRequestLogger: requestLogger,
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
-      bashCoordinator: bashCoordinator,
-      defaultCostLimitCents: config.defaultCostLimitCents,
     )
     await service.startAgentLoopManager()
-    await service.resumeRunningSessions()
 
     let router = Router(context: WuhuRequestContext.self)
 
     @Sendable func resolveMountTemplate(_ identifier: String, missingStatus: HTTPResponse.Status) async throws -> WuhuMountTemplate {
       do {
         return try await store.getMountTemplate(identifier: identifier)
-      } catch let err as MountTemplateResolutionError {
+      } catch let err as WuhuMountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(missingStatus, message: err.description)
@@ -187,7 +143,7 @@ public struct WuhuServer: Sendable {
       let identifier = try context.parameters.require("identifier")
       do {
         try await store.deleteMountTemplate(identifier: identifier)
-      } catch let err as MountTemplateResolutionError {
+      } catch let err as WuhuMountTemplateResolutionError {
         switch err {
         case .unknownMountTemplate:
           throw HTTPError(.notFound, message: err.description)
@@ -227,18 +183,18 @@ public struct WuhuServer: Sendable {
       let contentType = request.headers[.contentType] ?? "application/octet-stream"
       let mimeType = String(contentType)
 
-      var body = try await request.body.collect(upTo: BlobBucket.maxImageFileSize + 1024)
+      var body = try await request.body.collect(upTo: WuhuBlobStore.maxImageFileSize + 1024)
       let data = if let bytes = body.readBytes(length: body.readableBytes) {
         Data(bytes)
       } else {
         Data()
       }
 
-      guard data.count <= BlobBucket.maxImageFileSize else {
-        throw HTTPError(.badRequest, message: "Image too large. Max: \(BlobBucket.maxImageFileSize / 1024 / 1024)MB")
+      guard data.count <= WuhuBlobStore.maxImageFileSize else {
+        throw HTTPError(.badRequest, message: "Image too large. Max: \(WuhuBlobStore.maxImageFileSize / 1024 / 1024)MB")
       }
 
-      let uri = try await BlobBucket.store(namespace: sessionID, data: data, mimeType: mimeType)
+      let uri = try blobStore.store(sessionID: sessionID, data: data, mimeType: mimeType)
 
       struct BlobUploadResponse: Encodable {
         let blobURI: String
@@ -259,13 +215,13 @@ public struct WuhuServer: Sendable {
 
       let data: Data
       do {
-        data = try await BlobBucket.resolve(uri: uri)
+        data = try blobStore.resolve(uri: uri)
       } catch {
         throw HTTPError(.notFound, message: "Blob not found: \(filename)")
       }
 
       let ext = filename.split(separator: ".").last.map(String.init) ?? ""
-      let mimeType = BlobBucket.mimeTypeForExtension(ext) ?? "application/octet-stream"
+      let mimeType = WuhuBlobStore.mimeTypeForExtension(ext) ?? "application/octet-stream"
 
       var buffer = ByteBuffer()
       buffer.writeBytes(data)
@@ -314,7 +270,7 @@ public struct WuhuServer: Sendable {
       let systemPrompt: String = if let prompt = create.systemPrompt, !prompt.isEmpty {
         prompt
       } else {
-        DefaultSystemPrompts.codingAgent
+        WuhuDefaultSystemPrompts.codingAgent
       }
       let sessionID = UUID().uuidString.lowercased()
 
@@ -330,8 +286,8 @@ public struct WuhuServer: Sendable {
         let mt = try await resolveMountTemplate(mtIdentifier, missingStatus: .badRequest)
         let serverCwd = FileManager.default.currentDirectoryPath
         let templatePath = ToolPath.resolveToCwd(mt.templatePath, cwd: serverCwd)
-        let workspacesRoot = WorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
-        let workspacePath = try await WorkspaceManager.materializeFolderTemplateWorkspace(
+        let workspacesRoot = WuhuWorkspaceManager.resolveWorkspacesPath(mt.workspacesPath)
+        let workspacePath = try await WuhuWorkspaceManager.materializeFolderTemplateWorkspace(
           sessionID: sessionID,
           templatePath: templatePath,
           startupScript: mt.startupScript,
@@ -413,14 +369,6 @@ public struct WuhuServer: Sendable {
       let stopRequest = await (try? request.decode(as: WuhuStopSessionRequest.self, context: context)) ?? WuhuStopSessionRequest()
       let response = try await service.stopSession(sessionID: id, user: stopRequest.user)
       return try context.responseEncoder.encode(response, from: request, context: context)
-    }
-
-    router.post("v1/sessions/:id/cost-limit") { request, context async throws -> Response in
-      let id = try context.parameters.require("id")
-      struct Body: Decodable { var costLimitCents: Int64? }
-      let body = try await request.decode(as: Body.self, context: context)
-      try await service.updateCostLimit(sessionID: id, costLimitCents: body.costLimitCents)
-      return Response(status: .ok)
     }
 
     router.post("v1/sessions/:id/archive") { request, context async throws -> Response in
@@ -599,16 +547,14 @@ public struct WuhuServer: Sendable {
       return runners.map { WuhuRunnerInfo(name: $0.name, source: $0.source.rawValue, isConnected: $0.isConnected) }
     }
 
-    // WebSocket router for incoming runner connections
-    let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
-      registry: runnerRegistry,
-      bashCoordinator: bashCoordinator,
-      logger: logger,
+    // Build WebSocket router for incoming runner connections
+    let wsRouter = WuhuRunnerAcceptor.wsRouter(registry: runnerRegistry, logger: logger)
+    let wsConfig = WebSocketServerConfiguration(
+      maxFrameSize: 1 << 24, // 16 MB — must match the runner setting
     )
 
-    // Configure WebSocket with larger max frame size (1MB) to handle large RPC payloads.
-    // TODO: Fix wuhu-yamux WebSocketConnection to chunk writes instead of requiring this.
-    let wsConfig = WebSocketServerConfiguration(maxFrameSize: 1 << 20)
+    let port = config.port ?? 5530
+    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
 
     let app = Application(
       router: router,
@@ -618,34 +564,10 @@ public struct WuhuServer: Sendable {
     )
     try await app.runService()
 
-    // Shutdown: stop local runner and cancel remote runner connections
-    await localRunnerSpawner.stop()
+    // Cancel runner connection tasks on shutdown
     for task in _runnerTasks {
       task.cancel()
     }
-  }
-
-  /// Parse "host:port" from a runner address string.
-  static func parseHostPort(_ address: String, defaultPort: Int) -> (String, Int) {
-    // Strip protocol prefixes if present
-    var addr = address
-    for prefix in ["ws://", "wss://", "http://", "https://"] {
-      if addr.hasPrefix(prefix) {
-        addr = String(addr.dropFirst(prefix.count))
-        break
-      }
-    }
-    // Strip path
-    if let slashIdx = addr.firstIndex(of: "/") {
-      addr = String(addr[addr.startIndex ..< slashIdx])
-    }
-    // Split host:port
-    if let colonIdx = addr.lastIndex(of: ":"),
-       let port = Int(addr[addr.index(after: colonIdx)...])
-    {
-      return (String(addr[addr.startIndex ..< colonIdx]), port)
-    }
-    return (addr, defaultPort)
   }
 }
 

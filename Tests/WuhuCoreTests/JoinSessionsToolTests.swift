@@ -13,7 +13,8 @@ struct JoinSessionsToolTests {
 
   private func makeStoreAndService() throws -> (SQLiteSessionStore, WuhuService) {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let service = WuhuService(store: store, runnerRegistry: RunnerRegistry(runners: [LocalRunner()]))
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
     return (store, service)
   }
 
@@ -64,8 +65,8 @@ struct JoinSessionsToolTests {
     ))))
   }
 
-  private func textOutput(_ result: ToolExecutionResult) throws -> String {
-    try result.unwrapImmediate().content.compactMap { block in
+  private func textOutput(_ result: AgentToolResult) -> String {
+    result.content.compactMap { block in
       if case let .text(t) = block { return t.text }
       return nil
     }.joined(separator: "\n")
@@ -73,7 +74,7 @@ struct JoinSessionsToolTests {
 
   /// Build the join_sessions tool for a given parent session, using the real WuhuService.
   private func getJoinSessionsTool(service: WuhuService, parentSession: WuhuSession) async -> AnyAgentTool? {
-    let baseTools = AgentTools.codingAgentTools(cwdProvider: { "/tmp" }, mountResolver: AgentTools.testMountResolver(cwd: "/tmp"))
+    let baseTools = WuhuTools.codingAgentTools(cwdProvider: { "/tmp" })
     let allTools = await service.agentToolset(session: parentSession, baseTools: baseTools)
     return allTools.first { $0.tool.name == "join_sessions" }
   }
@@ -97,13 +98,13 @@ struct JoinSessionsToolTests {
       args: .object(["sessionIDs": .array([.string(child1.id), .string(child2.id)])]),
     )
 
-    let text = try textOutput(result)
+    let text = textOutput(result)
     #expect(text.contains("All 2 sessions completed."))
     #expect(text.contains("Child 1 done"))
     #expect(text.contains("Child 2 done"))
 
     // Check details
-    let details = try result.unwrapImmediate().details
+    let details = result.details
     #expect(details.object?["completed"]?.boolValue == true)
     let sessions = details.object?["sessions"]?.array ?? []
     #expect(sessions.count == 2)
@@ -142,10 +143,10 @@ struct JoinSessionsToolTests {
       ]),
     )
 
-    let text = try textOutput(result)
+    let text = textOutput(result)
     #expect(text.contains("All 1 session completed."))
     #expect(text.contains("Child finished after delay"))
-    #expect(try result.unwrapImmediate().details.object?["completed"]?.boolValue == true)
+    #expect(result.details.object?["completed"]?.boolValue == true)
   }
 
   @Test func joinSessions_timesOutWithPartialResults() async throws {
@@ -171,14 +172,14 @@ struct JoinSessionsToolTests {
       ]),
     )
 
-    let text = try textOutput(result)
+    let text = textOutput(result)
     #expect(text.contains("1/2 completed, 1 timed out."))
     #expect(text.contains("Child 1 done early"))
     #expect(text.contains("still running"))
     #expect(text.contains("Use join_sessions again"))
-    #expect(try result.unwrapImmediate().details.object?["completed"]?.boolValue == false)
+    #expect(result.details.object?["completed"]?.boolValue == false)
 
-    let timedOut = try result.unwrapImmediate().details.object?["timedOut"]?.array ?? []
+    let timedOut = result.details.object?["timedOut"]?.array ?? []
     #expect(timedOut.count == 1)
     #expect(timedOut.first?.object?["sessionID"]?.stringValue == child2.id)
   }
@@ -226,7 +227,7 @@ struct JoinSessionsToolTests {
       args: .object(["sessionIDs": .array([.string(child.id)])]),
     )
 
-    let text = try textOutput(result)
+    let text = textOutput(result)
     #expect(text.contains("All 1 session completed."))
     #expect(text.contains("Solo child done"))
   }
@@ -250,7 +251,7 @@ struct JoinSessionsToolTests {
       args: .object(["sessionIDs": .array([.string(child.id)])]),
     )
 
-    let text = try textOutput(result)
+    let text = textOutput(result)
     #expect(text.contains("All 1 session completed."))
     #expect(text.contains("[stopped]"))
     #expect(text.contains("Child was stopped"))

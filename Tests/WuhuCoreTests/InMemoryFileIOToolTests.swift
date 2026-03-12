@@ -16,17 +16,15 @@ struct InMemoryFileIOToolTests {
   }
 
   private func tools() -> [String: AnyAgentTool] {
-    let resolver = AgentTools.testMountResolver(cwd: cwd)
-    return Dictionary(
+    Dictionary(
       uniqueKeysWithValues:
-      AgentTools.codingAgentTools(cwdProvider: { cwd }, mountResolver: resolver)
+      WuhuTools.codingAgentTools(cwdProvider: { cwd })
         .map { ($0.tool.name, $0) },
     )
   }
 
-  private func textOutput(_ result: ToolExecutionResult) throws -> String {
-    let agentResult = try result.unwrapImmediate()
-    return agentResult.content.compactMap { block in
+  private func textOutput(_ result: AgentToolResult) -> String {
+    result.content.compactMap { block in
       if case let .text(t) = block { return t.text }
       return nil
     }.joined(separator: "\n")
@@ -55,7 +53,7 @@ struct InMemoryFileIOToolTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "r2", args: .object(["path": .string("hello.txt")]))
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out == "Hello, world!\nLine 2\nLine 3")
     }
   }
@@ -70,7 +68,7 @@ struct InMemoryFileIOToolTests {
     } operation: {
       let t = try #require(tools()["read"])
       let result = try await t.execute(toolCallId: "r3", args: .object(["path": .string("large.txt")]))
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("Line 1"))
       #expect(out.contains("Line 2000"))
       #expect(!out.contains("Line 2001"))
@@ -91,7 +89,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "r4",
         args: .object(["path": .string("paginate.txt"), "offset": .number(41), "limit": .number(20)]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(!out.contains("Line 40\n"))
       #expect(out.contains("Line 41"))
       #expect(out.contains("Line 60"))
@@ -124,8 +122,7 @@ struct InMemoryFileIOToolTests {
       $0.fileIO = io
     } operation: {
       let t = try #require(tools()["read"])
-      let execResult = try await t.execute(toolCallId: "r6", args: .object(["path": .string("image.png")]))
-      let result = try execResult.unwrapImmediate()
+      let result = try await t.execute(toolCallId: "r6", args: .object(["path": .string("image.png")]))
       #expect(result.content.count == 1)
       guard case let .image(img) = result.content.first else {
         Issue.record("Expected image content block")
@@ -148,7 +145,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "w1",
         args: .object(["path": .string("nested/dir/file.txt"), "content": .string("hello")]),
       )
-      #expect(try textOutput(result).contains("Successfully wrote"))
+      #expect(textOutput(result).contains("Successfully wrote"))
       let stored = io.storedString(path: "\(cwd)/nested/dir/file.txt")
       #expect(stored == "hello")
     }
@@ -269,7 +266,7 @@ struct InMemoryFileIOToolTests {
     } operation: {
       let t = try #require(tools()["ls"])
       let result = try await t.execute(toolCallId: "l1", args: .object(["path": .string("empty")]))
-      #expect(try textOutput(result) == "(empty directory)")
+      #expect(textOutput(result) == "(empty directory)")
     }
   }
 
@@ -285,7 +282,7 @@ struct InMemoryFileIOToolTests {
     } operation: {
       let t = try #require(tools()["ls"])
       let result = try await t.execute(toolCallId: "l2", args: .object(["path": .string(".")]))
-      let out = try textOutput(result)
+      let out = textOutput(result)
       let lines = out.split(separator: "\n").map(String.init)
       #expect(lines.contains("apple.txt"))
       #expect(lines.contains("banana.txt"))
@@ -305,7 +302,7 @@ struct InMemoryFileIOToolTests {
     } operation: {
       let t = try #require(tools()["ls"])
       let result = try await t.execute(toolCallId: "l3", args: .object(["path": .string("."), "limit": .number(3)]))
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("entries limit reached"))
       let fileLines = out.split(separator: "\n").filter { !$0.hasPrefix("[") }
       #expect(fileLines.count == 3)
@@ -328,7 +325,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "f1",
         args: .object(["pattern": .string("**/*.swift"), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("src/main.swift"))
       #expect(out.contains("src/helper.swift"))
       #expect(!out.contains("README.md"))
@@ -349,7 +346,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "f2",
         args: .object(["pattern": .string("**/*.txt"), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("visible.txt"))
       #expect(!out.contains("ignored.txt"))
     }
@@ -369,7 +366,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g1",
         args: .object(["pattern": .string("let [a-z]"), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("let x"))
       #expect(out.contains("let y"))
       #expect(!out.contains("var z"))
@@ -388,7 +385,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g2",
         args: .object(["pattern": .string("foo*bar"), "literal": .bool(true), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("foo*bar"))
       let lines = out.split(separator: "\n").filter { $0.contains("data.txt:") }
       #expect(lines.count == 1)
@@ -407,7 +404,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g3",
         args: .object(["pattern": .string("hello"), "ignoreCase": .bool(true), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("Hello"))
       #expect(out.contains("hello"))
       #expect(out.contains("HELLO"))
@@ -427,7 +424,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g4",
         args: .object(["pattern": .string("ccc"), "context": .number(1), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("bbb"))
       #expect(out.contains("ccc"))
       #expect(out.contains("ddd"))
@@ -448,7 +445,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g5",
         args: .object(["pattern": .string("xyz"), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out == "No matches found")
     }
   }
@@ -466,7 +463,7 @@ struct InMemoryFileIOToolTests {
         toolCallId: "g6",
         args: .object(["pattern": .string("match"), "limit": .number(5), "path": .string(".")]),
       )
-      let out = try textOutput(result)
+      let out = textOutput(result)
       #expect(out.contains("matches limit reached"))
       let matchLines = out.split(separator: "\n").filter { $0.contains("many.txt:") }
       #expect(matchLines.count == 5)

@@ -185,13 +185,13 @@ struct ServiceIntegrationTests {
     //
     // Looking at AgentLoop.runUntilIdle: if infer() throws, the error propagates to
     // runUntilIdle, then to the for-await loop in start(), which catches non-cancellation
-    // errors and retries after 1 second (in SessionRuntime.ensureStarted).
+    // errors and retries after 1 second (in WuhuSessionRuntime.ensureStarted).
     //
     // So the session runtime will restart the loop after a brief pause.
     // We should wait and then enqueue again.
 
     // First attempt — will encounter an error.
-    // The agent loop will fail during inference and SessionRuntime
+    // The agent loop will fail during inference and WuhuSessionRuntime
     // will restart after a 1-second sleep.
     do {
       try await harness.enqueueAndWaitForIdle("try this", sessionID: session.id, timeout: 3)
@@ -242,7 +242,7 @@ struct ServiceCompactionTests {
     // We'll simulate a low context window by setting WUHU_COMPACTION_CONTEXT_WINDOW_TOKENS
     // to a small value via env override.
     //
-    // The compaction settings are loaded from env vars in CompactionSettings.load().
+    // The compaction settings are loaded from env vars in WuhuCompactionSettings.load().
     // We need the context to exceed (contextWindowTokens - reserveTokens).
     //
     // With contextWindow=2000 and reserve=500, threshold=1500 tokens.
@@ -272,7 +272,7 @@ struct ServiceCompactionTests {
     )
 
     // Override compaction settings to a very low threshold.
-    // Since CompactionSettings.load() reads from ProcessInfo.processInfo.environment,
+    // Since WuhuCompactionSettings.load() reads from ProcessInfo.processInfo.environment,
     // we need to set env vars. But that's global state... instead, let's just fire many turns
     // and rely on the default settings. With default context window of 128k, we'd need
     // way too many turns.
@@ -314,22 +314,22 @@ struct ServiceCompactionTests {
     let transcript = try await store.getEntries(sessionID: session.id)
 
     // Verify compaction engine says we should compact
-    let messages = PromptPreparation.extractContextMessages(from: transcript)
-    let estimate = CompactionEngine.estimateContextTokens(messages: messages)
+    let messages = WuhuPromptPreparation.extractContextMessages(from: transcript)
+    let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
 
     // With low settings, should compact
-    let settings = CompactionSettings(
+    let settings = WuhuCompactionSettings(
       enabled: true,
       reserveTokens: 500,
       keepRecentTokens: 2000,
       contextWindowTokens: 4000,
     )
 
-    let shouldCompact = CompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
+    let shouldCompact = WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: settings)
     #expect(shouldCompact, "Compaction should trigger with low context window threshold")
 
     // Verify preparation succeeds
-    let prep = CompactionEngine.prepareCompaction(transcript: transcript, settings: settings)
+    let prep = WuhuCompactionEngine.prepareCompaction(transcript: transcript, settings: settings)
     #expect(prep != nil, "Compaction preparation should produce a result")
 
     if let prep {
@@ -338,7 +338,7 @@ struct ServiceCompactionTests {
 
       // The summary messages should be shorter than the full history
       let summaryTokenEstimate = prep.messagesToSummarize.reduce(0) {
-        $0 + CompactionEngine.estimateTokens(message: $1)
+        $0 + WuhuCompactionEngine.estimateTokens(message: $1)
       }
       #expect(summaryTokenEstimate > 0)
     }
@@ -396,19 +396,19 @@ struct ServiceCompactionTests {
 
     // Verify compaction would trigger with low settings.
     let transcript = try await store.getEntries(sessionID: session.id)
-    let messages = PromptPreparation.extractContextMessages(from: transcript)
-    let estimate = CompactionEngine.estimateContextTokens(messages: messages)
+    let messages = WuhuPromptPreparation.extractContextMessages(from: transcript)
+    let estimate = WuhuCompactionEngine.estimateContextTokens(messages: messages)
 
-    let lowSettings = CompactionSettings(
+    let lowSettings = WuhuCompactionSettings(
       enabled: true,
       reserveTokens: 1000,
       keepRecentTokens: 2000,
       contextWindowTokens: 8000,
     )
-    #expect(CompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: lowSettings))
+    #expect(WuhuCompactionEngine.shouldCompact(contextTokens: estimate.tokens, settings: lowSettings))
 
     // Verify preparation produces a valid result.
-    let prep = CompactionEngine.prepareCompaction(transcript: transcript, settings: lowSettings)
+    let prep = WuhuCompactionEngine.prepareCompaction(transcript: transcript, settings: lowSettings)
     #expect(prep != nil, "prepareCompaction should succeed")
 
     if let prep {
@@ -432,7 +432,7 @@ struct ServiceCompactionTests {
         }
       }
 
-      let summary = try await CompactionEngine.generateSummary(
+      let summary = try await WuhuCompactionEngine.generateSummary(
         preparation: prep,
         model: model,
         settings: lowSettings,
@@ -459,7 +459,7 @@ struct ServiceCompactionTests {
       #expect(hasCompaction, "Compaction entry should be in transcript")
 
       // Verify context messages after compaction are shorter.
-      let messagesAfter = PromptPreparation.extractContextMessages(from: transcriptAfter)
+      let messagesAfter = WuhuPromptPreparation.extractContextMessages(from: transcriptAfter)
       #expect(
         messagesAfter.count < messages.count,
         "Post-compaction context (\(messagesAfter.count) messages) should be shorter than pre-compaction (\(messages.count) messages)",
@@ -574,28 +574,31 @@ struct InferenceRetryTests {
     #expect(response.stopEntry != nil)
   }
 
-  /// Non-transient errors (e.g., 401 auth errors) put inference into a
-  /// terminal `.failed` state. The loop stops trying until a new user
-  /// message arrives, which resets the error and allows a fresh attempt.
+  /// Non-transient errors (e.g., 401 auth errors) are not retried by the
+  /// inference retry loop — they propagate immediately. The outer runtime
+  /// restart loop may trigger a second attempt via `needsInference` recovery,
+  /// but there is no exponential backoff between attempts.
   @Test func nonTransientErrorNotRetried() async throws {
     let mock = MockStreamFn(responses: [
       .transientError(code: 401),
-      .text("recovered after new message"),
+      .text("recovered after restart"),
     ])
     let harness = try TestHarness(mockLLM: mock)
 
     let session = try await harness.createSession()
 
-    // First message: 401 error → inference enters .failed → session goes idle.
-    // No automatic retry — the loop stops scheduling inference.
+    // The 401 error propagates immediately without retries from
+    // performInferenceWithRetry. The outer WuhuSessionRuntime restarts
+    // the loop after 1 second, at which point needsInference detects
+    // the unanswered user message and triggers a fresh inference call.
     try await harness.enqueueAndWaitForIdle("hello", sessionID: session.id, timeout: 10)
-    #expect(mock.callCount == 1)
 
-    // A new user message resets the .failed state and allows retry.
-    try await harness.enqueueAndWaitForIdle("try again", sessionID: session.id, timeout: 10)
+    // Two calls: one failed (401), one succeeded (after runtime restart).
+    // Critically, there is NO exponential backoff between them — just the
+    // runtime's fixed 1-second restart delay.
     #expect(mock.callCount == 2)
 
     let texts = try await harness.assistantTexts(sessionID: session.id)
-    #expect(texts.contains("recovered after new message"))
+    #expect(texts.contains("recovered after restart"))
   }
 }

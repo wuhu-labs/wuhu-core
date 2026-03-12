@@ -18,21 +18,11 @@ actor InMemoryRunner: Runner {
   /// Bash commands and their scripted responses.
   private var bashResponses: [(pattern: String, result: BashResult)] = []
 
-  /// Callbacks target for push-based bash results.
-  var bashCallbacks: (any RunnerCallbacks)?
-
-  /// Active bash tags for idempotency checking.
-  private var activeBashTags: Set<String> = []
-
   init(id: RunnerID = .local) {
     self.id = id
   }
 
   // MARK: - Test helpers
-
-  func setCallbacks(_ callbacks: any RunnerCallbacks) async {
-    bashCallbacks = callbacks
-  }
 
   func seedFile(path: String, content: String) {
     files[path] = Data(content.utf8)
@@ -72,38 +62,12 @@ actor InMemoryRunner: Runner {
 
   // MARK: - Runner protocol
 
-  func startBash(tag: String, command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
-    // Idempotent: if already running for this tag, return existing
-    if activeBashTags.contains(tag) {
-      return BashStarted(tag: tag, alreadyRunning: true)
-    }
-    activeBashTags.insert(tag)
-
-    // Find matching stubbed response
-    var matchedResult = BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+  func runBash(command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
     for (pattern, result) in bashResponses {
-      if command.contains(pattern) {
-        matchedResult = result
-        break
-      }
+      if command.contains(pattern) { return result }
     }
-
-    // Deliver result via callbacks after a tiny delay
-    let result = matchedResult
-    let callbacks = bashCallbacks
-    Task {
-      try? await Task.sleep(nanoseconds: 1_000_000)
-      try? await callbacks?.bashFinished(tag: tag, result: result)
-    }
-
-    return BashStarted(tag: tag, alreadyRunning: false)
-  }
-
-  func cancelBash(tag: String) async throws -> BashCancelResult {
-    if activeBashTags.remove(tag) != nil {
-      return .cancelled
-    }
-    return .notFound
+    // Default: return empty success
+    return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
   }
 
   func readData(path: String) async throws -> Data {
@@ -355,24 +319,11 @@ struct LocalRunnerTests {
 
   @Test func localRunnerBashExecutesCommand() async throws {
     let runner = LocalRunner()
-    let coordinator = BashTagCoordinator()
-    await runner.setCallbacks(coordinator)
-
     let tmpDir = NSTemporaryDirectory() + "wuhu-runner-test-\(UUID().uuidString)"
     try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: tmpDir) }
 
-    let capture = LocalBashCapture()
-    await coordinator.setResultHandler { _, result in
-      await capture.set(result: result)
-    }
-
-    _ = try await runner.startBash(tag: "local-test-1", command: "echo hello", cwd: tmpDir, timeout: 5)
-
-    // Wait for callback
-    try await Task.sleep(for: .seconds(2))
-
-    let result = try #require(await capture.get())
+    let result = try await runner.runBash(command: "echo hello", cwd: tmpDir, timeout: 5)
     #expect(result.exitCode == 0)
     #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello")
     #expect(!result.timedOut)
@@ -442,20 +393,19 @@ struct LocalRunnerTests {
 // MARK: - RunnerServerHandler Tests
 
 struct RunnerServerHandlerTests {
-  @Test func handlerDispatchesStartBash() async throws {
+  @Test func handlerDispatchesBash() async throws {
     let mem = InMemoryRunner()
     await mem.stubBash(pattern: "echo test", result: BashResult(exitCode: 0, output: "test\n", timedOut: false, terminated: false))
     let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
-    let tag = "test-tag-1"
-    let (response, _) = await handler.handle(request: .startBash(id: "r1", StartBashRequest(tag: tag, command: "echo test", cwd: "/")))
-    guard case let .startBash(id, result) = response else {
-      Issue.record("Expected startBash response"); return
+    let (response, _) = await handler.handle(request: .bash(id: "r1", BashRequest(command: "echo test", cwd: "/", timeout: nil)))
+    guard case let .bash(id, result) = response else {
+      Issue.record("Expected bash response"); return
     }
     #expect(id == "r1")
     let r = try result.get()
-    #expect(r.tag == tag)
-    #expect(r.alreadyRunning == false)
+    #expect(r.output == "test\n")
+    #expect(r.exitCode == 0)
   }
 
   @Test func handlerDispatchesReadBinary() async throws {
@@ -574,12 +524,12 @@ struct RunnerServerHandlerTests {
     let mem = InMemoryRunner()
     let handler = RunnerServerHandler(runner: mem, name: "my-runner")
 
-    let (response, _) = await handler.handle(request: .hello(HelloRequest(serverName: "wuhu-server", version: muxRunnerProtocolVersion)))
+    let (response, _) = await handler.handle(request: .hello(HelloRequest(serverName: "wuhu-server", version: runnerProtocolVersion)))
     guard case let .hello(helloResp) = response else {
       Issue.record("Expected hello response"); return
     }
     #expect(helloResp.runnerName == "my-runner")
-    #expect(helloResp.version == muxRunnerProtocolVersion)
+    #expect(helloResp.version == runnerProtocolVersion)
   }
 
   @Test func handlerDispatchesFind() async throws {
@@ -674,9 +624,168 @@ struct RunnerServerHandlerTests {
   }
 }
 
-// MARK: - RunnerID Wire Encoding Tests
+// MARK: - Wire Protocol Serialization Tests
 
-struct RunnerIDWireEncodingTests {
+struct RunnerWireProtocolTests {
+  @Test func requestRoundTrip() throws {
+    let requests: [RunnerRequest] = [
+      .hello(HelloRequest(serverName: "test-server", version: 6)),
+      .bash(id: "b1", BashRequest(command: "echo hi", cwd: "/tmp", timeout: 30.0)),
+      .bash(id: "b2", BashRequest(command: "ls", cwd: "/")),
+      .read(id: "r1", ReadRequest(path: "/workspace/file.txt")),
+      .read(id: "r2", ReadRequest(path: "/workspace/file.bin", binary: true)),
+      .write(id: "w1", WriteRequest(path: "/workspace/out.txt", createDirs: true, content: "hello")),
+      .write(id: "w2", WriteRequest(path: "/workspace/out.bin", createDirs: false)),
+      .exists(id: "e1", ExistsRequest(path: "/workspace/test")),
+      .ls(id: "l1", LsRequest(path: "/workspace")),
+      .enumerate(id: "en1", EnumerateRequest(root: "/workspace")),
+      .mkdir(id: "m1", MkdirRequest(path: "/workspace/new", recursive: true)),
+      .find(id: "f1", FindParams(root: "/workspace", pattern: "*.swift", limit: 100)),
+      .grep(id: "g1", GrepParams(root: "/workspace", pattern: "TODO", glob: "*.swift", ignoreCase: true, literal: true, contextLines: 2, limit: 50)),
+      .materialize(id: "mat1", MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-1", startupScript: "setup.sh")),
+      .materialize(id: "mat2", MaterializeRequest(templatePath: "/templates/myapp", destinationPath: "/workspaces/sess-2")),
+    ]
+
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    for request in requests {
+      let data = try encoder.encode(request)
+      let decoded = try decoder.decode(RunnerRequest.self, from: data)
+      #expect(decoded == request)
+    }
+  }
+
+  @Test func requestEnvelopeFormat() throws {
+    // Verify the envelope structure has v, id, op, p keys
+    let request = RunnerRequest.bash(id: "test-123", BashRequest(command: "ls", cwd: "/tmp"))
+    let data = try JSONEncoder().encode(request)
+    let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["v"] as? Int == 6)
+    #expect(json["id"] as? String == "test-123")
+    #expect(json["op"] as? String == "bash")
+    #expect(json["p"] != nil)
+  }
+
+  @Test func responseRoundTrip() throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let decoder = JSONDecoder()
+
+    // Test success responses
+    let successResponses: [(RunnerResponse, String)] = [
+      (.hello(HelloResponse(runnerName: "test-runner", version: 6)), "hello"),
+      (.bash(id: "b1", .success(BashResult(exitCode: 0, output: "hello\n", timedOut: false, terminated: false, fullOutputPath: "/tmp/out.log"))), "bash"),
+      (.read(id: "r1", .success(ReadResponse(content: "hello world", size: 11))), "read"),
+      (.read(id: "r2", .success(ReadResponse(size: 1024))), "read-binary"),
+      (.write(id: "w1", .success(WriteResponse(bytesWritten: 5))), "write"),
+      (.exists(id: "e1", .success(ExistsResponse(existence: .file))), "exists-file"),
+      (.exists(id: "e2", .success(ExistsResponse(existence: .directory))), "exists-dir"),
+      (.exists(id: "e3", .success(ExistsResponse(existence: .notFound))), "exists-missing"),
+      (.ls(id: "l1", .success(LsResponse(entries: [DirectoryEntry(name: "a.txt", isDirectory: false), DirectoryEntry(name: "sub", isDirectory: true)]))), "ls"),
+      (.enumerate(id: "en1", .success(EnumerateResponse(entries: [EnumeratedEntry(relativePath: "a.txt", absolutePath: "/workspace/a.txt", isDirectory: false)]))), "enumerate"),
+      (.mkdir(id: "m1", .success(MkdirResponse())), "mkdir"),
+      (.find(id: "f1", .success(FindResult(entries: [FindEntry(relativePath: "main.swift")], totalBeforeLimit: 1))), "find"),
+      (.grep(id: "g1", .success(GrepResult(matches: [GrepMatch(file: "main.swift", lineNumber: 5, line: "// TODO: fix", isContext: false)], matchCount: 1, limitReached: false, linesTruncated: false))), "grep"),
+      (.materialize(id: "mat1", .success(MaterializeResponse(workspacePath: "/workspaces/sess-1"))), "materialize"),
+    ]
+
+    for (response, label) in successResponses {
+      let data = try encoder.encode(response)
+      let decoded = try decoder.decode(RunnerResponse.self, from: data)
+      let reEncoded = try encoder.encode(decoded)
+      #expect(data == reEncoded, "Round-trip failed for \(label)")
+    }
+
+    // Test error responses
+    let errorResponses: [(RunnerResponse, String)] = [
+      (.bash(id: "b2", .failure(RunnerWireError("command not found"))), "bash-err"),
+      (.read(id: "r3", .failure(RunnerWireError("File not found"))), "read-err"),
+      (.write(id: "w2", .failure(RunnerWireError("Permission denied"))), "write-err"),
+      (.find(id: "f2", .failure(RunnerWireError("Path not found"))), "find-err"),
+      (.grep(id: "g2", .failure(RunnerWireError("Path not found"))), "grep-err"),
+      (.materialize(id: "mat2", .failure(RunnerWireError("Template not found"))), "materialize-err"),
+    ]
+
+    for (response, label) in errorResponses {
+      let data = try encoder.encode(response)
+      let decoded = try decoder.decode(RunnerResponse.self, from: data)
+      let reEncoded = try encoder.encode(decoded)
+      #expect(data == reEncoded, "Round-trip failed for \(label)")
+    }
+  }
+
+  @Test func responseEnvelopeFormat() throws {
+    // Success: has "ok" key
+    let success = RunnerResponse.bash(id: "x", .success(BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)))
+    let sData = try JSONEncoder().encode(success)
+    let sJson = try #require(JSONSerialization.jsonObject(with: sData) as? [String: Any])
+    #expect(sJson["v"] as? Int == 6)
+    #expect(sJson["id"] as? String == "x")
+    #expect(sJson["op"] as? String == "bash")
+    #expect(sJson["ok"] != nil)
+    #expect(sJson["err"] == nil)
+
+    // Error: has "err" key
+    let error = RunnerResponse.bash(id: "y", .failure(RunnerWireError("oops")))
+    let eData = try JSONEncoder().encode(error)
+    let eJson = try #require(JSONSerialization.jsonObject(with: eData) as? [String: Any])
+    #expect(eJson["err"] as? String == "oops")
+    #expect(eJson["ok"] == nil)
+  }
+
+  @Test func binaryFrameRoundTrip() {
+    let id = "550e8400-e29b-41d4-a716-446655440000"
+    let payload = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) // PNG magic
+    let frame = RunnerBinaryFrame.encode(id: id, data: payload)
+
+    // 2 bytes length prefix + 36 bytes UUID string + 8 bytes payload
+    #expect(frame.count == 2 + id.utf8.count + 8)
+
+    guard let (decodedID, decodedPayload) = RunnerBinaryFrame.decode(frame) else {
+      Issue.record("Failed to decode binary frame")
+      return
+    }
+    #expect(decodedID == id)
+    #expect(decodedPayload == payload)
+  }
+
+  @Test func binaryFrameShortID() {
+    let id = "req-1"
+    let payload = Data([0xCA, 0xFE])
+    let frame = RunnerBinaryFrame.encode(id: id, data: payload)
+    #expect(frame.count == 2 + id.utf8.count + 2)
+
+    guard let (decodedID, decodedPayload) = RunnerBinaryFrame.decode(frame) else {
+      Issue.record("Failed to decode binary frame")
+      return
+    }
+    #expect(decodedID == id)
+    #expect(decodedPayload == payload)
+  }
+
+  @Test func binaryFrameEmptyPayload() {
+    let id = "test-empty"
+    let frame = RunnerBinaryFrame.encode(id: id, data: Data())
+    #expect(frame.count == 2 + id.utf8.count)
+
+    guard let (decodedID, decodedPayload) = RunnerBinaryFrame.decode(frame) else {
+      Issue.record("Failed to decode binary frame")
+      return
+    }
+    #expect(decodedID == id)
+    #expect(decodedPayload.isEmpty)
+  }
+
+  @Test func binaryFrameTooShort() {
+    // Only 1 byte — can't even read the length prefix
+    let result = RunnerBinaryFrame.decode(Data([0x01]))
+    #expect(result == nil)
+
+    // Length says 10 bytes but only 5 bytes of ID data
+    let result2 = RunnerBinaryFrame.decode(Data([0x00, 0x0A, 0x41, 0x42, 0x43, 0x44, 0x45]))
+    #expect(result2 == nil)
+  }
+
   @Test func runnerIDWireEncoding() throws {
     let encoder = JSONEncoder()
     let decoder = JSONDecoder()
@@ -693,17 +802,129 @@ struct RunnerIDWireEncodingTests {
   }
 }
 
+// MARK: - RunnerConnection Tests
+
+struct RunnerConnectionTests {
+  @Test func connectionCorrelatesResponses() async throws {
+    let connection = RunnerConnection(runnerName: "test")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+
+    let task = Task {
+      try await connection.request(
+        RunnerRequest.exists(id: "req1", ExistsRequest(path: "/test")),
+        requestID: "req1",
+      )
+    }
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+    await connection.handleResponse(.exists(id: "req1", .success(ExistsResponse(existence: .file))))
+
+    let (response, _) = try await task.value
+    guard case let .exists(_, result) = response else {
+      Issue.record("Expected exists response"); return
+    }
+    #expect(try result.get().existence == .file)
+  }
+
+  @Test func connectionCorrelatesBinaryResponse() async throws {
+    let connection = RunnerConnection(runnerName: "test")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+
+    let task = Task {
+      try await connection.request(
+        RunnerRequest.read(id: "req-bin", ReadRequest(path: "/test.bin", binary: true)),
+        requestID: "req-bin",
+      )
+    }
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    // Send binary frame first, then text response
+    let binaryPayload = Data([0xDE, 0xAD, 0xBE, 0xEF])
+    let frame = RunnerBinaryFrame.encode(id: "req-bin", data: binaryPayload)
+    await connection.handleBinaryFrame(frame)
+
+    // Then text response (no content — binary mode)
+    await connection.handleResponse(.read(id: "req-bin", .success(ReadResponse(size: 4))))
+
+    let (response, data) = try await task.value
+    guard case let .read(_, result) = response else {
+      Issue.record("Expected read response"); return
+    }
+    let r = try result.get()
+    #expect(r.size == 4)
+    #expect(r.content == nil)
+    #expect(data == binaryPayload)
+  }
+
+  @Test func connectionCorrelatesBinaryResponseTextFirst() async throws {
+    let connection = RunnerConnection(runnerName: "test")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+
+    let task = Task {
+      try await connection.request(
+        RunnerRequest.read(id: "req-bin2", ReadRequest(path: "/test.bin", binary: true)),
+        requestID: "req-bin2",
+      )
+    }
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    // Text response first, then binary frame
+    await connection.handleResponse(.read(id: "req-bin2", .success(ReadResponse(size: 3))))
+
+    let binaryPayload = Data([0x01, 0x02, 0x03])
+    let frame = RunnerBinaryFrame.encode(id: "req-bin2", data: binaryPayload)
+    await connection.handleBinaryFrame(frame)
+
+    let (_, data) = try await task.value
+    #expect(data == binaryPayload)
+  }
+
+  @Test func connectionCloseFailsPending() async throws {
+    let connection = RunnerConnection(runnerName: "test")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+
+    let task = Task {
+      try await connection.request(
+        RunnerRequest.exists(id: "req2", ExistsRequest(path: "/test")),
+        requestID: "req2",
+      )
+    }
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+    await connection.close()
+
+    do {
+      _ = try await task.value
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("disconnected"))
+    }
+  }
+
+  @Test func connectionRejectsAfterClose() async throws {
+    let connection = RunnerConnection(runnerName: "test")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+    await connection.close()
+
+    do {
+      _ = try await connection.request(
+        RunnerRequest.exists(id: "req3", ExistsRequest(path: "/test")),
+        requestID: "req3",
+      )
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("disconnected"))
+    }
+  }
+}
+
 // MARK: - RunnerRegistry Tests
 
 struct RunnerRegistryTests {
-  @Test func registryLocalNotPresentByDefault() async {
+  @Test func registryAlwaysHasLocal() async {
     let registry = RunnerRegistry()
-    let local = await registry.get(.local)
-    #expect(local == nil)
-  }
-
-  @Test func registryLocalAvailableWhenRegistered() async {
-    let registry = RunnerRegistry(runners: [LocalRunner()])
     let local = await registry.get(.local)
     #expect(local != nil)
     #expect(local?.id == .local)
@@ -730,12 +951,10 @@ struct RunnerRegistryTests {
     #expect(!stillAvailable)
   }
 
-  @Test func registryCanRemoveLocal() async {
-    let registry = RunnerRegistry(runners: [LocalRunner()])
-    #expect(await registry.isAvailable(.local))
+  @Test func registryCannotRemoveLocal() async {
+    let registry = RunnerRegistry()
     await registry.remove(.local)
-    let stillAvailable = await registry.isAvailable(.local)
-    #expect(!stillAvailable)
+    #expect(await registry.isAvailable(.local))
   }
 
   @Test func registryListNames() async {
@@ -746,32 +965,196 @@ struct RunnerRegistryTests {
     await registry.register(mem2)
 
     let names = await registry.listRunnerNames()
-    #expect(!names.contains("local")) // local not registered
+    #expect(names.contains("local"))
     #expect(names.contains("alpha"))
     #expect(names.contains("beta"))
   }
-
-  @Test func registryListNamesWithLocal() async {
-    let registry = RunnerRegistry(runners: [LocalRunner()])
-    let mem1 = InMemoryRunner(id: .remote(name: "alpha"))
-    await registry.register(mem1)
-
-    let names = await registry.listRunnerNames()
-    #expect(names.contains("local"))
-    #expect(names.contains("alpha"))
-  }
 }
 
-// MARK: - Test Helpers
+// MARK: - In-process integration: RunnerServerHandler + RunnerConnection + RemoteRunnerClient
 
-private actor LocalBashCapture {
-  var result: BashResult?
-
-  func set(result: BashResult) {
-    self.result = result
+struct RunnerIntegrationTests {
+  /// Create an in-process loopback: RemoteRunnerClient → RunnerConnection → RunnerServerHandler → Runner
+  /// The connection's send closures dispatch to the handler and feed responses back.
+  private static func makeLoopback(runner: InMemoryRunner, name: String) async -> (RemoteRunnerClient, RunnerConnection) {
+    let handler = RunnerServerHandler(runner: runner, name: name)
+    let connection = RunnerConnection(runnerName: name)
+    await connection.setSend(
+      text: { messageText in
+        let request = try JSONDecoder().decode(RunnerRequest.self, from: Data(messageText.utf8))
+        let (response, binaryData) = await handler.handle(request: request)
+        let responseData = try JSONEncoder().encode(response)
+        let decoded = try JSONDecoder().decode(RunnerResponse.self, from: responseData)
+        // If there's binary data, send it as a binary frame first
+        if let binaryData, let id = decoded.responseID {
+          let frame = RunnerBinaryFrame.encode(id: id, data: binaryData)
+          await connection.handleBinaryFrame(frame)
+        }
+        await connection.handleResponse(decoded)
+      },
+      binary: { data in
+        // Binary frame from client (e.g., binary write)
+        guard let (id, payload) = RunnerBinaryFrame.decode(data) else { return }
+        // We need to look up the pending write info — for the loopback test, we handle this inline
+        // In the real protocol, the runner server tracks pending binary writes
+        // For now, this path isn't tested in the loopback (text writes cover it)
+        _ = (id, payload)
+      },
+    )
+    let client = RemoteRunnerClient(name: name, connection: connection)
+    return (client, connection)
   }
 
-  func get() -> BashResult? {
-    result
+  @Test func inProcessRemoteRunnerRoundTrip() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    await memRunner.seedFile(path: "/workspace/hello.txt", content: "Hello from runner!")
+    await memRunner.seedDirectory(path: "/workspace")
+    await memRunner.stubBash(pattern: "echo works", result: BashResult(exitCode: 0, output: "works\n", timedOut: false, terminated: false))
+
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-remote")
+
+    // Test readString
+    let content = try await remote.readString(path: "/workspace/hello.txt", encoding: .utf8)
+    #expect(content == "Hello from runner!")
+
+    // Test exists
+    let fileExists = try await remote.exists(path: "/workspace/hello.txt")
+    #expect(fileExists == .file)
+    let dirExists = try await remote.exists(path: "/workspace")
+    #expect(dirExists == .directory)
+    let notFound = try await remote.exists(path: "/workspace/nope")
+    #expect(notFound == .notFound)
+
+    // Test writeString + readString
+    try await remote.writeString(path: "/workspace/new.txt", content: "created remotely", createIntermediateDirectories: false, encoding: .utf8)
+    let newContent = try await remote.readString(path: "/workspace/new.txt", encoding: .utf8)
+    #expect(newContent == "created remotely")
+
+    // Test listDirectory
+    let entries = try await remote.listDirectory(path: "/workspace")
+    let names = entries.map(\.name).sorted()
+    #expect(names.contains("hello.txt"))
+    #expect(names.contains("new.txt"))
+
+    // Test bash
+    let bashResult = try await remote.runBash(command: "echo works", cwd: "/workspace", timeout: nil)
+    #expect(bashResult.exitCode == 0)
+    #expect(bashResult.output == "works\n")
+
+    // Test createDirectory
+    try await remote.createDirectory(path: "/workspace/subdir/nested", withIntermediateDirectories: true)
+    let subdirExists = try await remote.exists(path: "/workspace/subdir/nested")
+    #expect(subdirExists == .directory)
+  }
+
+  @Test func inProcessBinaryReadRoundTrip() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    let binaryContent = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    await memRunner.seedFile(path: "/workspace/image.png", data: binaryContent)
+
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-binary")
+
+    let data = try await remote.readData(path: "/workspace/image.png")
+    #expect(data == binaryContent)
+  }
+
+  @Test func remoteRunnerReportsErrorsFromRunner() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-err")
+
+    do {
+      _ = try await remote.readString(path: "/nonexistent", encoding: .utf8)
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("not found") || String(describing: error).contains("File not found") || String(describing: error).contains("request failed"))
+    }
+  }
+
+  @Test func remoteRunnerDisconnectThrows() async throws {
+    let connection = RunnerConnection(runnerName: "dead-runner")
+    await connection.setSend(text: { _ in }, binary: { _ in })
+    await connection.close()
+    let remote = RemoteRunnerClient(name: "dead-runner", connection: connection)
+
+    do {
+      _ = try await remote.exists(path: "/test")
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("disconnected"))
+    }
+  }
+
+  @Test func inProcessRemoteMaterialize() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    await memRunner.seedDirectory(path: "/templates/myapp")
+    await memRunner.seedFile(path: "/templates/myapp/Package.swift", content: "// swift-tools-version: 5.9")
+    await memRunner.seedFile(path: "/templates/myapp/Sources/main.swift", content: "print(\"hello\")")
+    await memRunner.seedDirectory(path: "/templates/myapp/Sources")
+
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-materialize")
+
+    let result = try await remote.materialize(params: MaterializeRequest(
+      templatePath: "/templates/myapp",
+      destinationPath: "/workspaces/sess-42",
+    ))
+    #expect(result.workspacePath == "/workspaces/sess-42")
+
+    // Verify files exist on the runner via the remote client
+    let pkg = try await remote.readString(path: "/workspaces/sess-42/Package.swift", encoding: .utf8)
+    #expect(pkg == "// swift-tools-version: 5.9")
+
+    let main = try await remote.readString(path: "/workspaces/sess-42/Sources/main.swift", encoding: .utf8)
+    #expect(main == "print(\"hello\")")
+
+    let srcExists = try await remote.exists(path: "/workspaces/sess-42/Sources")
+    #expect(srcExists == .directory)
+  }
+
+  @Test func inProcessRemoteMaterializeErrorPropagates() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-materialize-err")
+
+    do {
+      _ = try await remote.materialize(params: MaterializeRequest(
+        templatePath: "/nonexistent",
+        destinationPath: "/workspaces/sess-99",
+      ))
+      Issue.record("Should have thrown")
+    } catch {
+      #expect(String(describing: error).contains("not found") || String(describing: error).contains("File not found"))
+    }
+  }
+
+  /// Verify large bash output (> 16KB) round-trips through the protocol.
+  ///
+  /// This reproduces a real-world failure where `cat` of a ~690-line Swift file
+  /// (22KB raw, ~26KB JSON-encoded) caused the WebSocket connection to drop.
+  /// The root cause was `maxFrameSize` defaulting to 16KB in the NIO WebSocket
+  /// decoder — any single frame exceeding that limit triggered a protocol error
+  /// and connection close.
+  @Test func inProcessLargeBashOutputRoundTrip() async throws {
+    let memRunner = InMemoryRunner(id: .local)
+
+    // Generate a ~25KB output string (similar to `cat` of a 690-line Swift file)
+    var lines: [String] = ["import Foundation", "import SwiftUI", ""]
+    for i in 1 ... 687 {
+      lines.append("  let property\(i): String = \"value\(i)\" // padding to simulate real code")
+    }
+    lines.append("")
+    let largeOutput = lines.joined(separator: "\n")
+
+    // Verify the output exceeds the old default maxFrameSize when JSON-encoded
+    let bashResult = BashResult(exitCode: 0, output: largeOutput, timedOut: false, terminated: false)
+    let response = RunnerResponse.bash(id: "size-check", .success(bashResult))
+    let jsonSize = try JSONEncoder().encode(response).count
+    #expect(jsonSize > (1 << 14), "Test output must exceed 16KB to exercise the bug (got \(jsonSize) bytes)")
+
+    await memRunner.stubBash(pattern: "cat bigfile", result: bashResult)
+    let (remote, _) = await Self.makeLoopback(runner: memRunner, name: "test-large-output")
+
+    let result = try await remote.runBash(command: "cat bigfile", cwd: "/", timeout: nil)
+    #expect(result.exitCode == 0)
+    #expect(result.output == largeOutput)
+    #expect(result.output.count == largeOutput.count)
   }
 }

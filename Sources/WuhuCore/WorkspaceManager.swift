@@ -1,6 +1,6 @@
 import Foundation
 
-public enum WorkspaceError: Error, Sendable, CustomStringConvertible {
+public enum WuhuWorkspaceError: Error, Sendable, CustomStringConvertible {
   case invalidPath(String)
   case templateNotFound(String)
   case templateNotDirectory(String)
@@ -26,7 +26,7 @@ public enum WorkspaceError: Error, Sendable, CustomStringConvertible {
   }
 }
 
-public enum WorkspaceManager {
+public enum WuhuWorkspaceManager {
   public static func defaultWorkspacesPath() -> String {
     URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
       .appendingPathComponent(".wuhu/workspaces")
@@ -55,15 +55,15 @@ public enum WorkspaceManager {
     let expandedWorkspaces = ToolPath.expand(workspacesPath)
 
     guard !expandedTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      throw WorkspaceError.invalidPath(templatePath)
+      throw WuhuWorkspaceError.invalidPath(templatePath)
     }
 
     var isDir: ObjCBool = false
     guard fm.fileExists(atPath: expandedTemplate, isDirectory: &isDir) else {
-      throw WorkspaceError.templateNotFound(expandedTemplate)
+      throw WuhuWorkspaceError.templateNotFound(expandedTemplate)
     }
     guard isDir.boolValue else {
-      throw WorkspaceError.templateNotDirectory(expandedTemplate)
+      throw WuhuWorkspaceError.templateNotDirectory(expandedTemplate)
     }
 
     try fm.createDirectory(atPath: expandedWorkspaces, withIntermediateDirectories: true)
@@ -72,7 +72,7 @@ public enum WorkspaceManager {
     do {
       try fm.copyItem(at: URL(fileURLWithPath: expandedTemplate), to: destURL)
     } catch {
-      throw WorkspaceError.failedToCopyTemplate(
+      throw WuhuWorkspaceError.failedToCopyTemplate(
         source: expandedTemplate,
         destination: destURL.path,
         underlying: String(describing: error),
@@ -86,7 +86,7 @@ public enum WorkspaceManager {
         return destURL.appendingPathComponent(expanded).path
       }()
       guard fm.fileExists(atPath: scriptPath) else {
-        throw WorkspaceError.startupScriptNotFound(scriptPath)
+        throw WuhuWorkspaceError.startupScriptNotFound(scriptPath)
       }
       try await runStartupScript(scriptPath: scriptPath, cwd: destURL.path)
     }
@@ -121,7 +121,7 @@ public enum WorkspaceManager {
 
       let outputURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("wuhu-startup-\(UUID().uuidString.lowercased()).log")
-      _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+      FileManager.default.createFile(atPath: outputURL.path, contents: nil)
       let outputHandle = try FileHandle(forWritingTo: outputURL)
       process.standardOutput = outputHandle
       process.standardError = outputHandle
@@ -133,7 +133,7 @@ public enum WorkspaceManager {
       let data = (try? Data(contentsOf: outputURL)) ?? Data()
       let output = String(decoding: data, as: UTF8.self)
       if process.terminationStatus != 0 {
-        throw WorkspaceError.startupScriptFailed(
+        throw WuhuWorkspaceError.startupScriptFailed(
           path: scriptPath,
           cwd: cwd,
           exitCode: process.terminationStatus,
@@ -143,7 +143,7 @@ public enum WorkspaceManager {
     }
   #else
     private static func runStartupScript(scriptPath: String, cwd: String) async throws {
-      throw WorkspaceError.startupScriptFailed(
+      throw WuhuWorkspaceError.startupScriptFailed(
         path: scriptPath,
         cwd: cwd,
         exitCode: -1,

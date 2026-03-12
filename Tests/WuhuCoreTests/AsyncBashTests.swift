@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 import Testing
@@ -21,7 +20,7 @@ struct AsyncBashTests {
 
   @Test func asyncBashAppendsCompletionMessageBeforeIdle() async throws {
     let store = try SQLiteSessionStore(path: ":memory:")
-    let registry = AsyncBashRegistry()
+    let registry = WuhuAsyncBashRegistry()
 
     let dir = try makeTempDir(prefix: "wuhu-async-bash")
     let sessionID = UUID().uuidString.lowercased()
@@ -35,46 +34,45 @@ struct AsyncBashTests {
     }
     let turns = TurnCounter()
 
-    let streamFn: StreamFn = { model, _, _ in
-      let turn = await turns.next()
-      if turn == 1 {
-        return AsyncThrowingStream { continuation in
-          let toolCall = ToolCall(
-            id: "t_async_1",
-            name: "async_bash",
-            arguments: .object(["command": .string("sleep 0.2 && echo 'done'")]),
-          )
-          let assistant = AssistantMessage(
-            provider: model.provider,
-            model: model.id,
-            content: [.toolCall(toolCall)],
-            stopReason: .toolUse,
-          )
-          continuation.yield(.done(message: assistant))
-          continuation.finish()
-        }
-      }
-
-      return AsyncThrowingStream { continuation in
-        Task {
-          try? await Task.sleep(nanoseconds: 1_000_000_000)
-          let assistant = AssistantMessage(
-            provider: model.provider,
-            model: model.id,
-            content: [.text("ok")],
-            stopReason: .stop,
-          )
-          continuation.yield(.done(message: assistant))
-          continuation.finish()
-        }
-      }
-    }
-
     let service = WuhuService(
       store: store,
+      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
       asyncBashRegistry: registry,
-      runnerRegistry: RunnerRegistry(runners: [LocalRunner()]),
-    ) { $0.streamFn = streamFn }
+      baseStreamFn: { model, _, _ in
+        let turn = await turns.next()
+        if turn == 1 {
+          return AsyncThrowingStream { continuation in
+            let toolCall = ToolCall(
+              id: "t_async_1",
+              name: "async_bash",
+              arguments: .object(["command": .string("sleep 0.2 && echo 'done'")]),
+            )
+            let assistant = AssistantMessage(
+              provider: model.provider,
+              model: model.id,
+              content: [.toolCall(toolCall)],
+              stopReason: .toolUse,
+            )
+            continuation.yield(.done(message: assistant))
+            continuation.finish()
+          }
+        }
+
+        return AsyncThrowingStream { continuation in
+          Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let assistant = AssistantMessage(
+              provider: model.provider,
+              model: model.id,
+              content: [.text("ok")],
+              stopReason: .stop,
+            )
+            continuation.yield(.done(message: assistant))
+            continuation.finish()
+          }
+        }
+      },
+    )
 
     let session = try await service.createSession(
       sessionID: sessionID,
@@ -150,7 +148,7 @@ struct AsyncBashTests {
   /// handler didn't fire. This tests that the subscription still delivers
   /// completions for fast-exiting commands via the reap fallback.
   @Test func reapWatchdogDeliversCompletionForFastExit() async throws {
-    let registry = AsyncBashRegistry()
+    let registry = WuhuAsyncBashRegistry()
     let dir = try makeTempDir(prefix: "wuhu-reap-watchdog")
 
     let stream = await registry.subscribeCompletions()
@@ -165,7 +163,7 @@ struct AsyncBashTests {
     )
 
     // Wait for the completion (should arrive via terminationHandler or watchdog)
-    var completion: AsyncBashCompletion?
+    var completion: WuhuAsyncBashCompletion?
     let deadline = Date().addingTimeInterval(10)
     for await c in stream {
       if c.id == started.id {

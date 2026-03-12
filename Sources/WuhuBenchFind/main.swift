@@ -156,7 +156,7 @@ private func printHelpAndExit() -> Never {
 
 private func runWuhuFind(options: Options) async throws -> [String] {
   let root = options.root
-  let tools = AgentTools.codingAgentTools(cwdProvider: { root }, mountResolver: AgentTools.testMountResolver(cwd: root))
+  let tools = WuhuTools.codingAgentTools(cwdProvider: { root })
   guard let tool = tools.first(where: { $0.tool.name == "find" }) else {
     throw PiAIError.unsupported("find tool not found")
   }
@@ -175,10 +175,7 @@ private func runWuhuFind(options: Options) async throws -> [String] {
   }
 
   let result = try await tool.execute(toolCallId: "bench_find", args: .object(args))
-  guard case let .immediate(agentResult) = result else {
-    fatalError("Expected immediate result from find tool")
-  }
-  let text = agentResult.content.compactMap { block -> String? in
+  let text = result.content.compactMap { block -> String? in
     if case let .text(part) = block { return part.text }
     return nil
   }.joined(separator: "\n")
