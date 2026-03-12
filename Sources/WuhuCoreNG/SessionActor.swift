@@ -4,13 +4,16 @@ import PiAI
 public struct SessionConfiguration: Sendable {
   public var model: Model
   public var systemPrompt: String
+  public var virtualFileSystem: VirtualFileSystem
 
   public init(
     model: Model = .init(id: "claude-opus-4-6", provider: .anthropic),
-    systemPrompt: String = "You are a helpful agent inside an agentic system that is under development. Your goal is to follow the user's instruction and do exactly as they say."
+    systemPrompt: String = "You are a helpful agent inside an agentic system that is under development. Your goal is to follow the user's instruction and do exactly as they say.",
+    virtualFileSystem: VirtualFileSystem = .seededPlayground
   ) {
     self.model = model
     self.systemPrompt = systemPrompt
+    self.virtualFileSystem = virtualFileSystem
   }
 }
 
@@ -25,15 +28,20 @@ public actor SessionActor {
   private var isDriving = false
   private var inferenceTask: Task<Void, Error>?
   private var canDrainFollowUp = false
+  private var joinWakeEvents: [JoinWakeEvent] = []
+  private var pendingJoinToolCallID: String?
+  private var activePersistentRuns: [String: ActivePersistentRun] = [:]
 
   public init(
     configuration: SessionConfiguration = .init(),
-    environment: SessionEnvironment = .current(),
-    tools: ToolRegistry = .init(exposedTools: [], executors: [:])
+    environment: SessionEnvironment = .current()
   ) {
     self.configuration = configuration
     self.environment = environment
-    self.tools = tools
+    self.tools = BuiltInTools.makeRegistry(
+      virtualFileSystem: configuration.virtualFileSystem,
+      sleepToolDriver: environment.sleepToolDriver
+    )
     self.state = AgentState()
   }
 
@@ -56,7 +64,9 @@ public actor SessionActor {
     switch lane {
     case .steer:
       enqueueSteerMessage(text, preserveThinking: preserveThinking)
+      signalJoinWakeIfNeeded(.steer(text))
       requestDrive()
+
     case .followUp:
       enqueueFollowUp(text, preserveThinking: preserveThinking)
     }
@@ -70,6 +80,7 @@ public actor SessionActor {
 
   public func enqueueNotification(_ text: String) {
     enqueue(queue: &state.notificationQueue, text: text)
+    signalJoinWakeIfNeeded(.notification(text))
     publish()
     requestDrive()
   }
@@ -78,13 +89,21 @@ public actor SessionActor {
     guard state.status != .paused else { return }
 
     state.status = .paused
+
     inferenceTask?.cancel()
     inferenceTask = nil
+
+    let runs = activePersistentRuns.values.map(\.session)
+    activePersistentRuns.removeAll()
     state.activeToolCalls.removeAll()
+
     commitDraftIfNeeded(as: .interrupted)
     appendSystemMessage(kind: .control, text: "User stopped execution.")
     canDrainFollowUp = false
-    publish()
+
+    for run in runs {
+      await run.interrupt()
+    }
   }
 
   public func resume() {
@@ -92,6 +111,10 @@ public actor SessionActor {
     state.status = .idle
     publish()
     requestDrive()
+  }
+
+  private var isBusy: Bool {
+    inferenceTask != nil || !activePersistentRuns.isEmpty || pendingJoinToolCallID != nil || isDriving
   }
 
   private func requestDrive() {
@@ -122,6 +145,12 @@ public actor SessionActor {
         continue
       }
 
+      if !activePersistentRuns.isEmpty || pendingJoinToolCallID != nil {
+        state.status = .waitingForTools
+        publish()
+        continue
+      }
+
       if drainSteerAndNotificationsIfNeeded() {
         shouldDriveAgain = true
         continue
@@ -148,7 +177,6 @@ public actor SessionActor {
         shouldDriveAgain = true
       } catch is CancellationError {
         state.assistantDraft = nil
-        state.activeToolCalls.removeAll()
         if state.status != .paused {
           state.status = .idle
           publish()
@@ -156,7 +184,6 @@ public actor SessionActor {
       } catch {
         inferenceTask = nil
         state.assistantDraft = nil
-        state.activeToolCalls.removeAll()
         state.lastError = error.localizedDescription
         state.status = .idle
         publish()
@@ -165,23 +192,12 @@ public actor SessionActor {
   }
 
   private var needsInference: Bool {
-    guard
-      let lastEntry = state.transcript.entries.last(where: { entry in
-        if case .semantic = entry {
-          return false
-        }
-        return true
-      })
-    else {
-      return false
-    }
+    guard let lastEntry = state.transcript.entries.last else { return false }
 
     switch lastEntry {
-      case .userMessage, .toolResult, .systemMessage:
+    case .userMessage, .toolResult, .systemMessage:
       return true
     case .assistantText, .toolCall:
-      return false
-    case .semantic:
       return false
     }
   }
@@ -204,11 +220,10 @@ public actor SessionActor {
     }
 
     inferenceTask = task
-    let now = environment.now()
     state.assistantDraft = .init(
       responseID: responseID,
-      startedAt: now,
-      updatedAt: now
+      startedAt: environment.now(),
+      updatedAt: environment.now()
     )
     publish()
 
@@ -275,7 +290,12 @@ public actor SessionActor {
   }
 
   private func executeToolCall(_ call: ToolCall, timestamp: Date) async throws {
-    guard let executor = tools.lookup(call.name) else {
+    if call.name == "join" {
+      try await startJoin(call, timestamp: timestamp)
+      return
+    }
+
+    guard let registered = tools.lookup(call.name) else {
       appendToolResult(
         toolCallID: call.id,
         toolName: call.name,
@@ -288,47 +308,113 @@ public actor SessionActor {
       return
     }
 
-    let isRuntimeTool: Bool
-    switch executor.lifecycle {
-    case .immediate:
-      isRuntimeTool = false
-    case let .runtime(kind):
-      isRuntimeTool = true
-      state.activeToolCalls.append(
-        .init(
-          id: call.id,
-          name: call.name,
-          kind: kind,
-          startedAt: timestamp,
-          updatedAt: timestamp
+    switch registered {
+    case let .nonPersistent(tool):
+      do {
+        let result = try await tool.execute(call)
+        appendToolResult(toolCallID: call.id, toolName: call.name, result: result)
+      } catch {
+        appendToolResult(
+          toolCallID: call.id,
+          toolName: call.name,
+          result: .init(content: [.text(error.localizedDescription)], isError: true)
         )
+      }
+      requestDrive()
+
+    case let .persistent(tool):
+      do {
+        let session = try await tool.start(call)
+        startPersistentRun(call: call, session: session, timestamp: timestamp)
+      } catch {
+        appendToolResult(
+          toolCallID: call.id,
+          toolName: call.name,
+          result: .init(content: [.text(error.localizedDescription)], isError: true)
+        )
+        requestDrive()
+      }
+    }
+  }
+
+  private func startPersistentRun(call: ToolCall, session: PersistentToolSession, timestamp: Date) {
+    state.activeToolCalls.append(
+      .init(
+        id: call.id,
+        name: call.name,
+        kind: .persistent,
+        startedAt: timestamp,
+        updatedAt: timestamp
       )
-      state.status = .waitingForTools
+    )
+    activePersistentRuns[call.id] = .init(name: call.name, session: session)
+    publish()
+
+    Task {
+      for await event in session.events {
+        await handlePersistentEvent(event, toolCallID: call.id, toolName: call.name)
+      }
+    }
+  }
+
+  private func handlePersistentEvent(_ event: PersistentToolEvent, toolCallID: String, toolName: String) async {
+    guard activePersistentRuns[toolCallID] != nil else { return }
+
+    switch event {
+    case let .progress(message):
+      updateToolRuntime(toolCallID: toolCallID, progressMessage: message)
       publish()
+
+    case let .completed(result):
+      activePersistentRuns.removeValue(forKey: toolCallID)
+      removeActiveToolCall(toolCallID)
+      appendToolResult(toolCallID: toolCallID, toolName: toolName, result: result)
+      signalJoinWakeIfNeeded(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
+      requestDrive()
+
+    case let .failed(message):
+      activePersistentRuns.removeValue(forKey: toolCallID)
+      removeActiveToolCall(toolCallID)
+      appendToolResult(
+        toolCallID: toolCallID,
+        toolName: toolName,
+        result: .init(content: [.text(message)], isError: true)
+      )
+      signalJoinWakeIfNeeded(.toolCompleted(toolName: toolName, toolCallID: toolCallID))
+      requestDrive()
+    }
+  }
+
+  private func startJoin(_ call: ToolCall, timestamp: Date) async throws {
+    if let wakeEvent = joinWakeEvents.first {
+      joinWakeEvents.removeFirst()
+      appendToolResult(toolCallID: call.id, toolName: call.name, result: wakeEvent.result)
+      requestDrive()
+      return
     }
 
-    do {
-      let outcome = try await executor.execute(call)
-      if isRuntimeTool {
-        removeActiveToolCall(call.id, publishAfterRemoval: false)
-      }
-      appendToolResult(toolCallID: call.id, toolName: call.name, result: outcome.result)
-      appendSemanticEntries(outcome.semanticEntries)
-      requestDrive()
-    } catch is CancellationError {
-      if isRuntimeTool {
-        removeActiveToolCall(call.id)
-      }
-      throw CancellationError()
-    } catch {
-      if isRuntimeTool {
-        removeActiveToolCall(call.id, publishAfterRemoval: false)
-      }
-      appendToolResult(
-        toolCallID: call.id,
-        toolName: call.name,
-        result: .init(content: [.text(error.localizedDescription)], isError: true)
+    pendingJoinToolCallID = call.id
+    state.activeToolCalls.append(
+      .init(
+        id: call.id,
+        name: call.name,
+        kind: .join,
+        startedAt: timestamp,
+        updatedAt: timestamp
       )
+    )
+    publish()
+  }
+
+  private func signalJoinWakeIfNeeded(_ wakeEvent: JoinWakeEvent) {
+    guard let joinToolCallID = pendingJoinToolCallID else { return }
+    joinWakeEvents.append(wakeEvent)
+    pendingJoinToolCallID = nil
+    removeActiveToolCall(joinToolCallID)
+
+    if let nextWakeEvent = joinWakeEvents.first {
+      joinWakeEvents.removeFirst()
+      appendToolResult(toolCallID: joinToolCallID, toolName: "join", result: nextWakeEvent.result)
       requestDrive()
     }
   }
@@ -404,6 +490,7 @@ public actor SessionActor {
         .init(id: environment.uuid(), kind: kind, text: text, timestamp: environment.now())
       )
     )
+    publish()
   }
 
   private func appendToolResult(toolCallID: String, toolName: String, result: ToolCallResult) {
@@ -423,21 +510,10 @@ public actor SessionActor {
     publish()
   }
 
-  private func appendSemanticEntries(_ entries: [AnySemanticEntry]) {
-    guard !entries.isEmpty else { return }
-    let now = environment.now()
-    for entry in entries {
-      state.transcript.append(
-        .semantic(
-          .init(
-            id: environment.uuid(),
-            entry: entry,
-            timestamp: now
-          )
-        )
-      )
-    }
-    publish()
+  private func updateToolRuntime(toolCallID: String, progressMessage: String) {
+    guard let index = state.activeToolCalls.firstIndex(where: { $0.id == toolCallID }) else { return }
+    state.activeToolCalls[index].progress.append(progressMessage)
+    state.activeToolCalls[index].updatedAt = environment.now()
   }
 
   private func updateAssistantDraft(responseID: UUID, text: String) {
@@ -461,11 +537,9 @@ public actor SessionActor {
     }.joined()
   }
 
-  private func removeActiveToolCall(_ toolCallID: String, publishAfterRemoval: Bool = true) {
+  private func removeActiveToolCall(_ toolCallID: String) {
     state.activeToolCalls.removeAll { $0.id == toolCallID }
-    if publishAfterRemoval {
-      publish()
-    }
+    publish()
   }
 
   private func commitDraftIfNeeded(as completion: AssistantCompletionState) {
@@ -515,5 +589,48 @@ public actor SessionActor {
 
   private func removeSubscriber(id: UUID) {
     subscriberContinuations.removeValue(forKey: id)
+  }
+}
+
+private struct ActivePersistentRun: Sendable {
+  var name: String
+  var session: PersistentToolSession
+}
+
+private enum JoinWakeEvent: Sendable, Hashable {
+  case steer(String)
+  case notification(String)
+  case toolCompleted(toolName: String, toolCallID: String)
+
+  var result: ToolCallResult {
+    switch self {
+    case let .steer(text):
+      return .init(
+        content: [.text("Woke because a steer message arrived.")],
+        details: .object([
+          "type": .string("steer"),
+          "text": .string(text),
+        ])
+      )
+
+    case let .notification(text):
+      return .init(
+        content: [.text("Woke because a notification arrived.")],
+        details: .object([
+          "type": .string("notification"),
+          "text": .string(text),
+        ])
+      )
+
+    case let .toolCompleted(toolName, toolCallID):
+      return .init(
+        content: [.text("Woke because \(toolName) finished.")],
+        details: .object([
+          "type": .string("toolCompleted"),
+          "toolName": .string(toolName),
+          "toolCallID": .string(toolCallID),
+        ])
+      )
+    }
   }
 }
