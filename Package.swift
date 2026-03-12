@@ -95,12 +95,14 @@ let package = Package(
       name: "WuhuSessionCoreTestingSupport",
       dependencies: [
         "WuhuSessionCore",
+        .product(name: "PiAI", package: "wuhu-ai"),
       ]
     ),
     .target(
       name: "WuhuLocalTools",
       dependencies: [
         "WuhuSessionCore",
+        .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "Subprocess", package: "swift-subprocess"),
       ]
     ),
