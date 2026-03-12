@@ -45,13 +45,25 @@ struct WuhuModelCatalogTests {
     #expect(spec?.defaultMaxTokens == 64000 / 3)
   }
 
-  @Test("Known OpenAI models have 400k input, 128k output, default max = 128k/3")
-  func openAISpecs() {
+  @Test("Known OpenAI 400k models have 400k input, 128k output, default max = 128k/3")
+  func openAI400kSpecs() {
     let models = ["gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5-codex", "gpt-5.1-codex", "gpt-5.2-codex"]
     for modelID in models {
       let spec = WuhuModelCatalog.specs[modelID]
       #expect(spec != nil, "Expected spec for \(modelID)")
       #expect(spec?.maxInputTokens == 400_000)
+      #expect(spec?.maxOutputTokens == 128_000)
+      #expect(spec?.defaultMaxTokens == 128_000 / 3)
+    }
+  }
+
+  @Test("GPT-5.4 models have 1M input, 128k output, default max = 128k/3")
+  func openAI1MSpecs() {
+    let models = ["gpt-5.4", "gpt-5.4-codex"]
+    for modelID in models {
+      let spec = WuhuModelCatalog.specs[modelID]
+      #expect(spec != nil, "Expected spec for \(modelID)")
+      #expect(spec?.maxInputTokens == 1_000_000)
       #expect(spec?.maxOutputTokens == 128_000)
       #expect(spec?.defaultMaxTokens == 128_000 / 3)
     }
@@ -117,7 +129,9 @@ struct WuhuModelCatalogTests {
     #expect(ids.contains("gpt-5.1-codex"))
     #expect(ids.contains("gpt-5.2"))
     #expect(ids.contains("gpt-5.2-codex"))
-    #expect(ids.count == 6)
+    #expect(ids.contains("gpt-5.4"))
+    #expect(ids.contains("gpt-5.4-codex"))
+    #expect(ids.count == 8)
   }
 
   // MARK: - Spec table coverage
