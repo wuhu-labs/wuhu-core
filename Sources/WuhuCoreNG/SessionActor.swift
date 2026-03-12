@@ -60,20 +60,20 @@ public actor SessionActor {
     }
   }
 
-  public func enqueueUserMessage(_ text: String, lane: UserMessageLane) {
+  public func enqueueUserMessage(_ text: String, lane: UserMessageLane, preserveThinking: Bool = false) {
     switch lane {
     case .steer:
-      enqueueSteerMessage(text)
+      enqueueSteerMessage(text, preserveThinking: preserveThinking)
       signalJoinWakeIfNeeded(.steer(text))
       requestDrive()
 
     case .followUp:
-      enqueueFollowUp(text)
+      enqueueFollowUp(text, preserveThinking: preserveThinking)
     }
   }
 
-  public func enqueueFollowUp(_ text: String) {
-    enqueue(queue: &state.followUpQueue, text: text)
+  public func enqueueFollowUp(_ text: String, preserveThinking: Bool = false) {
+    enqueue(queue: &state.followUpQueue, text: text, preserveThinking: preserveThinking)
     publish()
     requestDrive()
   }
@@ -89,9 +89,6 @@ public actor SessionActor {
     guard state.status != .paused else { return }
 
     state.status = .paused
-    state.assistantDraft = nil
-    appendSystemMessage(kind: .control, text: "User stopped execution.")
-    canDrainFollowUp = false
 
     inferenceTask?.cancel()
     inferenceTask = nil
@@ -99,7 +96,10 @@ public actor SessionActor {
     let runs = activePersistentRuns.values.map(\.session)
     activePersistentRuns.removeAll()
     state.activeToolCalls.removeAll()
-    publish()
+
+    commitDraftIfNeeded(as: .interrupted)
+    appendSystemMessage(kind: .control, text: "User stopped execution.")
+    canDrainFollowUp = false
 
     for run in runs {
       await run.interrupt()
@@ -257,15 +257,11 @@ public actor SessionActor {
       switch block {
       case let .text(text):
         guard !text.text.isEmpty else { continue }
-        state.transcript.append(
-          .assistantText(
-            .init(
-              id: environment.uuid(),
-              responseID: responseID,
-              text: text.text,
-              timestamp: assistantMessage.timestamp
-            )
-          )
+        appendAssistantText(
+          responseID: responseID,
+          text: text.text,
+          completion: .finished,
+          timestamp: assistantMessage.timestamp
         )
 
       case let .toolCall(call):
@@ -427,10 +423,11 @@ public actor SessionActor {
     guard !state.steerQueue.isEmpty || !state.notificationQueue.isEmpty else { return false }
 
     for message in state.steerQueue {
-      state.transcript.append(
-        .userMessage(
-          .init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)
-        )
+      appendUserMessage(
+        text: message.text,
+        lane: .steer,
+        preserveThinking: message.preserveThinking,
+        timestamp: message.timestamp
       )
     }
 
@@ -451,10 +448,11 @@ public actor SessionActor {
 
   private func drainFollowUp() {
     for message in state.followUpQueue {
-      state.transcript.append(
-        .userMessage(
-          .init(id: environment.uuid(), text: message.text, timestamp: message.timestamp)
-        )
+      appendUserMessage(
+        text: message.text,
+        lane: .followUp,
+        preserveThinking: message.preserveThinking,
+        timestamp: message.timestamp
       )
     }
     state.followUpQueue.removeAll()
@@ -462,9 +460,28 @@ public actor SessionActor {
     publish()
   }
 
-  private func enqueueSteerMessage(_ text: String) {
-    enqueue(queue: &state.steerQueue, text: text)
+  private func enqueueSteerMessage(_ text: String, preserveThinking: Bool = false) {
+    enqueue(queue: &state.steerQueue, text: text, preserveThinking: preserveThinking)
     publish()
+  }
+
+  private func appendUserMessage(
+    text: String,
+    lane: UserMessageLane,
+    preserveThinking: Bool,
+    timestamp: Date
+  ) {
+    state.transcript.append(
+      .userMessage(
+        .init(
+          id: environment.uuid(),
+          text: text,
+          lane: lane,
+          preserveThinking: preserveThinking,
+          timestamp: timestamp
+        )
+      )
+    )
   }
 
   private func appendSystemMessage(kind: SystemMessageKind, text: String) {
@@ -525,10 +542,42 @@ public actor SessionActor {
     publish()
   }
 
-  private func enqueue(queue: inout [QueuedMessage], text: String) {
+  private func commitDraftIfNeeded(as completion: AssistantCompletionState) {
+    guard let draft = state.assistantDraft else { return }
+    state.assistantDraft = nil
+    guard !draft.text.isEmpty else { return }
+
+    appendAssistantText(
+      responseID: draft.responseID,
+      text: draft.text,
+      completion: completion,
+      timestamp: draft.updatedAt
+    )
+  }
+
+  private func appendAssistantText(
+    responseID: UUID,
+    text: String,
+    completion: AssistantCompletionState,
+    timestamp: Date
+  ) {
+    state.transcript.append(
+      .assistantText(
+        .init(
+          id: environment.uuid(),
+          responseID: responseID,
+          text: text,
+          completion: completion,
+          timestamp: timestamp
+        )
+      )
+    )
+  }
+
+  private func enqueue(queue: inout [QueuedMessage], text: String, preserveThinking: Bool = false) {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
-    queue.append(.init(id: environment.uuid(), text: trimmed, timestamp: environment.now()))
+    queue.append(.init(id: environment.uuid(), text: trimmed, preserveThinking: preserveThinking, timestamp: environment.now()))
   }
 
   private func publish() {

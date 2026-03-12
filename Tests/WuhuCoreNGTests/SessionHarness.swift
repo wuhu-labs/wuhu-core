@@ -3,23 +3,43 @@ import Testing
 @testable import WuhuCoreNG
 
 struct ScriptedTurn: Sendable {
+  let id: UUID
   var blocks: [ContentBlock]
   var stopReason: StopReason
   var streamedTextDeltas: [String]
+  var holdBeforeDone: Bool
 
   init(
     blocks: [ContentBlock],
     stopReason: StopReason = .stop,
-    streamedTextDeltas: [String] = []
+    streamedTextDeltas: [String] = [],
+    holdBeforeDone: Bool = false
   ) {
+    self.id = UUID()
     self.blocks = blocks
     self.stopReason = stopReason
     self.streamedTextDeltas = streamedTextDeltas
+    self.holdBeforeDone = holdBeforeDone
+  }
+}
+
+actor InferenceHoldController {
+  private var continuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+  func holdStream(for id: UUID) -> AsyncStream<Void> {
+    AsyncStream { continuation in
+      continuations[id] = continuation
+    }
+  }
+
+  func release(_ id: UUID) {
+    continuations.removeValue(forKey: id)?.finish()
   }
 }
 
 actor ScriptedInference {
   private var turns: [ScriptedTurn]
+  private let holdController = InferenceHoldController()
   private(set) var requests: [InferenceRequest] = []
 
   init(turns: [ScriptedTurn]) {
@@ -67,9 +87,18 @@ actor ScriptedInference {
                 )
               )
             )
+            await Task.yield()
           }
         }
 
+        if turn.holdBeforeDone {
+          let holdStream = await self.holdController.holdStream(for: turn.id)
+          for await _ in holdStream {
+            break
+          }
+        }
+
+        await Task.yield()
         continuation.yield(
           .done(
             message: AssistantMessage(
@@ -84,6 +113,10 @@ actor ScriptedInference {
         continuation.finish()
       }
     }
+  }
+
+  func releaseTurn(id: UUID) async {
+    await holdController.release(id)
   }
 }
 
@@ -195,6 +228,7 @@ struct SessionHarness {
   let inference: ScriptedInference
   let sleep: ManualSleepDriver
   let tracker: StateTracker
+  let turns: [ScriptedTurn]
 
   init(
     turns: [ScriptedTurn],
@@ -224,6 +258,7 @@ struct SessionHarness {
     self.inference = inference
     self.sleep = sleep
     self.tracker = tracker
+    self.turns = turns
   }
 
   func enqueueSteer(_ text: String) async {
@@ -248,6 +283,10 @@ struct SessionHarness {
 
   func advanceSleep(toolCallID: String, by minutes: Int = 1) async {
     await sleep.advance(toolCallID: toolCallID, by: minutes)
+  }
+
+  func releaseTurn(_ turn: ScriptedTurn) async {
+    await inference.releaseTurn(id: turn.id)
   }
 
   func waitUntilIdle(minimumTranscriptEntries: Int = 1) async -> AgentState {
@@ -281,9 +320,9 @@ extension Transcript {
     entries.map { entry in
       switch entry {
       case let .userMessage(message):
-        return "user: \(message.text)"
+        return "user[\(message.lane.rawValue)]: \(message.text)"
       case let .assistantText(message):
-        return "assistant: \(message.text)"
+        return "assistant[\(message.completion.rawValue)]: \(message.text)"
       case let .toolCall(call):
         return "tool-call[\(call.toolCallID)]: \(call.toolName)"
       case let .toolResult(result):

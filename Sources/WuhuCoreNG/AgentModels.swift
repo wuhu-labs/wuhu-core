@@ -47,11 +47,13 @@ public enum UserMessageLane: String, Sendable, Hashable {
 public struct QueuedMessage: Identifiable, Sendable, Hashable {
   public var id: UUID
   public var text: String
+  public var preserveThinking: Bool
   public var timestamp: Date
 
-  public init(id: UUID, text: String, timestamp: Date) {
+  public init(id: UUID, text: String, preserveThinking: Bool = false, timestamp: Date) {
     self.id = id
     self.text = text
+    self.preserveThinking = preserveThinking
     self.timestamp = timestamp
   }
 }
@@ -208,25 +210,48 @@ public enum TranscriptEntry: Identifiable, Sendable, Hashable {
 public struct UserMessageEntry: Identifiable, Sendable, Hashable {
   public var id: UUID
   public var text: String
+  public var lane: UserMessageLane
+  public var preserveThinking: Bool
   public var timestamp: Date
 
-  public init(id: UUID, text: String, timestamp: Date) {
+  public init(
+    id: UUID,
+    text: String,
+    lane: UserMessageLane,
+    preserveThinking: Bool = false,
+    timestamp: Date
+  ) {
     self.id = id
     self.text = text
+    self.lane = lane
+    self.preserveThinking = preserveThinking
     self.timestamp = timestamp
   }
+}
+
+public enum AssistantCompletionState: String, Sendable, Hashable {
+  case finished
+  case interrupted
 }
 
 public struct AssistantTextEntry: Identifiable, Sendable, Hashable {
   public var id: UUID
   public var responseID: UUID
   public var text: String
+  public var completion: AssistantCompletionState
   public var timestamp: Date
 
-  public init(id: UUID, responseID: UUID, text: String, timestamp: Date) {
+  public init(
+    id: UUID,
+    responseID: UUID,
+    text: String,
+    completion: AssistantCompletionState = .finished,
+    timestamp: Date
+  ) {
     self.id = id
     self.responseID = responseID
     self.text = text
+    self.completion = completion
     self.timestamp = timestamp
   }
 }
