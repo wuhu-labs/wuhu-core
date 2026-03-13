@@ -59,18 +59,19 @@ public struct WuhuServer: Sendable {
 
     // Configure StreamFn dependency: if a log directory is configured, wrap the
     // shared HTTP transport with a LoggingHTTPTransport that writes raw
-    // request/response data to disk and logs to stderr via swift-log.
+    // request/response data to disk, and wrap the StreamFn with stderr logging.
     prepareDependencies {
+      let llmLogger = Logger(label: "WuhuLLM")
       if let logDirRaw = effectiveLogDir {
         let expanded = (logDirRaw as NSString).expandingTildeInPath
         let logDirURL = URL(fileURLWithPath: expanded, isDirectory: true)
-        let llmLogger = Logger(label: "WuhuLLM")
         let loggingTransport = LoggingHTTPTransport(
           underlying: sharedHTTPTransport,
           baseDir: logDirURL,
-          logger: llmLogger,
         )
-        $0.streamFn = makeStreamFn(http: loggingTransport)
+        $0.streamFn = loggingStreamFn(wrapping: makeStreamFn(http: loggingTransport), logger: llmLogger)
+      } else {
+        $0.streamFn = loggingStreamFn(wrapping: makeStreamFn(http: sharedHTTPTransport), logger: llmLogger)
       }
     }
 
