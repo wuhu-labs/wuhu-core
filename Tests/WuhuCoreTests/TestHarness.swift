@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -10,7 +11,7 @@ import WuhuAPI
 ///
 /// The harness wires together:
 /// - `SQLiteSessionStore` with `:memory:` database
-/// - `WuhuService` with a mock `StreamFn`
+/// - `WuhuService` with a mock `StreamFn` via `withDependencies`
 /// - `InMemoryFileIO` via swift-dependencies
 /// - `WuhuBlobStore` with a temp directory
 struct TestHarness {
@@ -29,16 +30,22 @@ struct TestHarness {
   ) throws {
     self.mockLLM = mockLLM
     self.fileIO = fileIO
-    store = try SQLiteSessionStore(path: ":memory:")
+    let store = try SQLiteSessionStore(path: ":memory:")
+    self.store = store
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-    blobStore = WuhuBlobStore(rootDirectory: blobDir)
+    let blobStore = WuhuBlobStore(rootDirectory: blobDir)
+    self.blobStore = blobStore
 
-    service = WuhuService(
-      store: store,
-      blobStore: blobStore,
-      workspaceRoot: workspaceRoot,
-      streamFn: mockLLM.streamFn,
-    )
+    let capturedStreamFn = mockLLM.streamFn
+    service = withDependencies {
+      $0.streamFn = capturedStreamFn
+    } operation: {
+      WuhuService(
+        store: store,
+        blobStore: blobStore,
+        workspaceRoot: workspaceRoot,
+      )
+    }
   }
 
   /// Init with a raw `StreamFn` instead of `MockStreamFn`.
@@ -49,25 +56,34 @@ struct TestHarness {
   ) throws {
     mockLLM = nil
     self.fileIO = fileIO
-    store = try SQLiteSessionStore(path: ":memory:")
+    let store = try SQLiteSessionStore(path: ":memory:")
+    self.store = store
     let blobDir = NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString.lowercased())"
-    blobStore = WuhuBlobStore(rootDirectory: blobDir)
+    let blobStore = WuhuBlobStore(rootDirectory: blobDir)
+    self.blobStore = blobStore
 
-    service = WuhuService(
-      store: store,
-      blobStore: blobStore,
-      workspaceRoot: workspaceRoot,
-      streamFn: streamFn,
-    )
+    service = withDependencies {
+      $0.streamFn = streamFn
+    } operation: {
+      WuhuService(
+        store: store,
+        blobStore: blobStore,
+        workspaceRoot: workspaceRoot,
+      )
+    }
   }
 
-  /// Create a new harness re-using the same store (simulates server restart).
+  /// Create a new service re-using the same store (simulates server restart).
   func newServiceSameStore(mockLLM newMock: MockStreamFn) -> WuhuService {
-    WuhuService(
-      store: store,
-      blobStore: blobStore,
-      streamFn: newMock.streamFn,
-    )
+    let capturedStreamFn = newMock.streamFn
+    return withDependencies {
+      $0.streamFn = capturedStreamFn
+    } operation: {
+      WuhuService(
+        store: store,
+        blobStore: blobStore,
+      )
+    }
   }
 
   // MARK: - Session creation

@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -67,6 +66,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   let store: SQLiteSessionStore
   let runtimeConfig: WuhuSessionRuntimeConfig
   let blobStore: WuhuBlobStore
+  let streamFn: StreamFn
 
   func loadState() async throws -> State {
     let parts = try await store.loadLoopStateParts(sessionID: sessionID)
@@ -217,10 +217,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
     let tools = await runtimeConfig.tools()
-    let streamFn = await runtimeConfig.streamFn() ?? {
-      @Dependency(\.streamFn) var defaultStreamFn
-      return defaultStreamFn
-    }()
 
     var effectiveSystemPrompt = context.systemPrompt ?? ""
     if let cwd = session.cwd {
@@ -395,10 +391,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     // Use resolved API model ID for the actual summarization call.
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-    let streamFn = await runtimeConfig.streamFn() ?? {
-      @Dependency(\.streamFn) var defaultStreamFn
-      return defaultStreamFn
-    }()
     var requestOptions = makeRequestOptions(model: apiModel, settings: state.settings, userModelID: session.model)
     requestOptions.sessionId = sessionID.rawValue
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)

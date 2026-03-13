@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -14,7 +15,7 @@ public actor WuhuService {
   private let subscriptionHub = WuhuSessionSubscriptionHub()
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
-  private let streamFnOverride: StreamFn?
+  @Dependency(\.streamFn) private var streamFn
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
@@ -26,7 +27,6 @@ public actor WuhuService {
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry? = nil,
-    streamFn: StreamFn? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
@@ -35,7 +35,6 @@ public actor WuhuService {
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
-    streamFnOverride = streamFn
     instanceID = UUID().uuidString.lowercased()
   }
 
@@ -80,6 +79,7 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
+      streamFn: streamFn,
       onIdle: nil,
     )
     runtimes[sessionID] = runtime
@@ -577,9 +577,6 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
 
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.setTools(resolvedTools)
-    if let streamFnOverride {
-      await runtime.setStreamFn(streamFnOverride)
-    }
     await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }

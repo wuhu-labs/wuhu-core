@@ -31,6 +31,7 @@ actor WuhuSessionRuntime {
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
+    streamFn: @escaping StreamFn,
     onIdle: (@Sendable (_ sessionID: String) async -> Void)? = nil,
   ) {
     self.sessionID = sessionID
@@ -39,7 +40,7 @@ actor WuhuSessionRuntime {
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
     runtimeConfig = WuhuSessionRuntimeConfig()
-    behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore)
+    behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore, streamFn: streamFn)
     loop = AgentLoop(behavior: behavior)
   }
 
@@ -78,10 +79,6 @@ actor WuhuSessionRuntime {
 
   func setTools(_ tools: [AnyAgentTool]) async {
     await runtimeConfig.setTools(tools)
-  }
-
-  func setStreamFn(_ streamFn: @escaping StreamFn) async {
-    await runtimeConfig.setStreamFn(streamFn)
   }
 
   func isIdle() -> Bool {

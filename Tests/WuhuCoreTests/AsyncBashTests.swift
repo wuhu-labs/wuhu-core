@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import Testing
@@ -69,12 +70,15 @@ struct AsyncBashTests {
       }
     }
 
-    let service = WuhuService(
-      store: store,
-      blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
-      asyncBashRegistry: registry,
-      streamFn: mockStreamFn,
-    )
+    let service = withDependencies {
+      $0.streamFn = mockStreamFn
+    } operation: {
+      WuhuService(
+        store: store,
+        blobStore: WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)"),
+        asyncBashRegistry: registry,
+      )
+    }
 
     let session = try await service.createSession(
       sessionID: sessionID,
