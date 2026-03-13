@@ -3,28 +3,32 @@ import PiAI
 import ServiceContextModule
 import Tracing
 
-/// An `HTTPClient` wrapper that creates an `http.request` child span and
-/// captures raw HTTP request/response payloads to an ``LLMPayloadStore``.
+/// An `HTTPClient` wrapper that logs raw HTTP requests and responses to disk,
+/// and creates an `http.request` tracing span for each call.
 ///
-/// For each SSE call:
-/// - Creates an `http.request` child span with URL, method, status, headers
-/// - Writes request/response payloads to the store keyed by
-///   `{datePath}/{callID}.request` and `{datePath}/{callID}.response`
+/// For each request, creates a directory at:
+///   `<baseDir>/<year>/<month>/<day>/<hour>/<requestID>/`
+/// containing `request.txt` (headers + body) and `response.txt` (headers + body or SSE events).
 ///
-/// File paths are derived from ``ServiceContext/llmCallID`` and
-/// ``ServiceContext/llmCallDatePath`` set by ``tracedStreamFn``.
+/// The span records:
+/// - `http.method`, `http.url`, `http.status_code` — request/response metadata
+/// - `http.request.header.*`, `http.response.header.*` — non-sensitive headers
+/// - `http.payload.request_path`, `http.payload.response_path` — relative paths to payload files
 ///
-/// Sensitive headers (`authorization`, `x-api-key`) are stripped from span
-/// attributes and payload files.
+/// If a `llmCallID` is present in the current `ServiceContext` (set by
+/// ``tracedStreamFn``), it is used as the request directory name instead of
+/// a fresh UUID, so the `llm.call` span and payload directory share the same ID.
+///
+/// Sensitive headers (`authorization`, `x-api-key`) are redacted.
 public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   private let underlying: any PiAI.HTTPClient
-  private let payloadStore: (any LLMPayloadStore)?
+  private let baseDir: URL?
 
   private static let sensitiveHeaders: Set<String> = ["authorization", "x-api-key"]
 
-  public init(underlying: any PiAI.HTTPClient, payloadStore: (any LLMPayloadStore)? = nil) {
+  public init(underlying: any PiAI.HTTPClient, baseDir: URL? = nil) {
     self.underlying = underlying
-    self.payloadStore = payloadStore
+    self.baseDir = baseDir
   }
 
   // MARK: - HTTPClient conformance
@@ -35,24 +39,22 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   }
 
   public func sse(for request: HTTPRequest) async throws -> SSEResponse {
-    let ctx = ServiceContext.current
-    let callID = ctx?.llmCallID
-    let datePath = ctx?.llmCallDatePath
+    let requestID = ServiceContext.current?.llmCallID ?? UUID().uuidString.lowercased()
+    let now = Date()
+    let dir = baseDir.map { directoryURL(base: $0, for: requestID, at: now) }
+    let relativeDir = dir.flatMap { relativePath(of: $0) }
 
-    // Start HTTP span manually — we end it when the SSE stream completes.
+    // Start HTTP span — we end it when the SSE stream completes.
     let span = startSpan("http.request", ofKind: .client)
     span.attributes["http.method"] = request.method
     span.attributes["http.url"] = request.url.absoluteString
     setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
 
-    // Write request payload immediately (before the stream starts).
-    if let callID, let datePath, let store = payloadStore {
-      let requestPath = "\(datePath)/\(callID).request"
-      let requestData = serializeRequest(request)
-      do {
-        try await store.write(path: requestPath, data: requestData)
-      } catch {
-        // Best-effort: payload capture must never break the LLM call.
+    // Write request payload.
+    if let dir {
+      writeRequest(request, to: dir)
+      if let relativeDir {
+        span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
       }
     }
 
@@ -70,55 +72,41 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
     span.attributes["http.status_code"] = sseResponse.response.statusCode
     setHeaderAttributes(sseResponse.response.headers, prefix: "http.response.header", on: span)
 
-    let responsePath = (callID != nil && datePath != nil) ? "\(datePath!)/\(callID!).response" : nil
-    let store = payloadStore
-
-    // Build a metadata header for the response file.
-    let metaHeader: Data = {
-      var header = Data()
-      header.append(Data("HTTP \(sseResponse.response.statusCode)\n".utf8))
-      for (name, values) in sseResponse.response.headers.sorted(by: { $0.key < $1.key }) {
-        guard !Self.sensitiveHeaders.contains(name.lowercased()) else { continue }
-        for value in values {
-          header.append(Data("\(name): \(value)\n".utf8))
-        }
-      }
-      header.append(Data("\n".utf8))
-      return header
-    }()
+    let statusCode = sseResponse.response.statusCode
+    let responseHeaders = sseResponse.response.headers
 
     let wrappedEvents = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-      let task = Task {
-        var buffer = metaHeader
-        buffer.reserveCapacity(metaHeader.count + 8 * 1024)
+      let task = Task { [weak self] in
+        var captured: [SSEMessage] = []
         do {
           for try await event in sseResponse.events {
-            if let eventType = event.event {
-              buffer.append(Data("event: \(eventType)\n".utf8))
-            }
-            buffer.append(Data("data: \(event.data)\n\n".utf8))
+            captured.append(event)
             continuation.yield(event)
           }
 
-          // Stream completed — write response payload.
-          if let responsePath, let store {
-            do {
-              try await store.write(path: responsePath, data: buffer)
-            } catch {
-              // Best-effort.
+          if let dir {
+            self?.writeSSEResponse(
+              response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
+              events: captured,
+              to: dir,
+            )
+            if let relativeDir {
+              span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
             }
           }
 
           continuation.finish()
           span.end()
         } catch {
-          // Stream failed — still write what we captured.
-          buffer.append(Data("\n--- ERROR ---\n\(error)\n".utf8))
-          if let responsePath, let store {
-            do {
-              try await store.write(path: responsePath, data: buffer)
-            } catch {
-              // Best-effort.
+          if let dir {
+            self?.writeSSEResponse(
+              response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
+              events: captured,
+              to: dir,
+              error: error,
+            )
+            if let relativeDir {
+              span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
             }
           }
 
@@ -142,38 +130,154 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
     return SSEResponse(response: sseResponse.response, events: wrappedEvents)
   }
 
-  // MARK: - Private
+  // MARK: - Directory layout
 
-  /// Serialize an HTTP request into the payload format:
-  /// method + URL, non-secret headers, blank line, pretty-printed JSON body.
-  private func serializeRequest(_ request: HTTPRequest) -> Data {
-    var data = Data()
-    data.append(Data("\(request.method) \(request.url.absoluteString)\n".utf8))
+  /// `<baseDir>/<year>/<month>/<day>/<hour>/<requestID>/`
+  private func directoryURL(base: URL, for requestID: String, at date: Date) -> URL {
+    let cal = Calendar(identifier: .gregorian)
+    let comps = cal.dateComponents(in: TimeZone(identifier: "UTC")!, from: date)
+    let year = String(format: "%04d", comps.year ?? 0)
+    let month = String(format: "%02d", comps.month ?? 0)
+    let day = String(format: "%02d", comps.day ?? 0)
+    let hour = String(format: "%02d", comps.hour ?? 0)
 
-    let sortedHeaders = request.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
-    for (name, values) in sortedHeaders {
-      if Self.sensitiveHeaders.contains(name.lowercased()) {
-        data.append(Data("\(name): [REDACTED]\n".utf8))
-      } else {
-        for value in values {
-          data.append(Data("\(name): \(value)\n".utf8))
+    return base
+      .appendingPathComponent(year)
+      .appendingPathComponent(month)
+      .appendingPathComponent(day)
+      .appendingPathComponent(hour)
+      .appendingPathComponent(requestID)
+  }
+
+  /// Relative path from `baseDir` to the given directory URL.
+  private func relativePath(of dir: URL) -> String? {
+    guard let baseDir else { return nil }
+    let basePath = baseDir.standardizedFileURL.path
+    let dirPath = dir.standardizedFileURL.path
+    guard dirPath.hasPrefix(basePath) else { return nil }
+    var relative = String(dirPath.dropFirst(basePath.count))
+    if relative.hasPrefix("/") { relative = String(relative.dropFirst()) }
+    if relative.hasSuffix("/") { relative = String(relative.dropLast()) }
+    return relative
+  }
+
+  // MARK: - Request logging
+
+  private func writeRequest(_ request: HTTPRequest, to dir: URL) {
+    do {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+      var lines: [String] = []
+      lines.append("\(request.method) \(request.url.absoluteString)")
+      lines.append("")
+
+      let sortedHeaders = request.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
+      for (name, values) in sortedHeaders {
+        if Self.sensitiveHeaders.contains(name.lowercased()) {
+          lines.append("\(name): [REDACTED]")
+        } else {
+          for value in values {
+            lines.append("\(name): \(value)")
+          }
         }
       }
+
+      lines.append("")
+
+      if let body = request.body {
+        if let json = try? JSONSerialization.jsonObject(with: body),
+           let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        {
+          lines.append(String(decoding: pretty, as: UTF8.self))
+        } else {
+          lines.append(String(decoding: body, as: UTF8.self))
+        }
+      }
+
+      let content = lines.joined(separator: "\n")
+      try content.write(to: dir.appendingPathComponent("request.txt"), atomically: true, encoding: .utf8)
+    } catch {
+      // Best-effort: logging must never crash the server.
     }
+  }
 
-    data.append(Data("\n".utf8))
+  // MARK: - Response logging (non-SSE)
 
-    if let body = request.body {
+  private func writeDataResponse(response: HTTPResponse, body: Data, to dir: URL) {
+    do {
+      var lines: [String] = []
+      lines.append("HTTP \(response.statusCode)")
+      lines.append("")
+
+      let sortedHeaders = response.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
+      for (name, values) in sortedHeaders {
+        for value in values {
+          lines.append("\(name): \(value)")
+        }
+      }
+
+      lines.append("")
+
       if let json = try? JSONSerialization.jsonObject(with: body),
          let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
       {
-        data.append(pretty)
+        lines.append(String(decoding: pretty, as: UTF8.self))
       } else {
-        data.append(body)
+        lines.append(String(decoding: body, as: UTF8.self))
       }
-    }
 
-    return data
+      let content = lines.joined(separator: "\n")
+      try content.write(to: dir.appendingPathComponent("response.txt"), atomically: true, encoding: .utf8)
+    } catch {
+      // Best-effort
+    }
+  }
+
+  // MARK: - Response logging (SSE)
+
+  private func writeSSEResponse(
+    response: HTTPResponse,
+    events: [SSEMessage],
+    to dir: URL,
+    error: (any Error)? = nil,
+  ) {
+    do {
+      var lines: [String] = []
+      lines.append("HTTP \(response.statusCode)")
+      lines.append("")
+
+      let sortedHeaders = response.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
+      for (name, values) in sortedHeaders {
+        for value in values {
+          lines.append("\(name): \(value)")
+        }
+      }
+
+      lines.append("")
+      lines.append("--- SSE Events (\(events.count)) ---")
+      lines.append("")
+
+      for (i, event) in events.enumerated() {
+        if let eventType = event.event {
+          lines.append("event: \(eventType)")
+        }
+        lines.append("data: \(event.data)")
+        if i < events.count - 1 {
+          lines.append("")
+        }
+      }
+
+      if let error {
+        lines.append("")
+        lines.append("--- Error ---")
+        lines.append("\(error)")
+      }
+
+      let content = lines.joined(separator: "\n")
+      try content.write(to: dir.appendingPathComponent("response.txt"), atomically: true, encoding: .utf8)
+    } catch {
+      // Best-effort
+    }
   }
 
   /// Set non-secret headers as span attributes.

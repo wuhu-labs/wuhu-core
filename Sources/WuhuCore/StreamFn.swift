@@ -38,22 +38,16 @@ public func makeStreamFn(http: any PiAI.HTTPClient) -> StreamFn {
 /// - `llm.duration_ms` — wall-clock duration
 /// - `llm.usage.input_tokens`, `llm.usage.output_tokens` — token usage
 /// - `llm.stop_reason` — how the model stopped
-/// - `llm.payload.request_path`, `llm.payload.response_path` — relative paths to raw payloads
 ///
-/// Also sets `ServiceContext.llmCallID` and `ServiceContext.llmCallDatePath`
-/// so the HTTP transport layer (``LoggingHTTPTransport``) can coordinate
-/// payload file naming and create a child span.
+/// Sets `ServiceContext.llmCallID` so the HTTP transport layer
+/// (``LoggingHTTPTransport``) can reuse the same ID for payload directories
+/// and create a correlated child span.
 public func tracedStreamFn(wrapping inner: @escaping StreamFn) -> StreamFn {
   { model, context, options in
     let callID = UUID().uuidString.lowercased()
-    let now = Date()
-    let cal = Calendar(identifier: .gregorian)
-    let c = cal.dateComponents(in: TimeZone(secondsFromGMT: 0)!, from: now)
-    let datePath = String(format: "%04d/%02d/%02d", c.year!, c.month!, c.day!)
 
     var ctx = ServiceContext.current ?? .topLevel
     ctx.llmCallID = callID
-    ctx.llmCallDatePath = datePath
 
     // Start span manually — we end it when the stream completes, not when
     // this function returns, because the stream outlives the function scope.
@@ -66,8 +60,6 @@ public func tracedStreamFn(wrapping inner: @escaping StreamFn) -> StreamFn {
     if let sessionID = options.sessionId {
       span.attributes["llm.session_id"] = sessionID
     }
-    span.attributes["llm.payload.request_path"] = "\(datePath)/\(callID).request"
-    span.attributes["llm.payload.response_path"] = "\(datePath)/\(callID).response"
 
     let startedAt = Date()
 

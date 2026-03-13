@@ -86,13 +86,13 @@ public struct WuhuServer: Sendable {
     // request/response payloads to disk. The StreamFn is wrapped with a traced
     // span that records model, usage, and duration.
     prepareDependencies {
-      let payloadStore: (any LLMPayloadStore)? = effectiveLogDir.map { logDirRaw in
+      let logDirURL: URL? = effectiveLogDir.map { logDirRaw in
         let expanded = (logDirRaw as NSString).expandingTildeInPath
-        return LocalLLMPayloadStore(rootDirectory: expanded)
+        return URL(fileURLWithPath: expanded, isDirectory: true)
       }
       let loggingTransport = LoggingHTTPTransport(
         underlying: sharedHTTPTransport,
-        payloadStore: payloadStore,
+        baseDir: logDirURL,
       )
       $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(http: loggingTransport))
     }
