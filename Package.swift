@@ -1,17 +1,6 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-let strictConcurrency: [SwiftSetting] = [
-  .unsafeFlags([
-    "-Xfrontend",
-    "-strict-concurrency=complete",
-    "-Xfrontend",
-    "-warn-concurrency",
-  ]),
-]
-
-let grdbDependency: Package.Dependency = .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0")
-
 let package = Package(
   name: "wuhu-core",
   platforms: [
@@ -34,7 +23,6 @@ let package = Package(
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-    .package(url: "https://github.com/swiftlang/swift-testing.git", revision: "48a471ab313e858258ab0b9b0bf2cea55a50cefb"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/swift-websocket.git", from: "1.0.0"),
@@ -42,7 +30,9 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
-    grdbDependency,
+    .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
+    .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
+    .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
   ],
   targets: [
     .target(
@@ -50,7 +40,6 @@ let package = Package(
       dependencies: [
         .product(name: "PiAI", package: "wuhu-ai"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuCLIKit",
@@ -59,7 +48,6 @@ let package = Package(
         "WuhuAPI",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuCoreClient",
@@ -68,7 +56,6 @@ let package = Package(
         .product(name: "PiAI", package: "wuhu-ai"),
         .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuCore",
@@ -83,8 +70,8 @@ let package = Package(
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
+        .product(name: "Tracing", package: "swift-distributed-tracing"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuClient",
@@ -93,7 +80,6 @@ let package = Package(
         "WuhuCoreClient",
         .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuServer",
@@ -108,10 +94,10 @@ let package = Package(
         .product(name: "WSClient", package: "swift-websocket"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "OTel", package: "swift-otel"),
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
         .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .target(
       name: "WuhuRunner",
@@ -123,7 +109,6 @@ let package = Package(
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "Yams", package: "Yams"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .executableTarget(
       name: "wuhu",
@@ -135,7 +120,6 @@ let package = Package(
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .executableTarget(
       name: "WuhuBenchFind",
@@ -143,7 +127,6 @@ let package = Package(
         "WuhuCore",
         .product(name: "PiAI", package: "wuhu-ai"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .testTarget(
       name: "WuhuCoreTests",
@@ -155,42 +138,32 @@ let package = Package(
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "WSClient", package: "swift-websocket"),
-        .product(name: "Testing", package: "swift-testing"),
         .product(name: "Dependencies", package: "swift-dependencies"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .testTarget(
       name: "WuhuClientTests",
       dependencies: [
         "WuhuClient",
-        .product(name: "Testing", package: "swift-testing"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .testTarget(
       name: "WuhuServerTests",
       dependencies: [
         "WuhuServer",
-        .product(name: "Testing", package: "swift-testing"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .testTarget(
       name: "WuhuCLITests",
       dependencies: [
         "wuhu",
-        .product(name: "Testing", package: "swift-testing"),
       ],
-      swiftSettings: strictConcurrency,
     ),
     .testTarget(
       name: "WuhuAPITests",
       dependencies: [
         "WuhuAPI",
-        .product(name: "Testing", package: "swift-testing"),
       ],
-      swiftSettings: strictConcurrency,
     ),
   ],
 )

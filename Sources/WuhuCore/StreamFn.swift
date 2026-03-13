@@ -1,8 +1,9 @@
 import Dependencies
 import Foundation
-import Logging
 import PiAI
 import PiAIAsyncHTTPClient
+import ServiceContextModule
+import Tracing
 
 public typealias StreamFn = @Sendable (Model, Context, RequestOptions) async throws
   -> AsyncThrowingStream<AssistantMessageEvent, any Error>
@@ -27,94 +28,97 @@ public func makeStreamFn(http: any PiAI.HTTPClient) -> StreamFn {
   }
 }
 
-// MARK: - Logging wrapper
+// MARK: - Traced wrapper
 
-/// Wraps a `StreamFn` to log LLM request start/end events to stderr via swift-log.
+/// Wraps a `StreamFn` with a distributed tracing span (`llm.call`).
 ///
-/// Logs at `.info` level:
-/// - **Start**: requestID, sessionID, model, startTime
-/// - **End**: requestID, sessionID, endTime, usage (input/output/total tokens)
-public func loggingStreamFn(wrapping inner: @escaping StreamFn, logger: Logger) -> StreamFn {
+/// Creates a span for each LLM call with structured attributes:
+/// - `llm.provider`, `llm.model` — provider and model identifiers
+/// - `llm.request.message_count`, `llm.request.tool_count` — request shape
+/// - `llm.duration_ms` — wall-clock duration
+/// - `llm.usage.input_tokens`, `llm.usage.output_tokens` — token usage
+/// - `llm.stop_reason` — how the model stopped
+///
+/// Sets `ServiceContext.llmCallID` so the HTTP transport layer
+/// (``LoggingHTTPTransport``) can reuse the same ID for payload directories
+/// and create a correlated child span.
+public func tracedStreamFn(wrapping inner: @escaping StreamFn) -> StreamFn {
   { model, context, options in
-    let requestID = UUID().uuidString.lowercased()
-    let sessionID = options.sessionId ?? "unknown"
-    let startTime = Date()
+    let callID = UUID().uuidString.lowercased()
 
-    logger.info(
-      "LLM request start",
-      metadata: [
-        "requestID": "\(requestID)",
-        "sessionID": "\(sessionID)",
-        "model": "\(model.id)",
-        "startTime": "\(iso8601(startTime))",
-      ],
-    )
+    var ctx = ServiceContext.current ?? .topLevel
+    ctx.llmCallID = callID
 
-    do {
-      let stream = try await inner(model, context, options)
+    // Start span manually — we end it when the stream completes, not when
+    // this function returns, because the stream outlives the function scope.
+    let span = startSpan("llm.call", context: ctx, ofKind: .client)
 
-      // Wrap the stream to log when it completes
-      return AsyncThrowingStream { continuation in
-        let task = Task {
-          var finalUsage: Usage?
-          do {
-            for try await event in stream {
-              if case let .done(message) = event {
-                finalUsage = message.usage
-              }
-              continuation.yield(event)
+    span.attributes["llm.provider"] = model.provider.rawValue
+    span.attributes["llm.model"] = model.id
+    span.attributes["llm.request.message_count"] = context.messages.count
+    span.attributes["llm.request.tool_count"] = context.tools?.count ?? 0
+    if let sessionID = options.sessionId {
+      span.attributes["llm.session_id"] = sessionID
+    }
+
+    let startedAt = Date()
+
+    // Call inner within the span's context so the HTTP transport can read
+    // the call ID from ServiceContext.
+    let underlying = try await ServiceContext.$current.withValue(span.context) {
+      try await inner(model, context, options)
+    }
+
+    return AsyncThrowingStream { continuation in
+      let task = Task {
+        var finalMessage: AssistantMessage?
+        var caughtError: (any Error)?
+
+        do {
+          for try await event in underlying {
+            if case let .done(message) = event {
+              finalMessage = message
             }
+            continuation.yield(event)
+          }
+        } catch {
+          caughtError = error
+        }
 
-            let endTime = Date()
-            var metadata: Logger.Metadata = [
-              "requestID": "\(requestID)",
-              "sessionID": "\(sessionID)",
-              "endTime": "\(iso8601(endTime))",
-            ]
-            if let usage = finalUsage {
-              metadata["inputTokens"] = "\(usage.inputTokens)"
-              metadata["outputTokens"] = "\(usage.outputTokens)"
-              metadata["totalTokens"] = "\(usage.totalTokens)"
-            }
-            logger.info("LLM request end", metadata: metadata)
+        // Single finalization path — runs for both success and failure.
+        let finishedAt = Date()
+        let durationMs = Int(finishedAt.timeIntervalSince(startedAt) * 1000)
+        span.attributes["llm.duration_ms"] = durationMs
 
-            continuation.finish()
-          } catch {
-            let endTime = Date()
-            logger.info(
-              "LLM request end",
-              metadata: [
-                "requestID": "\(requestID)",
-                "sessionID": "\(sessionID)",
-                "endTime": "\(iso8601(endTime))",
-                "error": "\(error)",
-              ],
-            )
+        if let message = finalMessage {
+          span.attributes["llm.stop_reason"] = message.stopReason.rawValue
 
-            if Task.isCancelled {
-              continuation.finish()
-            } else {
-              continuation.finish(throwing: error)
-            }
+          if let usage = message.usage {
+            span.attributes["llm.usage.input_tokens"] = usage.inputTokens
+            span.attributes["llm.usage.output_tokens"] = usage.outputTokens
+            span.attributes["llm.usage.total_tokens"] = usage.totalTokens
           }
         }
 
-        continuation.onTermination = { _ in
-          task.cancel()
+        if let caughtError {
+          span.recordError(caughtError)
+          span.setStatus(.init(code: .error, message: "\(caughtError)"))
+
+          if Task.isCancelled {
+            continuation.finish()
+          } else {
+            continuation.finish(throwing: caughtError)
+          }
+        } else {
+          continuation.finish()
         }
+
+        span.end()
       }
-    } catch {
-      let endTime = Date()
-      logger.info(
-        "LLM request end",
-        metadata: [
-          "requestID": "\(requestID)",
-          "sessionID": "\(sessionID)",
-          "endTime": "\(iso8601(endTime))",
-          "error": "\(error)",
-        ],
-      )
-      throw error
+
+      continuation.onTermination = { _ in
+        task.cancel()
+      }
     }
   }
 }
@@ -131,12 +135,4 @@ public extension DependencyValues {
     get { self[StreamFnKey.self] }
     set { self[StreamFnKey.self] = newValue }
   }
-}
-
-// MARK: - Helpers
-
-private func iso8601(_ date: Date) -> String {
-  let formatter = ISO8601DateFormatter()
-  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  return formatter.string(from: date)
 }

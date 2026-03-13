@@ -9,6 +9,7 @@ struct WuhuServerConfigTests {
       openai: sk-openai
       anthropic: sk-anthropic
     llm_request_log_dir: /tmp/wuhu-llm-logs
+    otel_endpoint: http://localhost:4317
     databasePath: /tmp/wuhu.sqlite
     host: 127.0.0.1
     port: 5530
@@ -24,6 +25,7 @@ struct WuhuServerConfigTests {
     #expect(config.llm?.anthropic == "sk-anthropic")
     #expect(config.databasePath == "/tmp/wuhu.sqlite")
     #expect(config.llmRequestLogDir == "/tmp/wuhu-llm-logs")
+    #expect(config.otelEndpoint == "http://localhost:4317")
     #expect(config.host == "127.0.0.1")
     #expect(config.port == 5530)
   }
