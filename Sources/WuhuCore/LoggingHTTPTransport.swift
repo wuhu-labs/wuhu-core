@@ -34,23 +34,33 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   // MARK: - HTTPClient conformance
 
   public func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-    // Non-streaming calls — pass through (not used for LLM inference).
-    try await underlying.data(for: request)
+    let (dir, relativeDir, span) = beginRequest(request)
+    writeRequest(request, to: dir)
+    span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
+
+    let responseData: Data
+    let response: HTTPResponse
+    do {
+      (responseData, response) = try await underlying.data(for: request)
+    } catch {
+      span.recordError(error)
+      span.setStatus(.init(code: .error, message: "\(error)"))
+      span.end()
+      throw error
+    }
+
+    span.attributes["http.status_code"] = response.statusCode
+    setHeaderAttributes(response.headers, prefix: "http.response.header", on: span)
+
+    writeDataResponse(response: response, body: responseData, to: dir)
+    span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
+    span.end()
+
+    return (responseData, response)
   }
 
   public func sse(for request: HTTPRequest) async throws -> SSEResponse {
-    let requestID = ServiceContext.current?.llmCallID ?? UUID().uuidString.lowercased()
-    let now = Date()
-    let dir = directoryURL(base: baseDir, for: requestID, at: now)
-    let relativeDir = relativePath(of: dir)
-
-    // Start HTTP span — we end it when the SSE stream completes.
-    let span = startSpan("http.request", ofKind: .client)
-    span.attributes["http.method"] = request.method
-    span.attributes["http.url"] = request.url.absoluteString
-    setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
-
-    // Write request payload.
+    let (dir, relativeDir, span) = beginRequest(request)
     writeRequest(request, to: dir)
     span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
 
@@ -64,7 +74,6 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
       throw error
     }
 
-    // Set response attributes on span.
     span.attributes["http.status_code"] = sseResponse.response.statusCode
     setHeaderAttributes(sseResponse.response.headers, prefix: "http.response.header", on: span)
 
@@ -116,6 +125,23 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
     }
 
     return SSEResponse(response: sseResponse.response, events: wrappedEvents)
+  }
+
+  // MARK: - Shared span + directory setup
+
+  /// Create the payload directory and start an `http.request` span.
+  /// Shared by both `data(for:)` and `sse(for:)`.
+  private func beginRequest(_ request: HTTPRequest) -> (dir: URL, relativeDir: String, span: any Span) {
+    let requestID = ServiceContext.current?.llmCallID ?? UUID().uuidString.lowercased()
+    let dir = directoryURL(base: baseDir, for: requestID, at: Date())
+    let relativeDir = relativePath(of: dir)
+
+    let span = startSpan("http.request", ofKind: .client)
+    span.attributes["http.method"] = request.method
+    span.attributes["http.url"] = request.url.absoluteString
+    setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
+
+    return (dir, relativeDir, span)
   }
 
   // MARK: - Directory layout
