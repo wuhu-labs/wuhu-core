@@ -4,6 +4,35 @@ import Testing
 import WuhuAPI
 @testable import WuhuCore
 
+actor TestBashCallbacks: RunnerCallbacks {
+  private var results: [String: BashResult] = [:]
+  private var waiters: [String: [CheckedContinuation<BashResult, Never>]] = [:]
+  private(set) var heartbeatCountByTag: [String: Int] = [:]
+
+  func bashHeartbeat(tag: String) async throws {
+    heartbeatCountByTag[tag, default: 0] += 1
+  }
+
+  func bashFinished(tag: String, result: BashResult) async throws {
+    if let continuations = waiters.removeValue(forKey: tag) {
+      for continuation in continuations {
+        continuation.resume(returning: result)
+      }
+    } else {
+      results[tag] = result
+    }
+  }
+
+  func waitForResult(tag: String) async -> BashResult {
+    if let result = results.removeValue(forKey: tag) {
+      return result
+    }
+    return await withCheckedContinuation { continuation in
+      waiters[tag, default: []].append(continuation)
+    }
+  }
+}
+
 // MARK: - InMemoryRunner for testing
 
 /// A test runner that operates on an in-memory filesystem.
@@ -17,6 +46,8 @@ actor InMemoryRunner: Runner {
 
   /// Bash commands and their scripted responses.
   private var bashResponses: [(pattern: String, result: BashResult)] = []
+  private var callbacks: (any RunnerCallbacks)?
+  private var activeBashTags: Set<String> = []
 
   init(id: RunnerID = .local) {
     self.id = id
@@ -62,12 +93,40 @@ actor InMemoryRunner: Runner {
 
   // MARK: - Runner protocol
 
-  func runBash(command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    for (pattern, result) in bashResponses {
-      if command.contains(pattern) { return result }
+  func setCallbacks(_ callbacks: any RunnerCallbacks) async {
+    self.callbacks = callbacks
+  }
+
+  func startBash(tag: String, command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
+    if activeBashTags.contains(tag) {
+      return BashStarted(tag: tag, alreadyRunning: true)
     }
-    // Default: return empty success
-    return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+    activeBashTags.insert(tag)
+
+    let result: BashResult = {
+      for (pattern, result) in bashResponses {
+        if command.contains(pattern) { return result }
+      }
+      return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+    }()
+
+    let callbacks = callbacks
+    Task { [weak self] in
+      try? await callbacks?.bashHeartbeat(tag: tag)
+      try? await callbacks?.bashFinished(tag: tag, result: result)
+      await self?.finishBash(tag: tag)
+    }
+
+    return BashStarted(tag: tag, alreadyRunning: false)
+  }
+
+  func cancelBash(tag: String) async throws -> BashCancelResult {
+    guard activeBashTags.remove(tag) != nil else { return .notFound }
+    return .cancelled
+  }
+
+  private func finishBash(tag: String) {
+    activeBashTags.remove(tag)
   }
 
   func readData(path: String) async throws -> Data {
@@ -323,7 +382,7 @@ struct LocalRunnerTests {
     try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: tmpDir) }
 
-    let result = try await runner.runBash(command: "echo hello", cwd: tmpDir, timeout: 5)
+    let result = try await LocalBash.run(command: "echo hello", cwd: tmpDir, timeoutSeconds: 5)
     #expect(result.exitCode == 0)
     #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello")
     #expect(!result.timedOut)
@@ -396,16 +455,22 @@ struct RunnerServerHandlerTests {
   @Test func handlerDispatchesBash() async throws {
     let mem = InMemoryRunner()
     await mem.stubBash(pattern: "echo test", result: BashResult(exitCode: 0, output: "test\n", timedOut: false, terminated: false))
+    let callbacks = TestBashCallbacks()
+    await mem.setCallbacks(callbacks)
     let handler = RunnerServerHandler(runner: mem, name: "test-runner")
 
-    let (response, _) = await handler.handle(request: .bash(id: "r1", BashRequest(command: "echo test", cwd: "/", timeout: nil)))
-    guard case let .bash(id, result) = response else {
-      Issue.record("Expected bash response"); return
+    let (response, _) = await handler.handle(request: .startBash(id: "r1", StartBashRequest(tag: "tag-1", command: "echo test", cwd: "/", timeout: nil)))
+    guard case let .startBash(id, result) = response else {
+      Issue.record("Expected startBash response"); return
     }
     #expect(id == "r1")
-    let r = try result.get()
-    #expect(r.output == "test\n")
-    #expect(r.exitCode == 0)
+    let started = try result.get()
+    #expect(started.tag == "tag-1")
+    #expect(started.alreadyRunning == false)
+
+    let finished = await callbacks.waitForResult(tag: "tag-1")
+    #expect(finished.output == "test\n")
+    #expect(finished.exitCode == 0)
   }
 
   @Test func handlerDispatchesReadBinary() async throws {

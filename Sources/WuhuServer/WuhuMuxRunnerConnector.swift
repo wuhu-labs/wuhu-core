@@ -5,17 +5,14 @@ import MuxWebSocket
 import WSClient
 import WuhuCore
 
-/// Connects the server OUT to remote runners over WebSocket mux.
 enum WuhuMuxRunnerConnector {
-  /// Connect to a remote runner and register it in the registry.
-  /// Runs until the mux session closes or is cancelled.
-  /// Returns true if a connection was established and completed normally.
   @discardableResult
   static func connect(
     name: String,
     host: String,
     port: Int,
     registry: RunnerRegistry,
+    callbacks: any RunnerCallbacks,
     logger: Logger,
   ) async -> Bool {
     logger.info("Connecting to mux runner '\(name)' at \(host):\(port)")
@@ -30,20 +27,22 @@ enum WuhuMuxRunnerConnector {
         let runTask = Task { try await session.run() }
         defer { runTask.cancel() }
 
-        // Hello exchange — we send hello first as the initiator
         let helloStream = try await session.open()
-        let hello = HelloResponse(runnerName: "wuhu-server", version: muxRunnerProtocolVersion)
-        try await MuxRunnerCodec.writeRequest(helloStream, op: .hello, payload: hello)
+        try await MuxRunnerCodec.writeRequest(
+          helloStream,
+          op: .hello,
+          payload: HelloResponse(runnerName: "wuhu-server", version: muxRunnerProtocolVersion),
+        )
         try await helloStream.finish()
 
         let reader = MuxStreamReader(stream: helloStream)
         let (ok, _, payload) = try await MuxRunnerCodec.readResponse(reader)
         guard ok else {
-          let msg = String(decoding: Data(payload), as: UTF8.self)
-          logger.error("Runner '\(name)' rejected hello: \(msg)")
+          logger.error("Runner '\(name)' rejected hello: \(String(decoding: Data(payload), as: UTF8.self))")
           await session.close()
           return
         }
+
         let runnerHello = try MuxRunnerCodec.decode(HelloResponse.self, from: payload)
         guard runnerHello.version == muxRunnerProtocolVersion else {
           logger.error("Runner '\(name)' has protocol version \(runnerHello.version), expected \(muxRunnerProtocolVersion)")
@@ -54,27 +53,29 @@ enum WuhuMuxRunnerConnector {
         logger.info("Mux runner '\(runnerHello.runnerName)' connected (v\(runnerHello.version))")
 
         let client = MuxRunnerClient(name: runnerHello.runnerName, session: session)
+        await client.setCallbacks(callbacks)
+        let callbackTask = Task { await client.startCallbackListener() }
+        defer { callbackTask.cancel() }
+
         await registry.register(client)
 
-        // Block until session ends
         try? await runTask.value
         await session.close()
 
         await registry.remove(.remote(name: runnerHello.runnerName))
         logger.info("Mux runner '\(runnerHello.runnerName)' disconnected")
       }
-      // If we get here, WebSocket connected and ran to completion
       return true
     } catch {
-      logger.error("Failed to connect to mux runner '\(name)': \(error)")
+      logger.error("Failed to connect to mux runner '\(name)': \(String(describing: error))")
       return false
     }
   }
 
-  /// Start background tasks to connect to all configured mux runners with reconnection.
   static func connectAll(
     runners: [(name: String, host: String, port: Int)],
     registry: RunnerRegistry,
+    callbacks: any RunnerCallbacks,
     logger: Logger,
   ) -> [Task<Void, Never>] {
     runners.map { runner in
@@ -88,6 +89,7 @@ enum WuhuMuxRunnerConnector {
             host: runner.host,
             port: runner.port,
             registry: registry,
+            callbacks: callbacks,
             logger: logger,
           )
 

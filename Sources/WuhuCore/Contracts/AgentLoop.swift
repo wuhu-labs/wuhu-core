@@ -81,11 +81,13 @@ public actor AgentLoop<B: AgentBehavior> {
   /// The behavior persists the effect and returns actions, which are
   /// applied to state and emitted to observers. The loop is woken
   /// afterward in case new work was enqueued.
-  public func send(_ action: B.ExternalAction) async throws {
+  public func send(_ action: B.ExternalAction, wakeLoop: Bool = true) async throws {
     try await serialized { [behavior] state in
       try await behavior.handle(action, state: state)
     }
-    signal?.yield(())
+    if wakeLoop {
+      signal?.yield(())
+    }
   }
 
   // MARK: - Lifecycle
@@ -177,7 +179,17 @@ public actor AgentLoop<B: AgentBehavior> {
         if turnActions.isEmpty { break } // truly idle
       }
 
+      let resumedPendingToolCalls = behavior.pendingToolCalls(in: state)
+      if !resumedPendingToolCalls.isEmpty {
+        hasToolResults = try await executeToolCalls(resumedPendingToolCalls)
+        continue
+      }
+
       hasToolResults = false
+
+      guard behavior.needsInference(state: state) else {
+        break
+      }
 
       // Inference (with retry for transient errors)
       let context = behavior.buildContext(state: state)
@@ -195,8 +207,7 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       if !toolCalls.isEmpty {
-        try await executeToolCalls(toolCalls)
-        hasToolResults = true
+        hasToolResults = try await executeToolCalls(toolCalls)
       }
 
       // Compaction
@@ -320,11 +331,10 @@ public actor AgentLoop<B: AgentBehavior> {
   /// Execute tool calls: mark started (serialized), run in parallel
   /// (NOT serialized), record results (serialized).
   ///
-  /// Integrates ``ToolCallRepetitionTracker`` to detect and break
-  /// degenerate loops where the model calls the same tool with the
-  /// same arguments and gets the same result repeatedly.
-  private func executeToolCalls(_ calls: [ToolCall]) async throws {
-    // Partition calls into blocked vs. allowed based on repetition history.
+  /// Returns `true` when the loop should continue directly to inference after
+  /// tool execution. If any tool entered a pending external-completion state,
+  /// the loop stops and waits for a later callback to wake it.
+  private func executeToolCalls(_ calls: [ToolCall]) async throws -> Bool {
     var blocked: [ToolCall] = []
     var allowed: [ToolCall] = []
     for call in calls {
@@ -337,31 +347,29 @@ public actor AgentLoop<B: AgentBehavior> {
       }
     }
 
-    // Mark all as started (both blocked and allowed — for status tracking).
     for call in calls {
       try await serialized { [behavior] state in
         try await behavior.toolWillExecute(call, state: state)
       }
     }
 
-    // Record blocked calls as errors immediately.
+    var shouldContinue = true
+    var persistedAnyResult = false
+
     for call in blocked {
       let error = ToolCallRepetitionError.blocked
       try await serialized { [behavior] state in
         try await behavior.toolDidFail(call, error: error, state: state)
       }
+      persistedAnyResult = true
     }
 
-    // Execute allowed calls in parallel.
     let results: [(ToolCall, Result<B.ToolResult, any Error>)] =
-      await withTaskGroup(
-        of: (ToolCall, Result<B.ToolResult, any Error>).self,
-      ) { [behavior] group in
+      await withTaskGroup(of: (ToolCall, Result<B.ToolResult, any Error>).self) { [behavior] group in
         for call in allowed {
           group.addTask {
             do {
-              let result = try await behavior.executeToolCall(call)
-              return (call, .success(result))
+              return try await (call, .success(behavior.executeToolCall(call)))
             } catch {
               return (call, .failure(error))
             }
@@ -374,17 +382,12 @@ public actor AgentLoop<B: AgentBehavior> {
         return outputs
       }
 
-    // Record results, injecting warnings for repeated calls.
     for (call, result) in results {
       switch result {
       case let .success(toolResult):
         let argsHash = call.arguments.hashValue
         let resultHash = toolResult.hashValue
-        let count = repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: resultHash,
-        )
+        let count = repetitionTracker.record(toolName: call.name, argsHash: argsHash, resultHash: resultHash)
         let finalResult: B.ToolResult = if count >= ToolCallRepetitionTracker.warningThreshold {
           behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
         } else {
@@ -393,22 +396,25 @@ public actor AgentLoop<B: AgentBehavior> {
         try await serialized { [behavior] state in
           try await behavior.toolDidExecute(call, result: finalResult, state: state)
         }
+        persistedAnyResult = true
+
       case let .failure(error):
-        // Track failed tool calls in the repetition tracker so that
-        // degenerate loops (e.g., the model repeatedly sending invalid
-        // arguments that fail parsing) are detected and blocked.
+        if error is PendingToolExecutionError {
+          shouldContinue = false
+          continue
+        }
+
         let argsHash = call.arguments.hashValue
         let errorHash = String(describing: error).hashValue
-        repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: errorHash,
-        )
+        repetitionTracker.record(toolName: call.name, argsHash: argsHash, resultHash: errorHash)
         try await serialized { [behavior] state in
           try await behavior.toolDidFail(call, error: error, state: state)
         }
+        persistedAnyResult = true
       }
     }
+
+    return shouldContinue && persistedAnyResult
   }
 
   // MARK: - Emit

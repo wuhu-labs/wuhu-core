@@ -1,21 +1,79 @@
 import Dependencies
 import Foundation
 
-/// Local runner — executes everything on the local machine.
-/// Uses the `FileIO` dependency for filesystem operations, preserving
-/// testability via `InMemoryFileIO`.
 public actor LocalRunner: Runner {
-  public nonisolated let id: RunnerID = .local
+  public nonisolated let id: RunnerID
 
-  public init() {}
-
-  // MARK: - Process execution
-
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+  private struct ActiveBash {
+    let task: Task<Void, Never>
+    let heartbeatTask: Task<Void, Never>
   }
 
-  // MARK: - File I/O
+  private var callbacks: (any RunnerCallbacks)?
+  private var activeBashTasks: [String: ActiveBash] = [:]
+
+  private static let heartbeatIntervalNanoseconds: UInt64 = 15_000_000_000
+
+  public init(id: RunnerID = .local) {
+    self.id = id
+  }
+
+  public func setCallbacks(_ callbacks: any RunnerCallbacks) async {
+    self.callbacks = callbacks
+  }
+
+  public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    if activeBashTasks[tag] != nil {
+      return BashStarted(tag: tag, alreadyRunning: true)
+    }
+
+    let callbacks = callbacks
+
+    let heartbeatTask = Task {
+      try? await callbacks?.bashHeartbeat(tag: tag)
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanoseconds)
+        if Task.isCancelled { break }
+        try? await callbacks?.bashHeartbeat(tag: tag)
+      }
+    }
+
+    let task = Task { [weak self] in
+      do {
+        let result = try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+        try? await callbacks?.bashFinished(tag: tag, result: result)
+      } catch is CancellationError {
+        try? await callbacks?.bashFinished(
+          tag: tag,
+          result: BashResult(exitCode: -15, output: "", timedOut: false, terminated: true),
+        )
+      } catch {
+        try? await callbacks?.bashFinished(
+          tag: tag,
+          result: BashResult(exitCode: -1, output: "Error: \(error)", timedOut: false, terminated: false),
+        )
+      }
+
+      heartbeatTask.cancel()
+      await self?.unregisterBashTask(tag: tag)
+    }
+
+    activeBashTasks[tag] = ActiveBash(task: task, heartbeatTask: heartbeatTask)
+    return BashStarted(tag: tag, alreadyRunning: false)
+  }
+
+  public func cancelBash(tag: String) async throws -> BashCancelResult {
+    guard let active = activeBashTasks.removeValue(forKey: tag) else {
+      return .notFound
+    }
+    active.heartbeatTask.cancel()
+    active.task.cancel()
+    return .cancelled
+  }
+
+  private func unregisterBashTask(tag: String) {
+    activeBashTasks.removeValue(forKey: tag)
+  }
 
   public func readData(path: String) async throws -> Data {
     @Dependency(\.fileIO) var fileIO
@@ -77,8 +135,6 @@ public actor LocalRunner: Runner {
     try fileIO.createDirectory(atPath: path, withIntermediateDirectories: withIntermediateDirectories)
   }
 
-  // MARK: - Workspace materialization
-
   public func materialize(params: MaterializeRequest) async throws -> MaterializeResponse {
     let fm = FileManager.default
     let templatePath = ToolPath.expand(params.templatePath)
@@ -89,22 +145,17 @@ public actor LocalRunner: Runner {
       throw RunnerError.fileNotFound(path: templatePath)
     }
 
-    // Ensure parent directory exists
     let parentDir = (destinationPath as NSString).deletingLastPathComponent
     try fm.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
 
     do {
-      try fm.copyItem(
-        at: URL(fileURLWithPath: templatePath),
-        to: URL(fileURLWithPath: destinationPath),
-      )
+      try fm.copyItem(at: URL(fileURLWithPath: templatePath), to: URL(fileURLWithPath: destinationPath))
     } catch {
       throw RunnerError.requestFailed(
         message: "Failed to copy template: \(templatePath) -> \(destinationPath) (\(error))",
       )
     }
 
-    // Run startup script if provided
     if let script = params.startupScript, !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       let scriptPath: String = {
         let expanded = ToolPath.expand(script)
@@ -135,8 +186,6 @@ public actor LocalRunner: Runner {
     return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
-  // MARK: - Search
-
   public func find(params: FindParams) async throws -> FindResult {
     @Dependency(\.fileIO) var fileIO
 
@@ -166,11 +215,7 @@ public actor LocalRunner: Runner {
 
     let sorted = matches.sorted { $0.lowercased() < $1.lowercased() }
     let limited = Array(sorted.prefix(effectiveLimit))
-
-    return FindResult(
-      entries: limited.map { FindEntry(relativePath: $0) },
-      totalBeforeLimit: sorted.count,
-    )
+    return FindResult(entries: limited.map { FindEntry(relativePath: $0) }, totalBeforeLimit: sorted.count)
   }
 
   public func grep(params: GrepParams) async throws -> GrepResult {
@@ -265,12 +310,7 @@ public actor LocalRunner: Runner {
           let rawLine = lines[current - 1]
           let (trunc, wasTruncated) = ToolTruncation.truncateLine(rawLine)
           if wasTruncated { linesTruncated = true }
-          allMatches.append(GrepMatch(
-            file: rel,
-            lineNumber: current,
-            line: trunc,
-            isContext: current != lineNumber,
-          ))
+          allMatches.append(GrepMatch(file: rel, lineNumber: current, line: trunc, isContext: current != lineNumber))
         }
       }
     }

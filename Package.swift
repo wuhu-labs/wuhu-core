@@ -100,6 +100,7 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxTCP", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
@@ -115,6 +116,7 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "Mux", package: "wuhu-yamux"),
+        .product(name: "MuxTCP", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
@@ -131,6 +133,7 @@ let package = Package(
         "WuhuRunner",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
+        .product(name: "MuxTCP", package: "wuhu-yamux"),
       ],
       swiftSettings: strictConcurrency,
     ),

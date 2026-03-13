@@ -24,6 +24,7 @@ struct WuhuCLI: AsyncParsableCommand {
       Server.self,
       Client.self,
       RunnerCommand.self,
+      WorkerCommand.self,
       VersionCommand.self,
       UpgradeCommand.self,
     ],

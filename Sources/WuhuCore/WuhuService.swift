@@ -55,6 +55,41 @@ public actor WuhuService {
     await ensureAsyncBashRouter()
   }
 
+  /// Resume sessions that were running when the server last stopped.
+  /// Call this after runner callback routing has been wired up.
+  public func resumeRunningSessions() async {
+    do {
+      let sessions = try await store.queryRecentlyRunningSessions()
+      for session in sessions {
+        let sid = session.id
+        let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sid, ownerID: instanceID)
+        let mountResolver = MountResolverFactory.make(
+          sessionID: sid,
+          store: store,
+          runnerRegistry: runnerRegistry,
+        )
+        let baseTools = WuhuTools.codingAgentTools(
+          cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
+          mountResolver: mountResolver,
+          asyncBash: asyncBash,
+          braveSearchAPIKey: braveSearchAPIKey,
+        )
+        let resolvedTools = agentToolset(session: session, baseTools: baseTools)
+        let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sid, purpose: .agent) ?? baseStreamFn
+
+        let runtime = runtime(for: sid)
+        await runtime.setTools(resolvedTools)
+        await runtime.setStreamFn(streamFn)
+        await runtime.ensureStarted()
+      }
+      if !sessions.isEmpty {
+        FileHandle.standardError.write(Data("[WuhuService] Resumed \(sessions.count) previously-running session(s)\n".utf8))
+      }
+    } catch {
+      FileHandle.standardError.write(Data("[WuhuService] ERROR: failed to resume running sessions: \(String(describing: error))\n".utf8))
+    }
+  }
+
   private func ensureAsyncBashRouter() async {
     guard asyncBashRouter == nil else { return }
     let router = WuhuAsyncBashCompletionRouter(
@@ -97,6 +132,29 @@ public actor WuhuService {
   private func logServiceError(_ message: String, error: Error) {
     let line = "[WuhuService] ERROR: \(message): \(String(describing: error))\n"
     FileHandle.standardError.write(Data(line.utf8))
+  }
+
+  private func routeBashResult(toolCallID: String, result: BashResult) async {
+    do {
+      guard let sessionID = try await store.lookupSessionForToolCall(toolCallID: toolCallID) else {
+        FileHandle.standardError.write(Data("[WuhuService] WARNING: bash result for unknown tool call '\(toolCallID)'\n".utf8))
+        return
+      }
+      await runtime(for: sessionID).deliverBashResult(toolCallID: toolCallID, result: result)
+    } catch {
+      logServiceError("failed to route bash result for '\(toolCallID)'", error: error)
+    }
+  }
+
+  private func routeBashHeartbeat(toolCallID: String) async {
+    do {
+      guard let sessionID = try await store.lookupSessionForToolCall(toolCallID: toolCallID) else {
+        return
+      }
+      await runtime(for: sessionID).recordToolHeartbeat(toolCallID: toolCallID)
+    } catch {
+      logServiceError("failed to route bash heartbeat for '\(toolCallID)'", error: error)
+    }
   }
 
   func loadFinalAssistantMessage(sessionID: String) async throws -> (entryID: Int64, text: String) {
@@ -340,6 +398,10 @@ public actor WuhuService {
       return .init(repairedEntries: [], stopEntry: nil)
     }
 
+    for toolCallId in inferred.pendingToolCallIds.sorted() {
+      await cancelRunningBashIfNeeded(sessionID: sessionID, toolCallID: toolCallId, transcript: transcript)
+    }
+
     let toolRepair = try await WuhuToolRepairer.repairMissingToolResultsIfNeeded(
       sessionID: sessionID,
       transcript: transcript,
@@ -381,6 +443,37 @@ public actor WuhuService {
     }
 
     return .init(repairedEntries: toolRepair.repairEntries, stopEntry: stopEntry)
+  }
+
+  private func cancelRunningBashIfNeeded(sessionID: String, toolCallID: String, transcript: [WuhuSessionEntry]) async {
+    guard let toolCall = findToolCall(id: toolCallID, in: transcript), toolCall.name == "bash" else {
+      return
+    }
+
+    do {
+      let mountResolver = MountResolverFactory.make(sessionID: sessionID, store: store, runnerRegistry: runnerRegistry)
+      let mountName: String? = {
+        guard case let .object(obj) = toolCall.arguments else { return nil }
+        return obj["mount"]?.stringValue
+      }()
+      let resolved = try await mountResolver(mountName)
+      _ = try? await resolved.runner.cancelBash(tag: toolCallID)
+    } catch {
+      FileHandle.standardError.write(Data("[WuhuService] WARNING: failed to cancel bash '\(toolCallID)' while stopping session '\(sessionID)': \(String(describing: error))\n".utf8))
+    }
+  }
+
+  private func findToolCall(id: String, in transcript: [WuhuSessionEntry]) -> ToolCall? {
+    for entry in transcript.reversed() {
+      guard case let .message(m) = entry.payload else { continue }
+      guard case let .assistant(a) = m else { continue }
+      for block in a.content {
+        if case let .toolCall(callID, name, arguments) = block, callID == id {
+          return ToolCall(id: callID, name: name, arguments: arguments)
+        }
+      }
+    }
+    return nil
   }
 
   public func followSessionStream(
@@ -453,6 +546,16 @@ public actor WuhuService {
         timeoutTask?.cancel()
       }
     }
+  }
+}
+
+extension WuhuService: RunnerCallbacks {
+  public func bashHeartbeat(tag: String) async throws {
+    await routeBashHeartbeat(toolCallID: tag)
+  }
+
+  public func bashFinished(tag: String, result: BashResult) async throws {
+    await routeBashResult(toolCallID: tag, result: result)
   }
 }
 

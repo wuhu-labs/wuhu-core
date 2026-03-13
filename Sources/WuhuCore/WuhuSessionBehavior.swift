@@ -10,6 +10,8 @@ enum WuhuSessionExternalAction: Sendable, Hashable {
   case enqueueUser(id: QueueItemID, message: QueuedUserMessage, lane: UserQueueLane)
   case cancelUser(id: QueueItemID, lane: UserQueueLane)
   case enqueueSystem(id: QueueItemID, input: SystemUrgentInput, enqueuedAt: Date)
+  case deliverBashResult(toolCallID: String, result: BashResult)
+  case heartbeatToolCall(id: String)
 
   case setPendingModelSelection(WuhuSessionSettings)
   case applyModelSelection(WuhuSessionSettings)
@@ -19,7 +21,7 @@ enum WuhuSessionExternalAction: Sendable, Hashable {
 enum WuhuSessionCommittedAction: Sendable, Hashable {
   case sessionUpdated(WuhuSession)
   case entryAppended(WuhuSessionEntry)
-  case toolCallStatusUpdated(id: String, status: ToolCallStatus)
+  case toolCallStatusUpdated(id: String, record: ToolCallRecord)
   case systemQueueUpdated(SystemUrgentQueueBackfill)
   case userQueueUpdated(lane: UserQueueLane, backfill: UserQueueBackfill)
   case settingsUpdated(SessionSettingsSnapshot)
@@ -27,13 +29,10 @@ enum WuhuSessionCommittedAction: Sendable, Hashable {
 }
 
 struct WuhuSessionLoopState: Sendable, Equatable {
-  var toolCallStatus: [String: ToolCallStatus]
-
+  var toolCallStatus: [String: ToolCallRecord]
   var entries: [WuhuSessionEntry]
-
   var settings: SessionSettingsSnapshot
   var status: SessionStatusSnapshot
-
   var systemUrgent: SystemUrgentQueueBackfill
   var steer: UserQueueBackfill
   var followUp: UserQueueBackfill
@@ -57,6 +56,8 @@ struct WuhuSessionBehavior: AgentBehavior {
   typealias StreamAction = WuhuSessionStreamAction
   typealias ExternalAction = WuhuSessionExternalAction
   typealias ToolResult = AgentToolResult
+
+  static let staleToolCallDeadline: TimeInterval = 60
 
   static var emptyState: WuhuSessionLoopState {
     .empty
@@ -83,14 +84,13 @@ struct WuhuSessionBehavior: AgentBehavior {
   func apply(_ action: CommittedAction, to state: inout State) {
     switch action {
     case let .sessionUpdated(session):
-      // Session metadata is intentionally not part of the loop state shape.
       _ = session
 
     case let .entryAppended(entry):
       state.entries.append(entry)
 
-    case let .toolCallStatusUpdated(id, status):
-      state.toolCallStatus[id] = status
+    case let .toolCallStatusUpdated(id, record):
+      state.toolCallStatus[id] = record
 
     case let .systemQueueUpdated(backfill):
       state.systemUrgent = backfill
@@ -111,7 +111,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  func handle(_ action: ExternalAction, state _: State) async throws -> [CommittedAction] {
+  func handle(_ action: ExternalAction, state: State) async throws -> [CommittedAction] {
     switch action {
     case let .enqueueUser(id, message, lane):
       _ = try await store.enqueueUserMessage(sessionID: sessionID, id: id, message: message, lane: lane)
@@ -140,6 +140,15 @@ struct WuhuSessionBehavior: AgentBehavior {
         .statusUpdated(status),
       ]
 
+    case let .deliverBashResult(toolCallID, result):
+      return try await persistDeliveredBashResult(toolCallID: toolCallID, result: result, state: state)
+
+    case let .heartbeatToolCall(id):
+      guard let touched = try await store.touchToolCallStatus(sessionID: sessionID, id: id) else {
+        return []
+      }
+      return [.toolCallStatusUpdated(id: touched.id, record: touched.record)]
+
     case let .setPendingModelSelection(selection):
       let settings = try await store.setPendingModelSelection(sessionID: sessionID, selection: selection)
       return [.settingsUpdated(settings)]
@@ -151,8 +160,7 @@ struct WuhuSessionBehavior: AgentBehavior {
         .entryAppended(result.entry),
         .settingsUpdated(result.settings),
       ]
-      let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-      actions.append(.statusUpdated(status))
+      try await actions.append(.statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)))
       return actions
 
     case .applyPendingModelIfPossible:
@@ -267,21 +275,19 @@ struct WuhuSessionBehavior: AgentBehavior {
     if !calls.isEmpty {
       let updates = try await store.upsertToolCallStatuses(sessionID: sessionID, calls: calls, status: .pending)
       for update in updates {
-        actions.append(.toolCallStatusUpdated(id: update.id, status: update.status))
+        actions.append(.toolCallStatusUpdated(id: update.id, record: update.record))
       }
     }
 
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    actions.append(.statusUpdated(status))
+    try await actions.append(.statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)))
     return actions
   }
 
   func toolWillExecute(_ call: ToolCall, state _: State) async throws -> [CommittedAction] {
     let updated = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .started)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    return [
-      .toolCallStatusUpdated(id: updated.id, status: updated.status),
-      .statusUpdated(status),
+    return try await [
+      .toolCallStatusUpdated(id: updated.id, record: updated.record),
+      .statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)),
     ]
   }
 
@@ -302,7 +308,6 @@ struct WuhuSessionBehavior: AgentBehavior {
   func toolDidExecute(_ call: ToolCall, result: ToolResult, state _: State) async throws -> [CommittedAction] {
     let now = Date()
 
-    // Convert image content blocks: store base64 data as blobs, replace with blob URIs.
     let persistedContent = try result.content.map { block -> WuhuContentBlock in
       if case let .image(img) = block, !img.data.hasPrefix("blob://") {
         guard let rawData = Data(base64Encoded: img.data) else {
@@ -330,12 +335,11 @@ struct WuhuSessionBehavior: AgentBehavior {
     )
 
     let updated = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .completed)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    return [
+    return try await [
       .sessionUpdated(session),
       .entryAppended(entry),
-      .toolCallStatusUpdated(id: updated.id, status: updated.status),
-      .statusUpdated(status),
+      .toolCallStatusUpdated(id: updated.id, record: updated.record),
+      .statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)),
     ]
   }
 
@@ -359,13 +363,33 @@ struct WuhuSessionBehavior: AgentBehavior {
     )
 
     let updated = try await store.setToolCallStatus(sessionID: sessionID, id: call.id, status: .errored)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    return [
+    return try await [
       .sessionUpdated(session),
       .entryAppended(entry),
-      .toolCallStatusUpdated(id: updated.id, status: updated.status),
-      .statusUpdated(status),
+      .toolCallStatusUpdated(id: updated.id, record: updated.record),
+      .statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)),
     ]
+  }
+
+  func pendingToolCalls(in state: State) -> [ToolCall] {
+    let pendingIDs = state.toolCallStatus.compactMap { id, record in
+      record.status == .pending ? id : nil
+    }
+    guard !pendingIDs.isEmpty else { return [] }
+
+    let pendingSet = Set(pendingIDs)
+    var calls: [ToolCall] = []
+    for entry in state.entries.reversed() {
+      guard case let .message(m) = entry.payload else { continue }
+      guard case let .assistant(a) = m else { continue }
+      for block in a.content {
+        guard case let .toolCall(id, name, arguments) = block else { continue }
+        if pendingSet.contains(id) {
+          calls.append(ToolCall(id: id, name: name, arguments: arguments))
+        }
+      }
+    }
+    return calls
   }
 
   func shouldCompact(state: State) -> Bool {
@@ -378,7 +402,6 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func performCompaction(state: State) async throws -> [CommittedAction] {
     let session = try await store.getSession(id: sessionID.rawValue)
-    // Use user-facing model ID for compaction settings (picks up 1M context window for aliases).
     let provider = session.provider.piProvider
     let settingsModel = Model(id: session.model, provider: provider)
     let settings = WuhuCompactionSettings.load(model: settingsModel)
@@ -387,7 +410,6 @@ struct WuhuSessionBehavior: AgentBehavior {
       return []
     }
 
-    // Use resolved API model ID for the actual summarization call.
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
     let streamFn = await runtimeConfig.streamFn()
@@ -420,42 +442,28 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func staleToolCallIDs(in state: State) -> [String] {
-    var finished: Set<String> = []
-    for entry in state.entries {
-      guard case let .message(m) = entry.payload else { continue }
-      guard case let .toolResult(t) = m else { continue }
-      finished.insert(t.toolCallId)
-    }
+    let finished = finishedToolCallIDs(in: state.entries)
+    let now = Date()
 
-    return state.toolCallStatus.compactMap { id, status in
-      guard status == .started || status == .pending else { return nil }
-      return finished.contains(id) ? nil : id
+    return state.toolCallStatus.compactMap { id, record in
+      guard record.status == .started else { return nil }
+      guard !finished.contains(id) else { return nil }
+      guard now.timeIntervalSince(record.updatedAt) > Self.staleToolCallDeadline else { return nil }
+      return id
     }.sorted()
   }
 
   func recoverStaleToolCall(id: String, state: State) async throws -> [CommittedAction] {
-    // Avoid double-repair.
     if state.entries.contains(where: { entry in
       guard case let .message(m) = entry.payload else { return false }
       guard case let .toolResult(t) = m else { return false }
       return t.toolCallId == id
     }) {
       let updated = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-      return [.toolCallStatusUpdated(id: updated.id, status: updated.status)]
+      return [.toolCallStatusUpdated(id: updated.id, record: updated.record)]
     }
 
-    let toolName: String = {
-      for entry in state.entries.reversed() {
-        guard case let .message(m) = entry.payload else { continue }
-        guard case let .assistant(a) = m else { continue }
-        for block in a.content {
-          guard case let .toolCall(callID, name, _) = block else { continue }
-          if callID == id { return name }
-        }
-      }
-      return "unknown"
-    }()
-
+    let toolName = toolName(for: id, in: state.entries) ?? "unknown"
     let now = Date()
     let repaired: Message = .toolResult(.init(
       toolCallId: id,
@@ -476,12 +484,11 @@ struct WuhuSessionBehavior: AgentBehavior {
     )
 
     let updated = try await store.setToolCallStatus(sessionID: sessionID, id: id, status: .errored)
-    let status = try await store.loadStatusSnapshot(sessionID: sessionID)
-    return [
+    return try await [
       .sessionUpdated(session),
       .entryAppended(entry),
-      .toolCallStatusUpdated(id: updated.id, status: updated.status),
-      .statusUpdated(status),
+      .toolCallStatusUpdated(id: updated.id, record: updated.record),
+      .statusUpdated(store.loadStatusSnapshot(sessionID: sessionID)),
     ]
   }
 
@@ -497,37 +504,78 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func needsInference(state: State) -> Bool {
-    // Walk backwards to find the last message entry (skip custom/header entries).
+    let finished = finishedToolCallIDs(in: state.entries)
+    let hasUnresolvedTools = state.toolCallStatus.contains { id, record in
+      (record.status == .pending || record.status == .started) && !finished.contains(id)
+    }
+    if hasUnresolvedTools { return false }
+
     for entry in state.entries.reversed() {
       switch entry.payload {
       case let .message(m):
         switch m {
         case .toolResult:
-          // Last message is a tool result the model hasn't responded to.
           return true
         case .user:
-          // Last message is a user message with no assistant response.
           return true
         case .assistant:
-          // Model already responded — nothing to do.
           return false
-        case .customMessage:
-          // Skip custom messages (e.g., "Execution stopped") and keep looking.
+        case let .customMessage(custom):
+          if custom.customType == "wuhu_system_input_v1" {
+            return true
+          }
           continue
         case .unknown:
           continue
         }
       default:
-        // Skip non-message entries (header, sessionSettings, etc.).
         continue
       }
     }
     return false
   }
 
-  // MARK: - Image blob hydration
+  private func finishedToolCallIDs(in entries: [WuhuSessionEntry]) -> Set<String> {
+    var finished: Set<String> = []
+    for entry in entries {
+      guard case let .message(m) = entry.payload else { continue }
+      guard case let .toolResult(t) = m else { continue }
+      finished.insert(t.toolCallId)
+    }
+    return finished
+  }
 
-  /// Replace blob URIs in image content blocks with base64-encoded data for LLM consumption.
+  private func toolName(for id: String, in entries: [WuhuSessionEntry]) -> String? {
+    for entry in entries.reversed() {
+      guard case let .message(m) = entry.payload else { continue }
+      guard case let .assistant(a) = m else { continue }
+      for block in a.content {
+        guard case let .toolCall(callID, name, _) = block else { continue }
+        if callID == id { return name }
+      }
+    }
+    return nil
+  }
+
+  private func persistDeliveredBashResult(toolCallID: String, result: BashResult, state: State) async throws -> [CommittedAction] {
+    if state.entries.contains(where: { entry in
+      guard case let .message(m) = entry.payload else { return false }
+      guard case let .toolResult(t) = m else { return false }
+      return t.toolCallId == toolCallID
+    }) {
+      return []
+    }
+
+    let bashCall = ToolCall(id: toolCallID, name: toolName(for: toolCallID, in: state.entries) ?? "bash", arguments: .object([:]))
+
+    do {
+      let formatted = try formatBashToolResult(result)
+      return try await toolDidExecute(bashCall, result: formatted, state: state)
+    } catch {
+      return try await toolDidFail(bashCall, error: error, state: state)
+    }
+  }
+
   private func hydrateImageBlobs(in messages: [Message]) -> [Message] {
     messages.map { message in
       switch message {
@@ -535,7 +583,6 @@ struct WuhuSessionBehavior: AgentBehavior {
         u.content = u.content.map(hydrateBlock)
         return .user(u)
       case let .assistant(a):
-        // Assistant messages don't contain user-provided images.
         return .assistant(a)
       case var .toolResult(t):
         t.content = t.content.map(hydrateBlock)
@@ -544,7 +591,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  /// Hydrate a single content block: if it's an image with a blob URI, resolve to base64.
   private func hydrateBlock(_ block: ContentBlock) -> ContentBlock {
     guard case let .image(img) = block, img.data.hasPrefix("blob://") else { return block }
     do {
@@ -559,8 +605,6 @@ struct WuhuSessionBehavior: AgentBehavior {
 private func makeRequestOptions(model: Model, settings: SessionSettingsSnapshot, userModelID: String? = nil) -> RequestOptions {
   var requestOptions = RequestOptions()
 
-  // Max tokens: use model spec (maxOutput / 3) or a generous fallback.
-  // Look up by user-facing model ID first (for alias specs), then fall back to API model ID.
   let specLookupID = userModelID ?? model.id
   requestOptions.maxTokens = WuhuModelCatalog.defaultMaxTokens(for: specLookupID)
 
@@ -602,8 +646,6 @@ private func modelFromSettings(_ settings: SessionSettingsSnapshot) -> Model {
   return .init(id: settings.effectiveModel.id, provider: provider)
 }
 
-/// Resolves an optional base URL override for a provider from environment
-/// variables. Checks `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`.
 func providerBaseURL(for provider: Provider) -> URL? {
   let envVar: String? = switch provider {
   case .anthropic:

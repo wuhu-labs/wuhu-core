@@ -61,7 +61,6 @@ public struct EnumeratedEntry: Sendable, Hashable, Codable {
 
 // MARK: - Find/Grep result types
 
-/// A single match from a find operation.
 public struct FindEntry: Sendable, Hashable, Codable {
   public var relativePath: String
 
@@ -70,15 +69,10 @@ public struct FindEntry: Sendable, Hashable, Codable {
   }
 }
 
-/// A single match from a grep operation.
 public struct GrepMatch: Sendable, Hashable, Codable {
-  /// File path relative to the search root.
   public var file: String
-  /// 1-indexed line number of the match.
   public var lineNumber: Int
-  /// The matched line content (may be truncated).
   public var line: String
-  /// Whether this is a context line (not the match itself).
   public var isContext: Bool
 
   public init(file: String, lineNumber: Int, line: String, isContext: Bool = false) {
@@ -89,7 +83,6 @@ public struct GrepMatch: Sendable, Hashable, Codable {
   }
 }
 
-/// Parameters for a find operation.
 public struct FindParams: Sendable, Hashable, Codable {
   public var root: String
   public var pattern: String
@@ -102,7 +95,6 @@ public struct FindParams: Sendable, Hashable, Codable {
   }
 }
 
-/// Parameters for a grep operation.
 public struct GrepParams: Sendable, Hashable, Codable {
   public var root: String
   public var pattern: String
@@ -131,7 +123,6 @@ public struct GrepParams: Sendable, Hashable, Codable {
   }
 }
 
-/// Result of a find operation.
 public struct FindResult: Sendable, Hashable, Codable {
   public var entries: [FindEntry]
   public var totalBeforeLimit: Int
@@ -142,7 +133,6 @@ public struct FindResult: Sendable, Hashable, Codable {
   }
 }
 
-/// Result of a grep operation.
 public struct GrepResult: Sendable, Hashable, Codable {
   public var matches: [GrepMatch]
   public var matchCount: Int
@@ -161,14 +151,15 @@ public struct GrepResult: Sendable, Hashable, Codable {
 
 /// Minimal execution proxy for filesystem operations and process execution.
 ///
-/// `LocalRunner` implements this directly on the local machine.
-/// `MuxRunnerClient` implements this by forwarding calls over a
-/// mux session to a remote runner process.
+/// Long-lived bash is request/response only for start/cancel. Liveness and the
+/// final result come back through ``RunnerCallbacks``.
 public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
-  /// -- Process execution --
-  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
+  // -- Persistent bash --
+  func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted
+  func cancelBash(tag: String) async throws -> BashCancelResult
+  func setCallbacks(_ callbacks: any RunnerCallbacks) async
 
   // -- File I/O --
   func readData(path: String) async throws -> Data
@@ -186,6 +177,10 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Workspace materialization --
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
+}
+
+public extension Runner {
+  func setCallbacks(_: any RunnerCallbacks) async {}
 }
 
 // MARK: - Runner errors

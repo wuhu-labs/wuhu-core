@@ -55,33 +55,8 @@ public struct WuhuServer: Sendable {
       return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
     }
 
-    // Runner registry — connect to configured remote runners
-    let runnerRegistry = RunnerRegistry()
     let logger = Logger(label: "WuhuServer")
-
-    // Declare configured runner names so they always appear in list_runners
-    if let runners = config.runners, !runners.isEmpty {
-      await runnerRegistry.declareConfigured(runners.map(\.name))
-    }
-
-    // Runner tasks are retained to keep the connections alive for the server lifetime.
-    // They auto-cancel when the process exits.
-    var _runnerTasks: [Task<Void, Never>] = []
-    if let runners = config.runners, !runners.isEmpty {
-      let muxRunners = runners.map { r -> (name: String, host: String, port: Int) in
-        let (h, p) = Self.parseHostPort(r.address, defaultPort: 5532)
-        return (name: r.name, host: h, port: p)
-      }
-      _runnerTasks = WuhuMuxRunnerConnector.connectAll(
-        runners: muxRunners,
-        registry: runnerRegistry,
-        logger: logger,
-      )
-    }
-
-    // Start runner connection tasks for configured outbound runners
-    let port = config.port ?? 5530
-    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
+    let runnerRegistry = RunnerRegistry(includeBuiltInLocal: false)
 
     let service = WuhuService(
       store: store,
@@ -91,7 +66,38 @@ public struct WuhuServer: Sendable {
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,
     )
+
+    if let runners = config.runners, !runners.isEmpty {
+      await runnerRegistry.declareConfigured(runners.map(\.name))
+    }
+
+    let localRunnerSpawner = WuhuLocalRunnerSpawner(
+      socketPath: config.localRunnerSocket,
+      registry: runnerRegistry,
+      callbacks: service,
+      logger: logger,
+    )
+    try await localRunnerSpawner.start()
+
+    var _runnerTasks: [Task<Void, Never>] = []
+    if let runners = config.runners, !runners.isEmpty {
+      let muxRunners = runners.map { r -> (name: String, host: String, port: Int) in
+        let (h, p) = Self.parseHostPort(r.address, defaultPort: 5532)
+        return (name: r.name, host: h, port: p)
+      }
+      _runnerTasks = WuhuMuxRunnerConnector.connectAll(
+        runners: muxRunners,
+        registry: runnerRegistry,
+        callbacks: service,
+        logger: logger,
+      )
+    }
+
+    let port = config.port ?? 5530
+    let host = (config.host?.isEmpty == false) ? config.host! : "127.0.0.1"
+
     await service.startAgentLoopManager()
+    await service.resumeRunningSessions()
 
     let router = Router(context: WuhuRequestContext.self)
 
@@ -557,6 +563,7 @@ public struct WuhuServer: Sendable {
     // WebSocket router for incoming runner connections
     let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
       registry: runnerRegistry,
+      callbacks: service,
       logger: logger,
     )
 
@@ -572,7 +579,7 @@ public struct WuhuServer: Sendable {
     )
     try await app.runService()
 
-    // Cancel runner connection tasks on shutdown
+    await localRunnerSpawner.stop()
     for task in _runnerTasks {
       task.cancel()
     }

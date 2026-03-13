@@ -178,6 +178,12 @@ public protocol AgentBehavior: Sendable {
   /// Whether the loaded state has pending work.
   func hasWork(state: State) -> Bool
 
+  /// Pending tool calls that still need to be started.
+  ///
+  /// This is used on cold start / restart to resume an assistant turn that had
+  /// already emitted tool calls but had not yet started executing them.
+  func pendingToolCalls(in state: State) -> [ToolCall]
+
   /// Whether the transcript is mid-turn and needs an inference call.
   ///
   /// Called at the top of ``AgentLoop/runUntilIdle()`` to detect a
@@ -196,6 +202,10 @@ public protocol AgentBehavior: Sendable {
 // MARK: - Default Implementations
 
 public extension AgentBehavior {
+  func pendingToolCalls(in _: State) -> [ToolCall] {
+    []
+  }
+
   func needsInference(state _: State) -> Bool {
     false
   }
