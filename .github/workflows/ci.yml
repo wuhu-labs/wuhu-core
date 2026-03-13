@@ -42,8 +42,6 @@ jobs:
             .build
             .swiftpm
           key: ${{ runner.os }}-spm-${{ steps.toolchain.outputs.key }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-${{ steps.toolchain.outputs.key }}-
 
       - name: Resolve
         run: swift package resolve
@@ -93,8 +91,6 @@ jobs:
             .build
             .swiftpm
           key: ${{ runner.os }}-spm-${{ steps.toolchain.outputs.key }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-${{ steps.toolchain.outputs.key }}-
 
       - name: Install SwiftFormat
         run: brew install swiftformat
