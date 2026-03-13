@@ -3,7 +3,7 @@ import PiAI
 
 actor WuhuSessionRuntimeConfig {
   private var _tools: [AnyAgentTool] = []
-  private var _streamFn: StreamFn = PiAI.streamSimple
+  private var _streamFnOverride: StreamFn?
 
   func setTools(_ tools: [AnyAgentTool]) {
     _tools = tools
@@ -14,10 +14,10 @@ actor WuhuSessionRuntimeConfig {
   }
 
   func setStreamFn(_ streamFn: @escaping StreamFn) {
-    _streamFn = streamFn
+    _streamFnOverride = streamFn
   }
 
-  func streamFn() -> StreamFn {
-    _streamFn
+  func streamFn() -> StreamFn? {
+    _streamFnOverride
   }
 }

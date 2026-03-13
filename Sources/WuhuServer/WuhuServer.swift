@@ -1,9 +1,12 @@
+import Dependencies
 import Foundation
 import Hummingbird
 import HummingbirdCore
 import HummingbirdWebSocket
 import Logging
 import NIOCore
+import PiAI
+import PiAIAsyncHTTPClient
 import WuhuAPI
 import WuhuCore
 
@@ -50,14 +53,26 @@ public struct WuhuServer: Sendable {
       return nil
     }()
 
-    let requestLogger: WuhuLLMRequestLogger? = effectiveLogDir.flatMap { raw in
-      let expanded = (raw as NSString).expandingTildeInPath
-      return try? WuhuLLMRequestLogger(directoryURL: URL(fileURLWithPath: expanded, isDirectory: true))
-    }
-
     // Runner registry — connect to configured remote runners
     let runnerRegistry = RunnerRegistry()
     let logger = Logger(label: "WuhuServer")
+
+    // Configure StreamFn dependency: if a log directory is configured, wrap the
+    // shared HTTP transport with a LoggingHTTPTransport that writes raw
+    // request/response data to disk and logs to stderr via swift-log.
+    prepareDependencies {
+      if let logDirRaw = effectiveLogDir {
+        let expanded = (logDirRaw as NSString).expandingTildeInPath
+        let logDirURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        let llmLogger = Logger(label: "WuhuLLM")
+        let loggingTransport = LoggingHTTPTransport(
+          underlying: sharedHTTPTransport,
+          baseDir: logDirURL,
+          logger: llmLogger,
+        )
+        $0.streamFn = makeStreamFn(http: loggingTransport)
+      }
+    }
 
     // Declare configured runner names so they always appear in list_runners
     if let runners = config.runners, !runners.isEmpty {
@@ -86,7 +101,6 @@ public struct WuhuServer: Sendable {
     let service = WuhuService(
       store: store,
       blobStore: blobStore,
-      llmRequestLogger: requestLogger,
       workspaceRoot: workspaceRoot,
       braveSearchAPIKey: config.braveSearchAPIKey,
       runnerRegistry: runnerRegistry,

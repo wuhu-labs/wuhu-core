@@ -1,4 +1,3 @@
-import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -37,8 +36,8 @@ struct TestHarness {
     service = WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: mockLLM.streamFn,
       workspaceRoot: workspaceRoot,
+      streamFn: mockLLM.streamFn,
     )
   }
 
@@ -57,8 +56,8 @@ struct TestHarness {
     service = WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: streamFn,
       workspaceRoot: workspaceRoot,
+      streamFn: streamFn,
     )
   }
 
@@ -67,7 +66,7 @@ struct TestHarness {
     WuhuService(
       store: store,
       blobStore: blobStore,
-      baseStreamFn: newMock.streamFn,
+      streamFn: newMock.streamFn,
     )
   }
 
