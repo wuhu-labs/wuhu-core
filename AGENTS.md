@@ -21,6 +21,27 @@ as external packages.
 The native apps (macOS/iOS) live in a separate repo:
 [wuhu-app](https://github.com/wuhu-labs/wuhu-app).
 
+### The 0.6.0 → 0.7.6 Revert & Squash
+
+Commit `796b4c6` reverted main back to the `0.6.0` (`4a01d29`) state (batch
+revert of all 27 commits after `0.6.0`). The pre-revert HEAD was saved to the
+abandoned codebase branch: `backup/pre-revert-to-0.6.0`.
+
+Commit `1a2ac12` then squash-reintroduced the `0.6.0`→`0.6.1` (`cbe2e75`)
+changes (release pipeline, version/self-upgrade, mux runner v2 transport,
+SIGILL fix, repetition tracker fix) as a single commit on top of the reverted
+main. This commit was tagged `0.7.6`.
+
+**Lineage:**
+- `0.6.0` (`4a01d29`) — last clean baseline
+- `0.6.1` (`cbe2e75`) — added release pipeline, runner v2, bug fixes (5 commits)
+- `0.6.1`..`backup/pre-revert-to-0.6.0` — abandoned codebase (21 further commits: effect loops, runner v3, workers, OTel, etc.)
+- `796b4c6` — reverted main to content-identical to `0.6.0` (minus `.githooks/pre-commit` update)
+- `1a2ac12` / `0.7.6` — squash-reintroduced the `0.6.0`→`0.6.1` diff as one commit
+
+The abandoned codebase branch (`backup/pre-revert-to-0.6.0`) preserves the
+pre-revert HEAD for reference.
+
 ## Project Structure
 
 Never add a "project structure diagram" (tree listing) to this file. It always drifts from reality.
