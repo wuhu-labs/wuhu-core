@@ -22,11 +22,11 @@ import Tracing
 /// Sensitive headers (`authorization`, `x-api-key`) are redacted.
 public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   private let underlying: any PiAI.HTTPClient
-  private let baseDir: URL?
+  private let baseDir: URL
 
   private static let sensitiveHeaders: Set<String> = ["authorization", "x-api-key"]
 
-  public init(underlying: any PiAI.HTTPClient, baseDir: URL? = nil) {
+  public init(underlying: any PiAI.HTTPClient, baseDir: URL) {
     self.underlying = underlying
     self.baseDir = baseDir
   }
@@ -41,8 +41,8 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   public func sse(for request: HTTPRequest) async throws -> SSEResponse {
     let requestID = ServiceContext.current?.llmCallID ?? UUID().uuidString.lowercased()
     let now = Date()
-    let dir = baseDir.map { directoryURL(base: $0, for: requestID, at: now) }
-    let relativeDir = dir.flatMap { relativePath(of: $0) }
+    let dir = directoryURL(base: baseDir, for: requestID, at: now)
+    let relativeDir = relativePath(of: dir)
 
     // Start HTTP span — we end it when the SSE stream completes.
     let span = startSpan("http.request", ofKind: .client)
@@ -51,12 +51,8 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
     setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
 
     // Write request payload.
-    if let dir {
-      writeRequest(request, to: dir)
-      if let relativeDir {
-        span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
-      }
-    }
+    writeRequest(request, to: dir)
+    span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
 
     let sseResponse: SSEResponse
     do {
@@ -84,31 +80,23 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
             continuation.yield(event)
           }
 
-          if let dir {
-            self?.writeSSEResponse(
-              response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
-              events: captured,
-              to: dir,
-            )
-            if let relativeDir {
-              span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
-            }
-          }
+          self?.writeSSEResponse(
+            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
+            events: captured,
+            to: dir,
+          )
+          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
 
           continuation.finish()
           span.end()
         } catch {
-          if let dir {
-            self?.writeSSEResponse(
-              response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
-              events: captured,
-              to: dir,
-              error: error,
-            )
-            if let relativeDir {
-              span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
-            }
-          }
+          self?.writeSSEResponse(
+            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
+            events: captured,
+            to: dir,
+            error: error,
+          )
+          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
 
           span.recordError(error)
           span.setStatus(.init(code: .error, message: "\(error)"))
@@ -150,11 +138,9 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   }
 
   /// Relative path from `baseDir` to the given directory URL.
-  private func relativePath(of dir: URL) -> String? {
-    guard let baseDir else { return nil }
+  private func relativePath(of dir: URL) -> String {
     let basePath = baseDir.standardizedFileURL.path
     let dirPath = dir.standardizedFileURL.path
-    guard dirPath.hasPrefix(basePath) else { return nil }
     var relative = String(dirPath.dropFirst(basePath.count))
     if relative.hasPrefix("/") { relative = String(relative.dropFirst()) }
     if relative.hasSuffix("/") { relative = String(relative.dropLast()) }

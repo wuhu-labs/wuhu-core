@@ -82,19 +82,19 @@ public struct WuhuServer: Sendable {
     let runnerRegistry = RunnerRegistry()
 
     // Configure StreamFn dependency: if a log directory is configured, wrap the
-    // shared HTTP transport with a LoggingHTTPTransport that writes raw
-    // request/response payloads to disk. The StreamFn is wrapped with a traced
-    // span that records model, usage, and duration.
+    // Configure StreamFn dependency: if a log directory is configured, wrap the
+    // shared HTTP transport with LoggingHTTPTransport for payload capture.
+    // The StreamFn is always wrapped with a traced span for model/usage/duration.
     prepareDependencies {
-      let logDirURL: URL? = effectiveLogDir.map { logDirRaw in
+      let http: any PiAI.HTTPClient
+      if let logDirRaw = effectiveLogDir {
         let expanded = (logDirRaw as NSString).expandingTildeInPath
-        return URL(fileURLWithPath: expanded, isDirectory: true)
+        let logDirURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        http = LoggingHTTPTransport(underlying: sharedHTTPTransport, baseDir: logDirURL)
+      } else {
+        http = sharedHTTPTransport
       }
-      let loggingTransport = LoggingHTTPTransport(
-        underlying: sharedHTTPTransport,
-        baseDir: logDirURL,
-      )
-      $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(http: loggingTransport))
+      $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(http: http))
     }
 
     // Declare configured runner names so they always appear in list_runners
