@@ -41,7 +41,7 @@ public final class MuxStreamReader {
     }
 
     while buffer.count < count {
-      guard let chunk = try await iterator?.next() else {
+      guard let chunk = await iterator?.next() else {
         throw MuxRunnerRPCError.unexpectedEOF
       }
       buffer.append(contentsOf: chunk)
@@ -60,7 +60,7 @@ public final class MuxStreamReader {
 
     var result = buffer
     buffer = []
-    while let chunk = try await iterator?.next() {
+    while let chunk = await iterator?.next() {
       result.append(contentsOf: chunk)
     }
     return result

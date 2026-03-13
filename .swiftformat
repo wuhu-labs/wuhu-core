@@ -4,5 +4,6 @@
 --wraparguments before-first
 --wrapcollections before-first
 --wrapconditions after-first
+--disable preferForLoop
 --exclude .build
 --exclude .swiftpm

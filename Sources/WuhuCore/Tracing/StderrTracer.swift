@@ -151,7 +151,7 @@ public final class StderrSpan: Tracing.Span, @unchecked Sendable {
       "duration_ms": "\(durationMs)",
     ]
 
-    for (key, value) in attrs {
+    attrs.forEach { key, value in
       metadata[key] = "\(value)"
     }
 

@@ -11,7 +11,7 @@ import WuhuServer
 import Yams
 
 extension WuhuProvider: ExpressibleByArgument {}
-extension ReasoningEffort: ExpressibleByArgument {}
+extension ReasoningEffort: @retroactive ExpressibleByArgument {}
 extension WuhuMountTemplateType: ExpressibleByArgument {}
 
 @main
