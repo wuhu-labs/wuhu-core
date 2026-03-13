@@ -1,7 +1,7 @@
 import ArgumentParser
+import AsyncHTTPClient
 import Foundation
-import PiAI
-import PiAIAsyncHTTPClient
+import NIOFoundationCompat
 
 // MARK: - Version subcommand
 
@@ -54,7 +54,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     }
 
     // Resolve latest version from GitHub Releases
-    let http = AsyncHTTPClientTransport()
+    let http = AsyncHTTPClient.HTTPClient.shared
     let release: GitHubRelease = if let requestedVersion = target {
       try await fetchGitHubRelease(http: http, tag: requestedVersion)
     } else {
@@ -192,26 +192,29 @@ private struct GitHubRelease: Sendable {
 
 private let githubRepo = "wuhu-labs/wuhu-core"
 
-private func fetchLatestGitHubRelease(http: some HTTPClient) async throws -> GitHubRelease {
-  let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases/latest")!
+private func fetchLatestGitHubRelease(http: AsyncHTTPClient.HTTPClient) async throws -> GitHubRelease {
+  let url = "https://api.github.com/repos/\(githubRepo)/releases/latest"
   return try await fetchRelease(http: http, url: url)
 }
 
-private func fetchGitHubRelease(http: some HTTPClient, tag: String) async throws -> GitHubRelease {
-  let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases/tags/\(tag)")!
+private func fetchGitHubRelease(http: AsyncHTTPClient.HTTPClient, tag: String) async throws -> GitHubRelease {
+  let url = "https://api.github.com/repos/\(githubRepo)/releases/tags/\(tag)"
   return try await fetchRelease(http: http, url: url)
 }
 
-private func fetchRelease(http: some HTTPClient, url: URL) async throws -> GitHubRelease {
-  var req = HTTPRequest(url: url, method: "GET")
-  req.setHeader("application/vnd.github+json", for: "Accept")
-  req.setHeader("wuhu-cli/\(WuhuVersion.version)", for: "User-Agent")
+private func fetchRelease(http: AsyncHTTPClient.HTTPClient, url: String) async throws -> GitHubRelease {
+  var req = HTTPClientRequest(url: url)
+  req.method = .GET
+  req.headers.add(name: "Accept", value: "application/vnd.github+json")
+  req.headers.add(name: "User-Agent", value: "wuhu-cli/\(WuhuVersion.version)")
 
-  let (data, response) = try await http.data(for: req)
+  let response = try await http.execute(req, timeout: .seconds(30))
+  let statusCode = Int(response.status.code)
+  let data = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
 
-  guard response.statusCode == 200 else {
+  guard statusCode == 200 else {
     let body = String(decoding: data, as: UTF8.self)
-    throw UpgradeError.githubAPI(status: response.statusCode, body: body)
+    throw UpgradeError.githubAPI(status: statusCode, body: body)
   }
 
   return try parseReleaseJSON(data)
@@ -238,21 +241,21 @@ private func parseReleaseJSON(_ data: Data) throws -> GitHubRelease {
 
 // MARK: - Download
 
-private func downloadAsset(http: some HTTPClient, url: String) async throws -> Data {
-  guard let downloadURL = URL(string: url) else {
-    throw UpgradeError.badResponse("Invalid download URL: \(url)")
+private func downloadAsset(http: AsyncHTTPClient.HTTPClient, url: String) async throws -> Data {
+  var req = HTTPClientRequest(url: url)
+  req.method = .GET
+  req.headers.add(name: "Accept", value: "application/octet-stream")
+  req.headers.add(name: "User-Agent", value: "wuhu-cli/\(WuhuVersion.version)")
+
+  let response = try await http.execute(req, timeout: .seconds(300))
+  let statusCode = Int(response.status.code)
+
+  guard (200 ..< 300).contains(statusCode) else {
+    throw UpgradeError.downloadFailed(status: statusCode)
   }
 
-  var req = HTTPRequest(url: downloadURL, method: "GET")
-  req.setHeader("application/octet-stream", for: "Accept")
-  req.setHeader("wuhu-cli/\(WuhuVersion.version)", for: "User-Agent")
-
-  let (data, response) = try await http.data(for: req)
-  guard (200 ..< 300).contains(response.statusCode) else {
-    throw UpgradeError.downloadFailed(status: response.statusCode)
-  }
-
-  return data
+  // GitHub redirects to a CDN; async-http-client follows redirects by default.
+  return try await Data(buffer: response.body.collect(upTo: 256 * 1024 * 1024))
 }
 
 // MARK: - tar.gz extraction

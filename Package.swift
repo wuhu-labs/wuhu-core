@@ -135,7 +135,6 @@ let package = Package(
         "WuhuCLIKit",
         "WuhuServer",
         "WuhuRunner",
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
       ],
