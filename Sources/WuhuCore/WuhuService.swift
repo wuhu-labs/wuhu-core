@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import PiAI
 import WuhuAPI
@@ -5,10 +6,8 @@ import WuhuAPI
 public actor WuhuService {
   let store: SQLiteSessionStore
   let blobStore: WuhuBlobStore
-  private let llmRequestLogger: WuhuLLMRequestLogger?
   private let retryPolicy: WuhuLLMRetryPolicy
   private let asyncBashRegistry: WuhuAsyncBashRegistry
-  private let baseStreamFn: StreamFn
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
   private let instanceID: String
@@ -16,26 +15,23 @@ public actor WuhuService {
   private let subscriptionHub = WuhuSessionSubscriptionHub()
   private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
+  @Dependency(\.streamFn) private var streamFn
 
   private var runtimes: [String: WuhuSessionRuntime] = [:]
 
   public init(
     store: SQLiteSessionStore,
     blobStore: WuhuBlobStore,
-    llmRequestLogger: WuhuLLMRequestLogger? = nil,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
     asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
-    baseStreamFn: @escaping StreamFn = PiAI.streamSimple,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry? = nil,
   ) {
     self.store = store
     self.blobStore = blobStore
-    self.llmRequestLogger = llmRequestLogger
     self.retryPolicy = retryPolicy
     self.asyncBashRegistry = asyncBashRegistry
-    self.baseStreamFn = baseStreamFn
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
@@ -83,6 +79,7 @@ public actor WuhuService {
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
+      streamFn: streamFn,
       onIdle: nil,
     )
     runtimes[sessionID] = runtime
@@ -578,11 +575,8 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
     )
     let resolvedTools = agentToolset(session: session, baseTools: baseTools)
 
-    let streamFn = llmRequestLogger?.makeLoggedStreamFn(base: baseStreamFn, sessionID: sessionID.rawValue, purpose: .agent) ?? baseStreamFn
-
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.setTools(resolvedTools)
-    await runtime.setStreamFn(streamFn)
     await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }

@@ -1,5 +1,6 @@
 import Foundation
 import PiAI
+import PiAIAsyncHTTPClient
 import WuhuAPI
 import WuhuCoreClient
 
@@ -239,11 +240,11 @@ public struct WuhuClient: Sendable {
 
     var req = HTTPRequest(url: url, method: "GET")
     req.setHeader("text/event-stream", for: "Accept")
-    let sse = try await http.sse(for: req)
+    let sseResponse = try await http.sse(for: req)
     return AsyncThrowingStream { continuation in
       let task = Task {
         do {
-          for try await message in sse {
+          for try await message in sseResponse.events {
             guard let data = message.data.data(using: .utf8) else { continue }
             let event = try WuhuJSON.decoder.decode(WuhuSessionStreamEvent.self, from: data)
             continuation.yield(event)

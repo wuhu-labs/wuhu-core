@@ -30,7 +30,7 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.3.2"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.4.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
@@ -69,6 +69,7 @@ let package = Package(
       dependencies: [
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -78,6 +79,7 @@ let package = Package(
         "WuhuCoreClient",
         "WuhuAPI",
         .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "GRDB", package: "GRDB.swift"),
@@ -92,6 +94,7 @@ let package = Package(
       dependencies: [
         "WuhuAPI",
         "WuhuCoreClient",
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -99,12 +102,15 @@ let package = Package(
       name: "WuhuServer",
       dependencies: [
         "WuhuCore",
+        .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "WSClient", package: "swift-websocket"),
         .product(name: "Yams", package: "Yams"),
+        .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
         .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
       ],

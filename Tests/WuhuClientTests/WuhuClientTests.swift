@@ -102,13 +102,14 @@ struct WuhuClientTests {
       },
       sseHandler: { request in
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/follow?sinceCursor=1&stopAfterIdle=1")
-        #expect(request.headers["Accept"] == "text/event-stream")
+        #expect(request.headers["Accept"] == ["text/event-stream"])
 
-        return AsyncThrowingStream { continuation in
+        let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
           continuation.yield(.init(data: #"{"type":"assistant_text_delta","delta":"Hi"}"#))
           continuation.yield(.init(data: #"{"type":"done"}"#))
           continuation.finish()
         }
+        return SSEResponse(response: HTTPResponse(statusCode: 200), events: events)
       },
     )
 
@@ -170,13 +171,14 @@ struct WuhuClientTests {
     let http = MockHTTPClient(
       sseHandler: { request in
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/follow")
-        #expect(request.headers["Accept"] == "text/event-stream")
+        #expect(request.headers["Accept"] == ["text/event-stream"])
 
-        return AsyncThrowingStream { continuation in
+        let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
           continuation.yield(.init(data: #"{"type":"idle"}"#))
           continuation.yield(.init(data: #"{"type":"done"}"#))
           continuation.finish()
         }
+        return SSEResponse(response: HTTPResponse(statusCode: 200), events: events)
       },
     )
 
@@ -204,11 +206,11 @@ struct WuhuClientTests {
 
 private struct MockHTTPClient: HTTPClient {
   var dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))?
-  var sseHandler: (@Sendable (HTTPRequest) async throws -> AsyncThrowingStream<SSEMessage, any Error>)?
+  var sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)?
 
   init(
     dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))? = nil,
-    sseHandler: (@Sendable (HTTPRequest) async throws -> AsyncThrowingStream<SSEMessage, any Error>)? = nil,
+    sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)? = nil,
   ) {
     self.dataHandler = dataHandler
     self.sseHandler = sseHandler
@@ -221,7 +223,7 @@ private struct MockHTTPClient: HTTPClient {
     return try await dataHandler(request)
   }
 
-  func sse(for request: HTTPRequest) async throws -> AsyncThrowingStream<SSEMessage, any Error> {
+  func sse(for request: HTTPRequest) async throws -> SSEResponse {
     guard let sseHandler else {
       throw PiAIError.unsupported("MockHTTPClient.sseHandler not set")
     }
