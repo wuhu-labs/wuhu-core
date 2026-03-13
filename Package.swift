@@ -138,7 +138,6 @@ let package = Package(
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "WSClient", package: "swift-websocket"),
-        .product(name: "Testing", package: "swift-testing"),
         .product(name: "Dependencies", package: "swift-dependencies"),
       ],
     ),
@@ -146,28 +145,24 @@ let package = Package(
       name: "WuhuClientTests",
       dependencies: [
         "WuhuClient",
-        .product(name: "Testing", package: "swift-testing"),
       ],
     ),
     .testTarget(
       name: "WuhuServerTests",
       dependencies: [
         "WuhuServer",
-        .product(name: "Testing", package: "swift-testing"),
       ],
     ),
     .testTarget(
       name: "WuhuCLITests",
       dependencies: [
         "wuhu",
-        .product(name: "Testing", package: "swift-testing"),
       ],
     ),
     .testTarget(
       name: "WuhuAPITests",
       dependencies: [
         "WuhuAPI",
-        .product(name: "Testing", package: "swift-testing"),
       ],
     ),
   ],
