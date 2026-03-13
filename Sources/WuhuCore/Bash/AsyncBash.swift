@@ -213,8 +213,8 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       let stdoutURL = tmp.appendingPathComponent("wuhu-async-bash-\(id)-stdout.log")
       let stderrURL = tmp.appendingPathComponent("wuhu-async-bash-\(id)-stderr.log")
 
-      FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
-      FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+      _ = FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+      _ = FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
 
       let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
       let stderrHandle = try FileHandle(forWritingTo: stderrURL)
