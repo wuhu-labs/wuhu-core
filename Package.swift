@@ -42,6 +42,8 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
+    .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
+    .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
     // Pin swift-collections < 1.4.0 to work around Hummingbird's missing
     // `import DequeModule` — see https://github.com/hummingbird-project/hummingbird/issues/791
     .package(url: "https://github.com/apple/swift-collections.git", "1.0.0" ..< "1.4.0"),
@@ -86,6 +88,7 @@ let package = Package(
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
+        .product(name: "Tracing", package: "swift-distributed-tracing"),
       ],
       swiftSettings: strictConcurrency,
     ),
@@ -111,6 +114,7 @@ let package = Package(
         .product(name: "WSClient", package: "swift-websocket"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "OTel", package: "swift-otel"),
         .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
         .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
       ],

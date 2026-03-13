@@ -5,8 +5,11 @@ import HummingbirdCore
 import HummingbirdWebSocket
 import Logging
 import NIOCore
+import OTel
 import PiAI
 import PiAIAsyncHTTPClient
+import ServiceLifecycle
+import Tracing
 import WuhuAPI
 import WuhuCore
 
@@ -53,26 +56,45 @@ public struct WuhuServer: Sendable {
       return nil
     }()
 
+    // Bootstrap tracing: if an OTel endpoint is configured, use the OTel tracer
+    // with OTLP export. Otherwise, use a lightweight stderr tracer so spans
+    // are still logged.
+    let logger = Logger(label: "WuhuServer")
+    let otelEndpoint = config.otelEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+    var otelService: (any Service)?
+    if let otelEndpoint, !otelEndpoint.isEmpty {
+      var otelConfig = OTel.Configuration.default
+      otelConfig.traces.otlpExporter.endpoint = otelEndpoint
+      // Disable metrics and logs export — we only want traces for now.
+      otelConfig.metrics.enabled = false
+      otelConfig.logs.enabled = false
+      do {
+        otelService = try OTel.bootstrap(configuration: otelConfig)
+      } catch {
+        logger.error("Failed to bootstrap OTel: \(error). Falling back to stderr tracer.")
+        InstrumentationSystem.bootstrap(StderrTracer())
+      }
+    } else {
+      InstrumentationSystem.bootstrap(StderrTracer())
+    }
+
     // Runner registry — connect to configured remote runners
     let runnerRegistry = RunnerRegistry()
-    let logger = Logger(label: "WuhuServer")
 
     // Configure StreamFn dependency: if a log directory is configured, wrap the
     // shared HTTP transport with a LoggingHTTPTransport that writes raw
-    // request/response data to disk, and wrap the StreamFn with stderr logging.
+    // request/response payloads to disk. The StreamFn is wrapped with a traced
+    // span that records model, usage, and duration.
     prepareDependencies {
-      let llmLogger = Logger(label: "WuhuLLM")
-      if let logDirRaw = effectiveLogDir {
+      let payloadStore: (any LLMPayloadStore)? = effectiveLogDir.map { logDirRaw in
         let expanded = (logDirRaw as NSString).expandingTildeInPath
-        let logDirURL = URL(fileURLWithPath: expanded, isDirectory: true)
-        let loggingTransport = LoggingHTTPTransport(
-          underlying: sharedHTTPTransport,
-          baseDir: logDirURL,
-        )
-        $0.streamFn = loggingStreamFn(wrapping: makeStreamFn(http: loggingTransport), logger: llmLogger)
-      } else {
-        $0.streamFn = loggingStreamFn(wrapping: makeStreamFn(http: sharedHTTPTransport), logger: llmLogger)
+        return LocalLLMPayloadStore(rootDirectory: expanded)
       }
+      let loggingTransport = LoggingHTTPTransport(
+        underlying: sharedHTTPTransport,
+        payloadStore: payloadStore,
+      )
+      $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(http: loggingTransport))
     }
 
     // Declare configured runner names so they always appear in list_runners
@@ -585,7 +607,18 @@ public struct WuhuServer: Sendable {
       configuration: .init(address: .hostname(host, port: port)),
       logger: logger,
     )
-    try await app.runService()
+
+    // Run the app and OTel service (if configured) concurrently.
+    if let otelService {
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { try await otelService.run() }
+        group.addTask { try await app.runService() }
+        try await group.next()
+        group.cancelAll()
+      }
+    } else {
+      try await app.runService()
+    }
 
     // Cancel runner connection tasks on shutdown
     for task in _runnerTasks {

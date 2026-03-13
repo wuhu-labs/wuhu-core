@@ -25,6 +25,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
   public var llm: LLM?
   public var databasePath: String?
   public var llmRequestLogDir: String?
+  public var otelEndpoint: String?
   public var workspacePath: String?
   public var host: String?
   public var port: Int?
@@ -35,6 +36,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     llm: LLM? = nil,
     databasePath: String? = nil,
     llmRequestLogDir: String? = nil,
+    otelEndpoint: String? = nil,
     workspacePath: String? = nil,
     host: String? = nil,
     port: Int? = nil,
@@ -44,6 +46,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     self.llm = llm
     self.databasePath = databasePath
     self.llmRequestLogDir = llmRequestLogDir
+    self.otelEndpoint = otelEndpoint
     self.workspacePath = workspacePath
     self.host = host
     self.port = port
@@ -55,6 +58,7 @@ public struct WuhuServerConfig: Sendable, Hashable, Codable {
     case llm
     case databasePath
     case llmRequestLogDir = "llm_request_log_dir"
+    case otelEndpoint = "otel_endpoint"
     case workspacePath
     case host
     case port
