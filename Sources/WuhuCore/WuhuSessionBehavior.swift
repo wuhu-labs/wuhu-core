@@ -212,6 +212,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     let provider = session.provider.piProvider
     let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
     var requestOptions = makeRequestOptions(model: apiModel, settings: settings, userModelID: session.model)
+    requestOptions.sessionId = sessionID.rawValue
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
     let tools = await runtimeConfig.tools()
@@ -392,6 +393,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
     let streamFn = await runtimeConfig.streamFn()
     var requestOptions = makeRequestOptions(model: apiModel, settings: state.settings, userModelID: session.model)
+    requestOptions.sessionId = sessionID.rawValue
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
     let summary = try await WuhuCompactionEngine.generateSummary(
       preparation: prep,
