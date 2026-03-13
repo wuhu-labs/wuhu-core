@@ -869,31 +869,20 @@ private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
     parameters: schema,
   )
 
-  return AnyAgentTool(tool: tool, label: "bash") { _, args in
+  return AnyAgentTool(tool: tool, label: "bash") { toolCallId, args in
     let params = try Params.parse(toolName: tool.name, args: args)
 
-    // If a mount is specified and we have a mount resolver, use it
-    if let mountResolver, params.mount != nil {
-      let resolved = try await mountResolver(params.mount)
-      let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
-      return try formatBashResult(run)
-    }
-
-    // If no mount specified but we have a resolver, resolve primary mount (may be remote)
     if let mountResolver {
-      do {
-        let resolved = try await mountResolver(nil)
-        if resolved.mount?.runnerID != .local {
-          // Remote primary mount — execute through runner
-          let run = try await resolved.runner.runBash(command: params.command, cwd: resolved.cwd, timeout: params.timeout)
-          return try formatBashResult(run)
-        }
-      } catch {
-        // Fall through to local execution if mount resolution fails
-      }
+      let resolved = try await mountResolver(params.mount)
+      _ = try await resolved.runner.startBash(
+        tag: toolCallId,
+        command: params.command,
+        cwd: resolved.cwd,
+        timeout: params.timeout,
+      )
+      throw PendingToolExecutionError()
     }
 
-    // Local execution path (original behavior)
     let cwd = try await requireCwd(cwdProvider)
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
@@ -905,64 +894,8 @@ private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
       cwd: cwd,
       timeoutSeconds: params.timeout,
     )
-    return try formatBashResult(run)
+    return try formatBashToolResult(run)
   }
-}
-
-/// Format a BashResult into an AgentToolResult with truncation handling.
-private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
-  let exitCode = run.exitCode
-  let output = run.output
-  let timedOut = run.timedOut
-  let terminated = run.terminated
-  let fullOutputPath = run.fullOutputPath ?? ""
-
-  let truncation = ToolTruncation.truncateTail(output)
-  var outputText = truncation.content.isEmpty ? "(no output)" : truncation.content
-
-  var details: [String: JSONValue] = [:]
-  if truncation.truncated {
-    details["truncation"] = truncation.toJSON()
-    if !fullOutputPath.isEmpty {
-      details["fullOutputPath"] = .string(fullOutputPath)
-    }
-
-    let startLine = truncation.totalLines - truncation.outputLines + 1
-    let endLine = truncation.totalLines
-    if truncation.lastLinePartial {
-      let last = output.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
-      let lastSize = ToolTruncation.formatSize(last.utf8.count)
-      if !outputText.isEmpty { outputText += "\n\n" }
-      outputText += "[Showing last \(ToolTruncation.formatSize(truncation.outputBytes)) of line \(endLine) (line is \(lastSize))."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    } else if truncation.truncatedBy == "lines" {
-      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines)."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    } else {
-      outputText += "\n\n[Showing lines \(startLine)-\(endLine) of \(truncation.totalLines) (\(ToolTruncation.formatSize(ToolTruncation.defaultMaxBytes)) limit)."
-      if !fullOutputPath.isEmpty { outputText += " Full output: \(fullOutputPath)" }
-      outputText += "]"
-    }
-  }
-
-  if timedOut {
-    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    throw ToolError.message(outputText + "\n\nCommand timed out")
-  }
-  if terminated {
-    if !fullOutputPath.isEmpty { try? FileManager.default.removeItem(atPath: fullOutputPath) }
-    throw ToolError.message(outputText + "\n\nCommand aborted")
-  }
-  if exitCode != 0 {
-    throw ToolError.message(outputText + "\n\nCommand exited with code \(exitCode)")
-  }
-
-  if !truncation.truncated, !fullOutputPath.isEmpty {
-    try? FileManager.default.removeItem(atPath: fullOutputPath)
-  }
-  return AgentToolResult(content: [.text(outputText)], details: details.isEmpty ? .object([:]) : .object(details))
 }
 
 // MARK: - async_bash
@@ -1193,8 +1126,9 @@ private func shellEscape(_ s: String) -> String {
 }
 
 // Bash execution is provided by LocalBash (Sources/WuhuCore/LocalBash.swift).
-// The bash tool calls LocalBash.run() for local execution and Runner.runBash()
-// for remote execution via the mount resolver.
+// The bash tool uses LocalBash.run() only as a direct local fallback.
+// Normal session execution goes through Runner.startBash()/callbacks so bash
+// can survive server restarts via the runner/worker stack.
 
 // MARK: - copy tool
 

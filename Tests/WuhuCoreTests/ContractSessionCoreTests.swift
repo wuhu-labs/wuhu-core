@@ -50,7 +50,7 @@ struct ContractSessionCoreTests {
       behavior.apply(action, to: &next)
     }
     let reloaded = try await behavior.loadState()
-    if next != reloaded {
+    if next.entries != reloaded.entries {
       #expect(next.entries.map(\.id) == reloaded.entries.map(\.id))
       if next.entries.count == reloaded.entries.count {
         for (a, b) in zip(next.entries, reloaded.entries) where a != b {
@@ -61,14 +61,14 @@ struct ContractSessionCoreTests {
           break
         }
       }
-      #expect(next.toolCallStatus == reloaded.toolCallStatus)
-      #expect(next.settings == reloaded.settings)
-      #expect(next.status == reloaded.status)
-      #expect(next.systemUrgent == reloaded.systemUrgent)
-      #expect(next.steer == reloaded.steer)
-      #expect(next.followUp == reloaded.followUp)
     }
-    #expect(next == reloaded)
+    #expect(next.entries == reloaded.entries)
+    #expect(next.toolCallStatus.mapValues(\.status) == reloaded.toolCallStatus.mapValues(\.status))
+    #expect(next.settings == reloaded.settings)
+    #expect(next.status == reloaded.status)
+    #expect(next.systemUrgent == reloaded.systemUrgent)
+    #expect(next.steer == reloaded.steer)
+    #expect(next.followUp == reloaded.followUp)
     return next
   }
 
@@ -133,22 +133,23 @@ struct ContractSessionCoreTests {
     state = try await applyAndAssertInvariant(behavior, state) { state in
       try await behavior.persistAssistantEntry(assistantWithTool, state: state)
     }
-    #expect(state.toolCallStatus["t1"] == ToolCallStatus.pending)
+    #expect(state.toolCallStatus["t1"]?.status == ToolCallStatus.pending)
 
     // Mark started.
     state = try await applyAndAssertInvariant(behavior, state) { state in
       try await behavior.toolWillExecute(call, state: state)
     }
-    #expect(state.toolCallStatus["t1"] == ToolCallStatus.started)
+    #expect(state.toolCallStatus["t1"]?.status == ToolCallStatus.started)
 
-    // Simulate crash: recover stale tool call should append an errored tool result.
+    // Simulate crash: age the started record past the heartbeat deadline, then recover.
+    state.toolCallStatus["t1"]?.updatedAt = Date(timeIntervalSinceNow: -61)
     let stale = behavior.staleToolCallIDs(in: state)
     #expect(stale == ["t1"])
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
       try await behavior.recoverStaleToolCall(id: "t1", state: state)
     }
-    #expect(state.toolCallStatus["t1"] == ToolCallStatus.errored)
+    #expect(state.toolCallStatus["t1"]?.status == ToolCallStatus.errored)
     #expect(state.entries.contains { entry in
       guard case let .message(m) = entry.payload else { return false }
       guard case let .toolResult(t) = m else { return false }

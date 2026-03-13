@@ -6,16 +6,10 @@ import Mux
 import MuxWebSocket
 import WuhuCore
 
-/// Creates a WebSocket router that accepts incoming mux runner connections.
-///
-/// Runners connect to the server's HTTP port via WebSocket upgrade on
-/// `/v1/runner/mux`, establish a mux session, perform a hello exchange,
-/// and then serve RPC requests over mux streams.
 enum WuhuMuxRunnerAcceptor {
-  /// Build a WebSocket router with the runner acceptor route.
-  /// The returned router should be passed to `.http1WebSocketUpgrade(webSocketRouter:)`.
   static func webSocketRouter(
     registry: RunnerRegistry,
+    callbacks: any RunnerCallbacks,
     logger: Logger,
   ) -> Router<BasicWebSocketRequestContext> {
     let wsRouter = Router(context: BasicWebSocketRequestContext.self)
@@ -24,7 +18,7 @@ enum WuhuMuxRunnerAcceptor {
       .upgrade([:])
     } onUpgrade: { inbound, outbound, _ in
       let conn = WebSocketConnection(inbound: inbound, outbound: outbound)
-      await handleConnection(conn, registry: registry, logger: logger)
+      await handleConnection(conn, registry: registry, callbacks: callbacks, logger: logger)
     }
 
     return wsRouter
@@ -33,6 +27,7 @@ enum WuhuMuxRunnerAcceptor {
   private static func handleConnection(
     _ connection: WebSocketConnection,
     registry: RunnerRegistry,
+    callbacks: any RunnerCallbacks,
     logger: Logger,
   ) async {
     let session = MuxSession(connection: connection, role: .responder)
@@ -45,8 +40,11 @@ enum WuhuMuxRunnerAcceptor {
       logger.info("Incoming mux runner '\(runnerName)' connected (v\(hello.version))")
 
       let client = MuxRunnerClient(name: runnerName, session: session)
-      let registered = await registry.registerIncoming(client, name: runnerName)
+      await client.setCallbacks(callbacks)
+      let callbackTask = Task { await client.startCallbackListener() }
+      defer { callbackTask.cancel() }
 
+      let registered = await registry.registerIncoming(client, name: runnerName)
       guard registered else {
         logger.warning("Incoming mux runner '\(runnerName)' rejected: runner with same name already connected")
         await session.close()
@@ -60,10 +58,9 @@ enum WuhuMuxRunnerAcceptor {
         }
       }
 
-      // Keep alive until session ends
       try? await runTask.value
     } catch {
-      logger.error("Mux runner connection failed: \(error)")
+      logger.error("Mux runner connection failed: \(String(describing: error))")
       await session.close()
     }
   }

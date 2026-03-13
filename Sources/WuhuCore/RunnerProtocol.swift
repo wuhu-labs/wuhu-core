@@ -12,22 +12,8 @@ public struct HelloRequest: Sendable, Hashable, Codable {
   }
 }
 
-public struct BashRequest: Sendable, Hashable, Codable {
-  public var command: String
-  public var cwd: String
-  public var timeout: Double?
-
-  public init(command: String, cwd: String, timeout: Double? = nil) {
-    self.command = command
-    self.cwd = cwd
-    self.timeout = timeout
-  }
-}
-
 public struct ReadRequest: Sendable, Hashable, Codable {
   public var path: String
-  /// If true, response includes binary data.
-  /// If false (default), response includes string content.
   public var binary: Bool
 
   public init(path: String, binary: Bool = false) {
@@ -39,8 +25,6 @@ public struct ReadRequest: Sendable, Hashable, Codable {
 public struct WriteRequest: Sendable, Hashable, Codable {
   public var path: String
   public var createDirs: Bool
-  /// For text writes, content is in this field.
-  /// For binary writes, this is nil and data follows on the stream.
   public var content: String?
 
   public init(path: String, createDirs: Bool = true, content: String? = nil) {
@@ -91,8 +75,6 @@ public struct MaterializeRequest: Sendable, Hashable, Codable {
     self.startupScript = startupScript
   }
 }
-
-// FindParams and GrepParams are defined in Runner.swift.
 
 // MARK: - Response payloads
 
@@ -157,7 +139,6 @@ public struct MaterializeResponse: Sendable, Hashable, Codable {
 
 // MARK: - Wire error type
 
-/// Error type used in Result values for runner dispatch.
 public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringConvertible {
   public var message: String
 
@@ -181,10 +162,10 @@ public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringC
 
 // MARK: - Internal dispatch enums
 
-/// A runner request, used internally by `RunnerServerHandler` for dispatch.
 public enum RunnerRequest: Sendable, Hashable {
   case hello(HelloRequest)
-  case bash(id: String, BashRequest)
+  case startBash(id: String, StartBashRequest)
+  case cancelBash(id: String, CancelBashRequest)
   case read(id: String, ReadRequest)
   case write(id: String, WriteRequest)
   case exists(id: String, ExistsRequest)
@@ -196,10 +177,10 @@ public enum RunnerRequest: Sendable, Hashable {
   case materialize(id: String, MaterializeRequest)
 }
 
-/// A runner response, used internally by `RunnerServerHandler` for dispatch.
 public enum RunnerResponse: Sendable {
   case hello(HelloResponse)
-  case bash(id: String, Result<BashResult, RunnerWireError>)
+  case startBash(id: String, Result<BashStarted, RunnerWireError>)
+  case cancelBash(id: String, Result<BashCancelResult, RunnerWireError>)
   case read(id: String, Result<ReadResponse, RunnerWireError>)
   case write(id: String, Result<WriteResponse, RunnerWireError>)
   case exists(id: String, Result<ExistsResponse, RunnerWireError>)
@@ -213,7 +194,8 @@ public enum RunnerResponse: Sendable {
   public var responseID: String? {
     switch self {
     case .hello: nil
-    case let .bash(id, _): id
+    case let .startBash(id, _): id
+    case let .cancelBash(id, _): id
     case let .read(id, _): id
     case let .write(id, _): id
     case let .exists(id, _): id

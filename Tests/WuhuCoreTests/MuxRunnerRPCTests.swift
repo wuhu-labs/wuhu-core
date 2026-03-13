@@ -141,6 +141,25 @@ enum MuxTestError: Error {
   case serverSessionNotEstablished
 }
 
+private func configureBashCallbacks(for client: MuxRunnerClient) async -> (callbacks: TestBashCallbacks, listenerTask: Task<Void, Never>) {
+  let callbacks = TestBashCallbacks()
+  await client.setCallbacks(callbacks)
+  let listenerTask = Task { await client.startCallbackListener() }
+  return (callbacks, listenerTask)
+}
+
+private func startBashAndWait(
+  client: MuxRunnerClient,
+  callbacks: TestBashCallbacks,
+  tag: String,
+  command: String,
+  cwd: String,
+  timeout: TimeInterval?,
+) async throws -> BashResult {
+  _ = try await client.startBash(tag: tag, command: command, cwd: cwd, timeout: timeout)
+  return await callbacks.waitForResult(tag: tag)
+}
+
 // MARK: - Parameterized Test Suite
 
 @Suite("Mux Runner RPC")
@@ -150,8 +169,8 @@ struct MuxRunnerRPCTests {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
       let stream = try await clientSession.open()
 
-      let req = BashRequest(command: "echo hello", cwd: "/tmp", timeout: nil)
-      try await MuxRunnerCodec.writeRequest(stream, op: .bash, payload: req)
+      let req = StartBashRequest(tag: "t1", command: "echo hello", cwd: "/tmp", timeout: nil)
+      try await MuxRunnerCodec.writeRequest(stream, op: .startBash, payload: req)
       try await stream.finish()
 
       var iter = serverSession.inbound.makeAsyncIterator()
@@ -159,8 +178,9 @@ struct MuxRunnerRPCTests {
       let reader = MuxStreamReader(stream: inbound)
       let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
 
-      #expect(op == .bash)
-      let decoded = try MuxRunnerCodec.decode(BashRequest.self, from: payload)
+      #expect(op == .startBash)
+      let decoded = try MuxRunnerCodec.decode(StartBashRequest.self, from: payload)
+      #expect(decoded.tag == "t1")
       #expect(decoded.command == "echo hello")
       #expect(decoded.cwd == "/tmp")
     }
@@ -180,6 +200,8 @@ struct MuxRunnerRPCTests {
       defer { handlerTask.cancel() }
 
       let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let (bashCallbacks, listenerTask) = await configureBashCallbacks(for: client)
+      defer { listenerTask.cancel() }
 
       // Test exists
       let fileExists = try await client.exists(path: "/workspace/hello.txt")
@@ -213,7 +235,14 @@ struct MuxRunnerRPCTests {
       #expect(names.contains("new.txt"))
 
       // Test bash
-      let bashResult = try await client.runBash(command: "echo test", cwd: "/workspace", timeout: nil)
+      let bashResult = try await startBashAndWait(
+        client: client,
+        callbacks: bashCallbacks,
+        tag: "bash-1",
+        command: "echo test",
+        cwd: "/workspace",
+        timeout: nil,
+      )
       #expect(bashResult.exitCode == 0)
       #expect(bashResult.output == "test output\n")
 
@@ -354,8 +383,17 @@ struct MuxRunnerRPCTests {
       defer { handlerTask.cancel() }
 
       let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let (bashCallbacks, listenerTask) = await configureBashCallbacks(for: client)
+      defer { listenerTask.cancel() }
 
-      let result = try await client.runBash(command: "cat bigfile", cwd: "/", timeout: nil)
+      let result = try await startBashAndWait(
+        client: client,
+        callbacks: bashCallbacks,
+        tag: "bigfile-tag",
+        command: "cat bigfile",
+        cwd: "/",
+        timeout: nil,
+      )
 
       #expect(result.exitCode == 0)
       #expect(result.output == largeOutput)
@@ -376,10 +414,20 @@ struct MuxRunnerRPCTests {
       defer { handlerTask.cancel() }
 
       let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+      let (bashCallbacks, listenerTask) = await configureBashCallbacks(for: client)
+      defer { listenerTask.cancel() }
 
       // Fire slow bash in background
+      let slowTag = "slow-tag"
       let bashTask = Task {
-        try await client.runBash(command: "slow", cwd: "/tmp", timeout: nil)
+        try await startBashAndWait(
+          client: client,
+          callbacks: bashCallbacks,
+          tag: slowTag,
+          command: "slow",
+          cwd: "/tmp",
+          timeout: nil,
+        )
       }
 
       // Give it a moment to start
@@ -411,14 +459,40 @@ actor SlowInMemoryRunner: Runner {
   private var files: [String: Data] = [:]
   private var directories: Set<String> = ["/"]
   private var bashDelay: Duration = .seconds(1)
+  private var callbacks: (any RunnerCallbacks)?
+  private var activeTags: Set<String> = []
 
   func seedDirectory(path: String) {
     directories.insert(path)
   }
 
-  func runBash(command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    try await Task.sleep(for: bashDelay)
-    return BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false)
+  func setCallbacks(_ callbacks: any RunnerCallbacks) async {
+    self.callbacks = callbacks
+  }
+
+  func startBash(tag: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashStarted {
+    if activeTags.contains(tag) {
+      return BashStarted(tag: tag, alreadyRunning: true)
+    }
+    activeTags.insert(tag)
+    let callbacks = callbacks
+    let delay = bashDelay
+    Task { [weak self] in
+      try? await callbacks?.bashHeartbeat(tag: tag)
+      try? await Task.sleep(for: delay)
+      try? await callbacks?.bashFinished(tag: tag, result: BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false))
+      await self?.finish(tag: tag)
+    }
+    return BashStarted(tag: tag, alreadyRunning: false)
+  }
+
+  func cancelBash(tag: String) async throws -> BashCancelResult {
+    guard activeTags.remove(tag) != nil else { return .notFound }
+    return .cancelled
+  }
+
+  private func finish(tag: String) {
+    activeTags.remove(tag)
   }
 
   func readData(path: String) async throws -> Data {

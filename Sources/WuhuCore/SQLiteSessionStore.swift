@@ -876,7 +876,7 @@ extension SQLiteSessionStore {
   struct LoopStateParts: Sendable {
     var session: WuhuSession
     var entries: [WuhuSessionEntry]
-    var toolCallStatus: [String: ToolCallStatus]
+    var toolCallStatus: [String: ToolCallRecord]
     var settings: SessionSettingsSnapshot
     var status: SessionStatusSnapshot
     var systemUrgent: SystemUrgentQueueBackfill
@@ -895,7 +895,7 @@ extension SQLiteSessionStore {
 
   struct ToolCallStatusUpdate: Sendable, Hashable {
     var id: String
-    var status: ToolCallStatus
+    var record: ToolCallRecord
   }
 
   func loadLoopStateParts(sessionID: SessionID) async throws -> LoopStateParts {
@@ -917,6 +917,18 @@ extension SQLiteSessionStore {
       steer: steer,
       followUp: followUp,
     )
+  }
+
+  func queryRecentlyRunningSessions() async throws -> [WuhuSession] {
+    try await dbQueue.read { db in
+      let cutoff = Date().addingTimeInterval(-24 * 3600)
+      return try SessionRow
+        .filter(Column("executionStatus") == SessionExecutionStatus.running.rawValue)
+        .filter(Column("isArchived") == false)
+        .filter(Column("updatedAt") > cutoff)
+        .fetchAll(db)
+        .map { try $0.toModel() }
+    }
   }
 
   func loadSettingsSnapshot(sessionID: SessionID) async throws -> SessionSettingsSnapshot {
@@ -1314,17 +1326,46 @@ extension SQLiteSessionStore {
     }
   }
 
-  func loadToolCallStatus(sessionID: SessionID) async throws -> [String: ToolCallStatus] {
+  func loadToolCallStatus(sessionID: SessionID) async throws -> [String: ToolCallRecord] {
     try await dbQueue.read { db in
       let rows = try ToolCallStatusRow
         .filter(Column("sessionID") == sessionID.rawValue)
         .fetchAll(db)
-      var out: [String: ToolCallStatus] = [:]
+      var out: [String: ToolCallRecord] = [:]
       out.reserveCapacity(rows.count)
       for r in rows {
-        out[r.toolCallID] = ToolCallStatus(rawValue: r.status) ?? .pending
+        out[r.toolCallID] = ToolCallRecord(status: ToolCallStatus(rawValue: r.status) ?? .pending, updatedAt: r.updatedAt)
       }
       return out
+    }
+  }
+
+  func touchToolCallStatus(sessionID: SessionID, id: String) async throws -> ToolCallStatusUpdate? {
+    let now = Date()
+    return try await dbQueue.write { db in
+      guard let row = try ToolCallStatusRow
+        .filter(Column("sessionID") == sessionID.rawValue)
+        .filter(Column("toolCallID") == id)
+        .fetchOne(db)
+      else {
+        return nil
+      }
+      try db.execute(
+        sql: "UPDATE tool_call_status SET updatedAt = ? WHERE sessionID = ? AND toolCallID = ?",
+        arguments: [now, sessionID.rawValue, id],
+      )
+      let status = ToolCallStatus(rawValue: row.status) ?? .pending
+      return ToolCallStatusUpdate(id: id, record: ToolCallRecord(status: status, updatedAt: now))
+    }
+  }
+
+  func lookupSessionForToolCall(toolCallID: String) async throws -> String? {
+    try await dbQueue.read { db in
+      try String.fetchOne(
+        db,
+        sql: "SELECT sessionID FROM tool_call_status WHERE toolCallID = ?",
+        arguments: [toolCallID],
+      )
     }
   }
 
@@ -1345,7 +1386,7 @@ extension SQLiteSessionStore {
         try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
       }
     }
-    return calls.map { .init(id: $0.id, status: status) }
+    return calls.map { .init(id: $0.id, record: ToolCallRecord(status: status, updatedAt: now)) }
   }
 
   func setToolCallStatus(sessionID: SessionID, id: String, status: ToolCallStatus) async throws -> ToolCallStatusUpdate {
@@ -1363,7 +1404,7 @@ extension SQLiteSessionStore {
         try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
       }
     }
-    return .init(id: id, status: status)
+    return .init(id: id, record: ToolCallRecord(status: status, updatedAt: now))
   }
 
   func appendEntryWithSession(sessionID: SessionID, payload: WuhuEntryPayload, createdAt: Date) async throws -> (WuhuSession, WuhuSessionEntry) {

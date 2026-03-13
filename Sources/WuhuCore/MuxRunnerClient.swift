@@ -2,27 +2,67 @@ import Foundation
 import Mux
 import WuhuAPI
 
-/// Server-side actor that implements the `Runner` protocol by forwarding
-/// all calls over a `MuxSession` to a remote runner process.
-///
-/// Each Runner method opens a dedicated mux stream, sends the request,
-/// reads the response, and returns. The stream is the correlation —
-/// no request IDs, no pending maps, no continuations.
 public actor MuxRunnerClient: Runner {
   public nonisolated let id: RunnerID
   public let runnerName: String
   private let session: MuxSession
+  private var callbacks: (any RunnerCallbacks)?
 
-  public init(name: String, session: MuxSession) {
-    id = .remote(name: name)
+  public init(id: RunnerID? = nil, name: String, session: MuxSession) {
+    self.id = id ?? .remote(name: name)
     runnerName = name
     self.session = session
   }
 
+  // MARK: - Callback routing
+
+  public func setCallbacks(_ callbacks: any RunnerCallbacks) async {
+    self.callbacks = callbacks
+  }
+
+  public func startCallbackListener() async {
+    for await stream in session.inbound {
+      let callbacks = callbacks
+      Task {
+        await Self.handleCallbackStream(stream, callbacks: callbacks)
+      }
+    }
+  }
+
+  private static func handleCallbackStream(_ stream: MuxStream, callbacks: (any RunnerCallbacks)?) async {
+    do {
+      let reader = MuxStreamReader(stream: stream)
+      let (op, payload) = try await MuxRunnerCodec.readRequest(reader)
+
+      switch op {
+      case .bashHeartbeat:
+        let heartbeat = try MuxRunnerCodec.decode(BashHeartbeat.self, from: payload)
+        try await callbacks?.bashHeartbeat(tag: heartbeat.tag)
+        try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: EmptyAck())
+
+      case .bashFinished:
+        let finished = try MuxRunnerCodec.decode(BashFinished.self, from: payload)
+        try await callbacks?.bashFinished(tag: finished.tag, result: finished.result)
+        try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: EmptyAck())
+
+      default:
+        try await MuxRunnerCodec.writeError(stream, op: op, message: "Unexpected op \(op) on callback stream")
+      }
+
+      try await stream.finish()
+    } catch {
+      try? await stream.reset()
+    }
+  }
+
   // MARK: - Runner protocol
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout))
+  public func startBash(tag: String, command: String, cwd: String, timeout: TimeInterval?) async throws -> BashStarted {
+    try await rpc(.startBash, request: StartBashRequest(tag: tag, command: command, cwd: cwd, timeout: timeout))
+  }
+
+  public func cancelBash(tag: String) async throws -> BashCancelResult {
+    try await rpc(.cancelBash, request: CancelBashRequest(tag: tag))
   }
 
   public func readData(path: String) async throws -> Data {
@@ -94,10 +134,6 @@ public actor MuxRunnerClient: Runner {
     try await rpc(.materialize, request: params)
   }
 
-  // MARK: - Generic RPC helper
-
-  /// Open a stream, send a request, read a typed response, close.
-  /// Used for simple request/response operations (no binary data).
   private func rpc<Resp: Decodable>(_ op: MuxRunnerOp, request: some Encodable & Sendable) async throws -> Resp {
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: op, payload: request)
@@ -106,9 +142,10 @@ public actor MuxRunnerClient: Runner {
     let reader = MuxStreamReader(stream: stream)
     let (ok, _, payload) = try await MuxRunnerCodec.readResponse(reader)
     guard ok else {
-      let message = String(decoding: Data(payload), as: UTF8.self)
-      throw RunnerError.requestFailed(message: message)
+      throw RunnerError.requestFailed(message: String(decoding: Data(payload), as: UTF8.self))
     }
     return try MuxRunnerCodec.decode(Resp.self, from: payload)
   }
 }
+
+private struct EmptyAck: Codable, Sendable {}

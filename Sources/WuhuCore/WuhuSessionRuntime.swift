@@ -20,10 +20,10 @@ actor WuhuSessionRuntime {
   private var startTask: Task<Void, Never>?
   private var observeTask: Task<Void, Never>?
 
-  private var streaming: Bool = false
-  private var inflightText: String = ""
+  private var streaming = false
+  private var inflightText = ""
   private var observedState: WuhuSessionLoopState = .empty
-  private var observationReady: Bool = false
+  private var observationReady = false
 
   init(
     sessionID: SessionID,
@@ -54,9 +54,7 @@ actor WuhuSessionRuntime {
         } catch is CancellationError {
           return
         } catch {
-          // Best-effort: keep the per-session loop alive for the process lifetime.
-          let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n"
-          FileHandle.standardError.write(Data(line.utf8))
+          FileHandle.standardError.write(Data("[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n".utf8))
           try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
       }
@@ -85,11 +83,9 @@ actor WuhuSessionRuntime {
   }
 
   func isIdle() -> Bool {
-    // Fast-path: don't block callers on observation if they only need a best-effort hint.
     !streaming && !behavior.hasWork(state: observedState)
   }
 
-  /// Returns accumulated streaming text if inference is in progress, nil otherwise.
   func currentInflightText() -> String? {
     guard streaming else { return nil }
     return inflightText
@@ -99,6 +95,16 @@ actor WuhuSessionRuntime {
     let queued = observedState.followUp.pending.count
     let active = streaming ? 1 : 0
     return .init(activePromptCount: active + queued)
+  }
+
+  func deliverBashResult(toolCallID: String, result: BashResult) async {
+    await ensureStarted()
+    try? await loop.send(.deliverBashResult(toolCallID: toolCallID, result: result))
+  }
+
+  func recordToolHeartbeat(toolCallID: String) async {
+    await ensureStarted()
+    try? await loop.send(.heartbeatToolCall(id: toolCallID), wakeLoop: false)
   }
 
   func enqueue(message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
@@ -124,7 +130,6 @@ actor WuhuSessionRuntime {
 
     if !streaming, !behavior.hasWork(state: observedState) {
       try await loop.send(.applyModelSelection(selection))
-      // Observe if the session updates quickly; otherwise treat as deferred.
       let updated = try await store.getSession(id: sessionID.rawValue)
       return updated.model == selection.model && updated.provider == selection.provider
     }
@@ -161,13 +166,10 @@ actor WuhuSessionRuntime {
     publishedFollowUpCursor = .init(rawValue: "0")
   }
 
-  // MARK: - Observation handling
-
   private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
     observedState = observation.state
     streaming = observation.inflight != nil
 
-    // Seed inflight text from the loop's accumulated stream actions.
     if let actions = observation.inflight {
       inflightText = actions.map { action in
         switch action {
@@ -193,15 +195,9 @@ actor WuhuSessionRuntime {
       switch action {
       case let .entryAppended(entry):
         await eventHub.publish(sessionID: sessionID.rawValue, event: .entryAppended(entry))
-        await subscriptionHub.publish(
-          sessionID: sessionID.rawValue,
-          event: .transcriptAppended([entry]),
-        )
+        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .transcriptAppended([entry]))
 
-      case .sessionUpdated:
-        break
-
-      case .toolCallStatusUpdated:
+      case .sessionUpdated, .toolCallStatusUpdated:
         break
 
       case .systemQueueUpdated:
@@ -246,10 +242,7 @@ actor WuhuSessionRuntime {
         if let onIdle {
           Task { await onIdle(sessionID.rawValue) }
         }
-        // Best-effort: apply deferred model changes once idle.
-        Task { [weak self] in
-          try? await self?.applyPendingModelIfPossible()
-        }
+        Task { [weak self] in try? await self?.applyPendingModelIfPossible() }
       }
 
     case .streamBegan:

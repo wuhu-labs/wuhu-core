@@ -1,14 +1,10 @@
 import Foundation
 import WuhuAPI
 
-/// Information about a registered runner.
 public struct RunnerInfo: Sendable, Hashable {
   public enum Source: String, Sendable, Hashable {
-    /// Built-in local runner.
     case builtIn = "built-in"
-    /// Declared in server config (server connects out).
     case declared
-    /// Connected in via WebSocket (runner connects to server).
     case incoming
   }
 
@@ -23,52 +19,43 @@ public struct RunnerInfo: Sendable, Hashable {
   }
 }
 
-/// Server-side registry of live runners.
-/// Always contains a local runner. Remote runners are registered/removed
-/// as WebSocket connections come and go.
-///
-/// Tracks two categories of remote runners:
-/// - **Declared** runners from server config (server connects out to them).
-/// - **Incoming** runners that connect in via the server's WebSocket endpoint.
-///
-/// When a declared and incoming runner share the same name, the declared one
-/// takes priority for dispatch.
 public actor RunnerRegistry {
+  private let hasBuiltInLocal: Bool
+  private var localRunner: (any Runner)?
   private var runners: [String: any Runner] = [:]
-  /// Names declared in server config. These always appear in `listAll`,
-  /// even when disconnected.
   private var declaredNames: Set<String> = []
-  /// Names of runners that connected in (not declared in config).
   private var incomingNames: Set<String> = []
 
-  public init() {
-    let local = LocalRunner()
-    runners["local"] = local
+  public init(includeBuiltInLocal: Bool = true) {
+    hasBuiltInLocal = includeBuiltInLocal
+    if includeBuiltInLocal {
+      localRunner = LocalRunner()
+    }
   }
 
-  /// Record the set of runner names declared in server config.
-  /// Called once at server startup.
   public func declareConfigured(_ names: [String]) {
     for name in names {
       declaredNames.insert(name)
     }
   }
 
-  /// Register a runner. For local, uses key "local".
-  /// For remote, uses the runner name.
   public func register(_ runner: any Runner) {
-    let key = runnerKey(runner.id)
-    runners[key] = runner
+    switch runner.id {
+    case .local:
+      localRunner = runner
+    case let .remote(name):
+      runners[name] = runner
+    }
   }
 
-  /// Register an incoming runner (connected via the server's WS endpoint).
-  /// If a declared runner with the same name is already connected, the
-  /// incoming one is rejected (returns false).
   @discardableResult
   public func registerIncoming(_ runner: any Runner, name: String) -> Bool {
     if declaredNames.contains(name), runners[name] != nil {
-      // Declared runner already connected — reject incoming with same name.
       return false
+    }
+    if name == "local" {
+      localRunner = runner
+      return true
     }
     runners[name] = runner
     if !declaredNames.contains(name) {
@@ -77,72 +64,60 @@ public actor RunnerRegistry {
     return true
   }
 
-  /// Remove a runner by its ID.
   public func remove(_ id: RunnerID) {
-    let key = runnerKey(id)
-    // Never remove the local runner
-    guard key != "local" else { return }
-    runners.removeValue(forKey: key)
-    incomingNames.remove(key)
+    switch id {
+    case .local:
+      if hasBuiltInLocal { return }
+      localRunner = nil
+    case let .remote(name):
+      if name == "local" {
+        if hasBuiltInLocal { return }
+        localRunner = nil
+      } else {
+        runners.removeValue(forKey: name)
+        incomingNames.remove(name)
+      }
+    }
   }
 
-  /// Get a runner by its RunnerID.
   public func get(_ id: RunnerID) -> (any Runner)? {
-    runners[runnerKey(id)]
+    switch id {
+    case .local:
+      localRunner
+    case let .remote(name):
+      name == "local" ? localRunner : runners[name]
+    }
   }
 
-  /// Get a runner by name. "local" returns the local runner.
   public func get(name: String) -> (any Runner)? {
-    if name == "local" { return runners["local"] }
+    if name == "local" { return localRunner }
     return runners[name]
   }
 
-  /// List all registered runner names.
   public func listRunnerNames() -> [String] {
-    runners.keys.sorted()
+    var names = Set(runners.keys)
+    if localRunner != nil {
+      names.insert("local")
+    }
+    return names.sorted()
   }
 
-  /// List all runners with status information.
-  /// Includes: local (always), all declared runners (connected or not),
-  /// and all incoming runners (only while connected).
   public func listAll() -> [RunnerInfo] {
     var result: [RunnerInfo] = []
+    result.append(RunnerInfo(name: "local", source: .builtIn, isConnected: localRunner != nil))
 
-    // Local runner — always present
-    result.append(RunnerInfo(name: "local", source: .builtIn, isConnected: true))
-
-    // Declared runners — always listed, with connection status
     for name in declaredNames.sorted() {
-      result.append(RunnerInfo(
-        name: name,
-        source: .declared,
-        isConnected: runners[name] != nil,
-      ))
+      result.append(RunnerInfo(name: name, source: .declared, isConnected: runners[name] != nil))
     }
 
-    // Incoming runners — only listed while connected
-    for name in incomingNames.sorted() {
-      if runners[name] != nil {
-        result.append(RunnerInfo(
-          name: name,
-          source: .incoming,
-          isConnected: true,
-        ))
-      }
+    for name in incomingNames.sorted() where runners[name] != nil {
+      result.append(RunnerInfo(name: name, source: .incoming, isConnected: true))
     }
 
     return result
   }
 
-  /// Check if a runner is registered and reachable.
   public func isAvailable(_ id: RunnerID) -> Bool {
-    runners[runnerKey(id)] != nil
-  }
-
-  private func runnerKey(_ id: RunnerID) -> String {
-    switch id {
-    case .local: "local"
-    case let .remote(name): name
-    }
+    get(id) != nil
   }
 }
