@@ -181,7 +181,7 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   private func setHeaderAttributes(
     _ headers: [String: [String]],
     prefix: String,
-    on span: any Span
+    on span: any Span,
   ) {
     for (name, values) in headers {
       guard !Self.sensitiveHeaders.contains(name.lowercased()) else { continue }

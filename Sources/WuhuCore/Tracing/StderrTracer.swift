@@ -16,39 +16,38 @@ public struct StderrTracer: Tracer, Sendable {
     self.logger = logger
   }
 
-  public func startSpan<Instant: TracerInstant>(
+  public func startSpan(
     _ operationName: String,
     context: @autoclosure () -> ServiceContext,
     ofKind kind: SpanKind,
-    at instant: @autoclosure () -> Instant,
-    function: String,
-    file fileID: String,
-    line: UInt
+    at instant: @autoclosure () -> some TracerInstant,
+    function _: String,
+    file _: String,
+    line _: UInt,
   ) -> StderrSpan {
     let ctx = context()
-    let span = StderrSpan(
+    return StderrSpan(
       operationName: operationName,
       context: ctx,
       kind: kind,
       startNanos: instant().nanosecondsSinceEpoch,
       logger: logger,
     )
-    return span
   }
 
   public func forceFlush() {}
 
-  public func inject<Carrier, Inject>(
-    _ context: ServiceContext,
-    into carrier: inout Carrier,
-    using injector: Inject
-  ) where Inject: Injector, Carrier == Inject.Carrier {}
+  public func inject<Carrier, Inject: Injector>(
+    _: ServiceContext,
+    into _: inout Carrier,
+    using _: Inject,
+  ) where Carrier == Inject.Carrier {}
 
-  public func extract<Carrier, Extract>(
-    _ carrier: Carrier,
-    into context: inout ServiceContext,
-    using extractor: Extract
-  ) where Extract: Extractor, Carrier == Extract.Carrier {}
+  public func extract<Carrier, Extract: Extractor>(
+    _: Carrier,
+    into _: inout ServiceContext,
+    using _: Extract,
+  ) where Carrier == Extract.Carrier {}
 }
 
 /// A span that accumulates attributes and logs a summary on `end()`.
@@ -91,14 +90,16 @@ public final class StderrSpan: Tracing.Span, @unchecked Sendable {
     }
   }
 
-  public var isRecording: Bool { true }
+  public var isRecording: Bool {
+    true
+  }
 
   init(
     operationName: String,
     context: ServiceContext,
     kind: SpanKind,
     startNanos: UInt64,
-    logger: Logger
+    logger: Logger,
   ) {
     self.context = context
     self.kind = kind
@@ -119,19 +120,19 @@ public final class StderrSpan: Tracing.Span, @unchecked Sendable {
     _events.append(event)
   }
 
-  public func recordError<Instant: TracerInstant>(
-    _ error: Error,
+  public func recordError(
+    _: Error,
     attributes: SpanAttributes,
-    at instant: @autoclosure () -> Instant
+    at instant: @autoclosure () -> some TracerInstant,
   ) {
     addEvent(SpanEvent(name: "exception", at: instant(), attributes: attributes))
   }
 
-  public func addLink(_ link: SpanLink) {
+  public func addLink(_: SpanLink) {
     // Stderr tracer does not track links.
   }
 
-  public func end<Instant: TracerInstant>(at instant: @autoclosure () -> Instant) {
+  public func end(at instant: @autoclosure () -> some TracerInstant) {
     lock.lock()
     guard !_ended else {
       lock.unlock()
@@ -150,7 +151,7 @@ public final class StderrSpan: Tracing.Span, @unchecked Sendable {
       "duration_ms": "\(durationMs)",
     ]
 
-    attrs.forEach { key, value in
+    for (key, value) in attrs {
       metadata[key] = "\(value)"
     }
 
