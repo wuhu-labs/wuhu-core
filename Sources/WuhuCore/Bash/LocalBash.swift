@@ -25,7 +25,7 @@ public enum LocalBash {
       process.environment = env
 
       let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("wuhu-bash-\(UUID().uuidString.lowercased()).log")
-      FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+      _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
       let outputHandle = try FileHandle(forWritingTo: outputURL)
       process.standardOutput = outputHandle
       process.standardError = outputHandle

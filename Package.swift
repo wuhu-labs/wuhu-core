@@ -44,9 +44,6 @@ let package = Package(
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
     .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
     .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
-    // Pin swift-collections < 1.4.0 to work around Hummingbird's missing
-    // `import DequeModule` — see https://github.com/hummingbird-project/hummingbird/issues/791
-    .package(url: "https://github.com/apple/swift-collections.git", "1.0.0" ..< "1.4.0"),
     grdbDependency,
   ],
   targets: [
