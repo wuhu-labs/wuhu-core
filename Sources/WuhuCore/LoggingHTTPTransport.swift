@@ -20,7 +20,7 @@ import Tracing
 /// a fresh UUID, so the `llm.call` span and payload directory share the same ID.
 ///
 /// Sensitive headers (`authorization`, `x-api-key`) are redacted.
-public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
+public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
   private let underlying: any PiAI.HTTPClient
   private let baseDir: URL
 
@@ -81,35 +81,47 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
     let responseHeaders = sseResponse.response.headers
 
     let wrappedEvents = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-      let task = Task { [weak self] in
+      let task = Task {
         var captured: [SSEMessage] = []
+        var terminalError: (any Error)?
+
+        defer {
+          writeSSEResponse(
+            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
+            events: captured,
+            to: dir,
+            error: terminalError,
+          )
+          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
+
+          if let terminalError {
+            span.recordError(terminalError)
+            span.setStatus(.init(code: .error, message: "\(terminalError)"))
+          }
+
+          span.end()
+        }
+
         do {
           for try await event in sseResponse.events {
             captured.append(event)
-            continuation.yield(event)
+            switch continuation.yield(event) {
+            case .enqueued, .dropped:
+              continue
+            case .terminated:
+              terminalError = CancellationError()
+              return
+            @unknown default:
+              continue
+            }
           }
-
-          self?.writeSSEResponse(
-            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
-            events: captured,
-            to: dir,
-          )
-          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
-
           continuation.finish()
-          span.end()
-        } catch {
-          self?.writeSSEResponse(
-            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
-            events: captured,
-            to: dir,
-            error: error,
-          )
-          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
 
-          span.recordError(error)
-          span.setStatus(.init(code: .error, message: "\(error)"))
-          span.end()
+          if Task.isCancelled {
+            terminalError = CancellationError()
+          }
+        } catch {
+          terminalError = error
 
           if Task.isCancelled {
             continuation.finish()
@@ -119,7 +131,8 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
         }
       }
 
-      continuation.onTermination = { _ in
+      continuation.onTermination = { termination in
+        guard case .cancelled = termination else { return }
         task.cancel()
       }
     }
@@ -132,11 +145,12 @@ public final class LoggingHTTPTransport: PiAI.HTTPClient, @unchecked Sendable {
   /// Create the payload directory and start an `http.request` span.
   /// Shared by both `data(for:)` and `sse(for:)`.
   private func beginRequest(_ request: HTTPRequest) -> (dir: URL, relativeDir: String, span: any Span) {
-    let requestID = ServiceContext.current?.llmCallID ?? UUID().uuidString.lowercased()
+    let context = ServiceContext.current ?? .topLevel
+    let requestID = context.llmCallID ?? UUID().uuidString.lowercased()
     let dir = directoryURL(base: baseDir, for: requestID, at: Date())
     let relativeDir = relativePath(of: dir)
 
-    let span = startSpan("http.request", ofKind: .client)
+    let span = startSpan("http.request", context: context, ofKind: .client)
     span.attributes["http.method"] = request.method
     span.attributes["http.url"] = request.url.absoluteString
     setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
