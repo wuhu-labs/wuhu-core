@@ -72,10 +72,10 @@ public struct WuhuServer: Sendable {
         otelService = try OTel.bootstrap(configuration: otelConfig)
       } catch {
         logger.error("Failed to bootstrap OTel: \(error). Falling back to stderr tracer.")
-        InstrumentationSystem.bootstrap(StderrTracer())
+        InstrumentationSystem.bootstrap(LoggerBackedTracer())
       }
     } else {
-      InstrumentationSystem.bootstrap(StderrTracer())
+      InstrumentationSystem.bootstrap(LoggerBackedTracer())
     }
 
     // Runner registry — connect to configured remote runners

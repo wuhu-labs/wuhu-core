@@ -2,14 +2,14 @@ import Foundation
 import Logging
 import Tracing
 
-/// A minimal `Tracer` that logs span start/end events to stderr via swift-log.
+/// A minimal `Tracer` that logs span summaries via swift-log.
 ///
 /// Used as the default when no OTel endpoint is configured. Bootstrapped via
-/// `InstrumentationSystem.bootstrap(StderrTracer())`.
+/// `InstrumentationSystem.bootstrap(LoggerBackedTracer())`.
 ///
 /// When an OTel endpoint is configured, the OTel tracer is bootstrapped instead
 /// and this type is not used.
-public struct StderrTracer: Tracer, Sendable {
+public struct LoggerBackedTracer: Tracer, Sendable {
   private let logger: Logger
 
   public init(logger: Logger = Logger(label: "Tracing")) {
@@ -24,9 +24,9 @@ public struct StderrTracer: Tracer, Sendable {
     function _: String,
     file _: String,
     line _: UInt,
-  ) -> StderrSpan {
+  ) -> LoggerBackedSpan {
     let ctx = context()
-    return StderrSpan(
+    return LoggerBackedSpan(
       operationName: operationName,
       context: ctx,
       kind: kind,
@@ -51,7 +51,7 @@ public struct StderrTracer: Tracer, Sendable {
 }
 
 /// A span that accumulates attributes and logs a summary on `end()`.
-public final class StderrSpan: Tracing.Span, @unchecked Sendable {
+public final class LoggerBackedSpan: Tracing.Span, @unchecked Sendable {
   private let lock = NSLock()
 
   public let context: ServiceContext
@@ -129,7 +129,7 @@ public final class StderrSpan: Tracing.Span, @unchecked Sendable {
   }
 
   public func addLink(_: SpanLink) {
-    // Stderr tracer does not track links.
+    // Logger-backed tracer does not track links.
   }
 
   public func end(at instant: @autoclosure () -> some TracerInstant) {
