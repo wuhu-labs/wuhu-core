@@ -200,6 +200,18 @@ public struct WuhuServer: Sendable {
 
     // MARK: - Workspace docs
 
+    router.get("v1/workspace/tree") { request, context async throws -> Response in
+      let tree = try await workspaceDocsStore.directoryTree()
+      return try context.responseEncoder.encode(tree, from: request, context: context)
+    }
+
+    router.get("v1/workspace/query") { request, context async throws -> Response in
+      struct Query: Decodable { var sql: String }
+      let query = try request.uri.decodeQuery(as: Query.self, context: context)
+      let rows = try await workspaceDocsStore.engine.rawQuery(query.sql)
+      return try context.responseEncoder.encode(rows, from: request, context: context)
+    }
+
     router.get("v1/workspace/docs") { _, _ async throws -> [WuhuWorkspaceDocSummary] in
       try await workspaceDocsStore.listDocs()
     }

@@ -34,7 +34,7 @@ struct WuhuWorkspaceDocsStore: Sendable {
     self.workspaceRoot = workspaceRoot
     scanner = WorkspaceScanner(root: workspaceRoot)
     let config = try scanner.loadConfiguration()
-    engine = try WorkspaceEngine(configuration: config)
+    engine = try WorkspaceEngine(configuration: config, workspaceRoot: workspaceRoot)
   }
 
   func ensureDefaultDirectories() throws {
@@ -72,11 +72,17 @@ struct WuhuWorkspaceDocsStore: Sendable {
     }
   }
 
+  // MARK: - Reads
+
   func listDocs() async throws -> [WuhuWorkspaceDocSummary] {
     let documents = try await engine.allDocuments()
     return documents.map { doc in
       WuhuWorkspaceDocSummary(path: doc.path, frontmatter: buildFrontmatter(from: doc))
     }
+  }
+
+  func directoryTree() async throws -> DirectoryNode {
+    try await engine.directoryTree()
   }
 
   func readDoc(relativePath rawRelativePath: String) async throws -> WuhuWorkspaceDoc {
@@ -85,29 +91,23 @@ struct WuhuWorkspaceDocsStore: Sendable {
       throw WuhuWorkspaceDocsStoreError.notMarkdown(relativePath)
     }
 
-    guard let doc = try await engine.document(at: relativePath) else {
+    guard let doc = try await engine.resolveDocument(at: relativePath) else {
       throw WuhuWorkspaceDocsStoreError.notFound(relativePath)
     }
 
-    // Read the body from disk — the engine intentionally does not store bodies.
-    let docURL = workspaceRoot.appendingPathComponent(relativePath)
-    let standardizedDoc = docURL.standardizedFileURL
-    let standardizedRoot = workspaceRoot.standardizedFileURL
-
-    let rootPath = standardizedRoot.path.hasSuffix("/") ? standardizedRoot.path : (standardizedRoot.path + "/")
-    guard standardizedDoc.path.hasPrefix(rootPath) else {
-      throw WuhuWorkspaceDocsStoreError.invalidRelativePath(rawRelativePath)
-    }
-
-    let raw: String
+    let body: String
     do {
-      raw = try String(contentsOf: standardizedDoc, encoding: .utf8)
-    } catch {
-      throw WuhuWorkspaceDocsStoreError.failedToRead(relativePath, underlying: String(describing: error))
+      body = try await engine.readBody(at: relativePath)
+    } catch let error as WorkspaceEngineBodyError {
+      switch error {
+      case .notFound:
+        throw WuhuWorkspaceDocsStoreError.notFound(relativePath)
+      case .noWorkspaceRoot:
+        throw WuhuWorkspaceDocsStoreError.failedToRead(relativePath, underlying: error.description)
+      case let .readFailed(_, underlying):
+        throw WuhuWorkspaceDocsStoreError.failedToRead(relativePath, underlying: underlying)
+      }
     }
-
-    // Strip frontmatter from the raw content to get the body.
-    let body = stripFrontmatter(raw)
 
     return WuhuWorkspaceDoc(path: relativePath, frontmatter: buildFrontmatter(from: doc), body: body)
   }
@@ -146,20 +146,5 @@ struct WuhuWorkspaceDocsStore: Sendable {
     }
 
     return components.joined(separator: "/")
-  }
-
-  private func stripFrontmatter(_ raw: String) -> String {
-    var lines = raw.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-    guard let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else {
-      return raw
-    }
-    lines.removeFirst()
-
-    while let line = lines.first {
-      lines.removeFirst()
-      if line.trimmingCharacters(in: .whitespacesAndNewlines) == "---" { break }
-    }
-
-    return lines.map(String.init).joined(separator: "\n")
   }
 }

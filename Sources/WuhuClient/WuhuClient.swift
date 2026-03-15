@@ -65,6 +65,24 @@ public struct WuhuClient: Sendable {
     return try WuhuJSON.decoder.decode([WuhuWorkspaceDocSummary].self, from: data)
   }
 
+  public func workspaceTree() async throws -> DirectoryNode {
+    let url = baseURL.appending(path: "v1").appending(path: "workspace").appending(path: "tree")
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(DirectoryNode.self, from: data)
+  }
+
+  public func workspaceQuery(sql: String) async throws -> [[String: String]] {
+    var url = baseURL.appending(path: "v1").appending(path: "workspace").appending(path: "query")
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "sql", value: sql)]
+    url = components?.url ?? url
+
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([[String: String]].self, from: data)
+  }
+
   public func readWorkspaceDoc(path: String) async throws -> WuhuWorkspaceDoc {
     var url = baseURL.appending(path: "v1").appending(path: "workspace").appending(path: "doc")
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
