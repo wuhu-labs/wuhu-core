@@ -1,6 +1,8 @@
 import Foundation
 import PiAI
 
+@_exported import WorkspaceContracts
+
 public struct WuhuWorkspaceDocSummary: Sendable, Hashable, Codable, Identifiable {
   public var path: String
   public var frontmatter: [String: JSONValue]

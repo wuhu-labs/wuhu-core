@@ -72,6 +72,7 @@ struct WuhuCLI: AsyncParsableCommand {
         GetSession.self,
         ListSkills.self,
         ListSessions.self,
+        Workspace.self,
       ],
     )
 
@@ -408,6 +409,105 @@ struct WuhuCLI: AsyncParsableCommand {
         for s in sessions {
           let cwdStr = s.cwd ?? "(no mount)"
           FileHandle.standardOutput.write(Data("\(s.id)  \(s.provider.rawValue)  \(s.model)  cwd=\(cwdStr)  updatedAt=\(s.updatedAt)\n".utf8))
+        }
+      }
+    }
+
+    struct Workspace: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        commandName: "workspace",
+        abstract: "Workspace document commands.",
+        subcommands: [
+          Tree.self,
+          Read.self,
+          Query.self,
+        ],
+      )
+
+      struct Tree: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "tree",
+          abstract: "Show the workspace directory tree.",
+        )
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let tree = try await client.workspaceTree()
+          printTree(tree, indent: 0)
+        }
+
+        private func printTree(_ node: WuhuAPI.DirectoryNode, indent: Int) {
+          let prefix = String(repeating: "  ", count: indent)
+          let name = node.path.isEmpty ? "(root)" : node.name
+          let indexMarker = node.hasIndex ? " [index]" : ""
+          FileHandle.standardOutput.write(Data("\(prefix)\(name)/\(indexMarker)\n".utf8))
+          for child in node.children {
+            printTree(child, indent: indent + 1)
+          }
+        }
+      }
+
+      struct Read: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "read",
+          abstract: "Read a workspace document.",
+        )
+
+        @Argument(help: "Workspace-relative path to the document (e.g., docs/readme.md, issues/_index.md).")
+        var path: String
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let doc = try await client.readWorkspaceDoc(path: path)
+          // Print frontmatter summary.
+          if !doc.frontmatter.isEmpty {
+            FileHandle.standardOutput.write(Data("--- frontmatter ---\n".utf8))
+            for (key, value) in doc.frontmatter.sorted(by: { $0.key < $1.key }) {
+              FileHandle.standardOutput.write(Data("\(key): \(value)\n".utf8))
+            }
+            FileHandle.standardOutput.write(Data("---\n\n".utf8))
+          }
+          FileHandle.standardOutput.write(Data(doc.body.utf8))
+          if !doc.body.hasSuffix("\n") {
+            FileHandle.standardOutput.write(Data("\n".utf8))
+          }
+        }
+      }
+
+      struct Query: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "query",
+          abstract: "Run a raw SQL query against the workspace engine.",
+        )
+
+        @Argument(help: "SQL query to execute.")
+        var sql: String
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let rows = try await client.workspaceQuery(sql: sql)
+          if rows.isEmpty {
+            FileHandle.standardOutput.write(Data("(no results)\n".utf8))
+            return
+          }
+          // Collect all column names from the first row.
+          let columns = rows[0].keys.sorted()
+          // Print header.
+          FileHandle.standardOutput.write(Data((columns.joined(separator: "\t") + "\n").utf8))
+          // Print rows.
+          for row in rows {
+            let values = columns.map { row[$0] ?? "NULL" }
+            FileHandle.standardOutput.write(Data((values.joined(separator: "\t") + "\n").utf8))
+          }
         }
       }
     }

@@ -20,7 +20,7 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.4.1"),
-    .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.2"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
@@ -39,6 +39,7 @@ let package = Package(
       name: "WuhuAPI",
       dependencies: [
         .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "WorkspaceContracts", package: "wuhu-workspace-engine"),
       ],
     ),
     .target(
