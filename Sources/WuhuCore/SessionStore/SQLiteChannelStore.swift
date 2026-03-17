@@ -69,16 +69,20 @@ public actor SQLiteChannelStore {
     }
 
     return try await dbQueue.write { db in
-      var row = ChannelRow(
-        id: id,
-        name: trimmed,
-        topic: topic?.trimmingCharacters(in: .whitespacesAndNewlines),
-        kind: kind.rawValue,
-        createdAt: now,
-        updatedAt: now,
-      )
-      try row.insert(db)
-      return row.toModel()
+      do {
+        var row = ChannelRow(
+          id: id,
+          name: trimmed,
+          topic: topic?.trimmingCharacters(in: .whitespacesAndNewlines),
+          kind: kind.rawValue,
+          createdAt: now,
+          updatedAt: now,
+        )
+        try row.insert(db)
+        return row.toModel()
+      } catch let error as DatabaseError where error.resultCode == .SQLITE_CONSTRAINT_UNIQUE {
+        throw WuhuChannelStoreError.channelNameAlreadyExists(trimmed)
+      }
     }
   }
 
@@ -103,16 +107,28 @@ public actor SQLiteChannelStore {
         throw WuhuChannelStoreError.channelNotFound(id)
       }
 
+      var changed = false
+
       if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
         row.name = name
+        changed = true
       }
       if let topic {
         let trimmed = topic.trimmingCharacters(in: .whitespacesAndNewlines)
         row.topic = trimmed.isEmpty ? nil : trimmed
+        changed = true
+      }
+
+      guard changed else {
+        return row.toModel()
       }
 
       row.updatedAt = Date()
-      try row.update(db)
+      do {
+        try row.update(db)
+      } catch let error as DatabaseError where error.resultCode == .SQLITE_CONSTRAINT_UNIQUE {
+        throw WuhuChannelStoreError.channelNameAlreadyExists(row.name)
+      }
       return row.toModel()
     }
   }
@@ -141,14 +157,31 @@ public actor SQLiteChannelStore {
         throw WuhuChannelStoreError.userNotFound(userID)
       }
 
+      // Check if already a member — if so, update role only (preserve joinedAt)
+      if var existing = try ChannelMemberRow
+        .filter(Column("channelID") == channelID && Column("userID") == userID)
+        .fetchOne(db)
+      {
+        if existing.role != role.rawValue {
+          existing.role = role.rawValue
+          try existing.update(db)
+        }
+        return WuhuChannelMember(
+          channelID: channelID,
+          userID: userID,
+          username: userRow.username,
+          role: role,
+          joinedAt: existing.joinedAt,
+        )
+      }
+
       var row = ChannelMemberRow(
         channelID: channelID,
         userID: userID,
         role: role.rawValue,
         joinedAt: now,
       )
-      // Use INSERT OR REPLACE so re-adding updates role
-      try row.save(db)
+      try row.insert(db)
 
       return WuhuChannelMember(
         channelID: channelID,
@@ -162,6 +195,10 @@ public actor SQLiteChannelStore {
 
   public func removeMember(channelID: String, userID: String) async throws {
     try await dbQueue.write { db in
+      guard let _ = try ChannelRow.fetchOne(db, key: channelID) else {
+        throw WuhuChannelStoreError.channelNotFound(channelID)
+      }
+
       try db.execute(
         sql: "DELETE FROM channel_members WHERE channelID = ? AND userID = ?",
         arguments: [channelID, userID],

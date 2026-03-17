@@ -6,6 +6,7 @@ public struct WuhuUser: Sendable, Hashable, Codable, Identifiable {
   public var kind: WuhuUserKind
   public var createdAt: Date
   public var updatedAt: Date
+  public var deletedAt: Date?
 
   public init(
     id: String,
@@ -13,12 +14,18 @@ public struct WuhuUser: Sendable, Hashable, Codable, Identifiable {
     kind: WuhuUserKind = .human,
     createdAt: Date,
     updatedAt: Date,
+    deletedAt: Date? = nil,
   ) {
     self.id = id
     self.username = username
     self.kind = kind
     self.createdAt = createdAt
     self.updatedAt = updatedAt
+    self.deletedAt = deletedAt
+  }
+
+  public var isDeleted: Bool {
+    deletedAt != nil
   }
 }
 

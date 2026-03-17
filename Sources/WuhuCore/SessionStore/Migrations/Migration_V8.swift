@@ -10,6 +10,7 @@ enum Migration_V8 {
         t.column("kind", .text).notNull().defaults(to: "human")
         t.column("createdAt", .datetime).notNull()
         t.column("updatedAt", .datetime).notNull()
+        t.column("deletedAt", .datetime)
       }
       try db.create(
         index: "users_unique_username",

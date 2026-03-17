@@ -627,11 +627,13 @@ public struct WuhuServer: Sendable {
       do {
         let user = try await userStore.createUser(username: username, kind: kind)
         return try context.responseEncoder.encode(user, from: request, context: context)
-      } catch {
-        if "\(error)".contains("UNIQUE constraint failed") {
-          throw HTTPError(.conflict, message: "Username already exists: \(username)")
+      } catch let err as WuhuUserStoreError {
+        switch err {
+        case .usernameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
         }
-        throw error
       }
     }
 
@@ -697,11 +699,13 @@ public struct WuhuServer: Sendable {
           kind: create.kind ?? .channel,
         )
         return try context.responseEncoder.encode(channel, from: request, context: context)
-      } catch {
-        if "\(error)".contains("UNIQUE constraint failed") {
-          throw HTTPError(.conflict, message: "Channel name already exists: \(name)")
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
         }
-        throw error
       }
     }
 
@@ -731,6 +735,8 @@ public struct WuhuServer: Sendable {
         switch err {
         case .channelNotFound:
           throw HTTPError(.notFound, message: err.description)
+        case .channelNameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
         default:
           throw HTTPError(.badRequest, message: err.description)
         }
@@ -795,9 +801,18 @@ public struct WuhuServer: Sendable {
     router.delete("v1/channels/:id/members/:uid") { _, context async throws -> Response in
       let channelID = try context.parameters.require("id")
       let userID = try context.parameters.require("uid")
-      try await channelStore.removeMember(channelID: channelID, userID: userID)
-      await channelHub.publish(channelID: channelID, event: ChannelEvent.memberLeft(userID: userID))
-      return Response(status: .noContent)
+      do {
+        try await channelStore.removeMember(channelID: channelID, userID: userID)
+        await channelHub.publish(channelID: channelID, event: ChannelEvent.memberLeft(userID: userID))
+        return Response(status: .noContent)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
     }
 
     // MARK: - Channel Messages

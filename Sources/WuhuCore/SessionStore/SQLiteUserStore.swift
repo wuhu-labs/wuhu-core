@@ -20,6 +20,7 @@ public actor SQLiteUserStore {
     var kind: String
     var createdAt: Date
     var updatedAt: Date
+    var deletedAt: Date?
 
     func toModel() -> WuhuUser {
       .init(
@@ -28,9 +29,13 @@ public actor SQLiteUserStore {
         kind: WuhuUserKind(rawValue: kind) ?? .human,
         createdAt: createdAt,
         updatedAt: updatedAt,
+        deletedAt: deletedAt,
       )
     }
   }
+
+  /// Only active (non-deleted) users.
+  private static let activeFilter = Column("deletedAt") == nil
 
   // MARK: - Public API
 
@@ -43,15 +48,20 @@ public actor SQLiteUserStore {
     }
 
     return try await dbQueue.write { db in
-      var row = UserRow(
-        id: id,
-        username: trimmed,
-        kind: kind.rawValue,
-        createdAt: now,
-        updatedAt: now,
-      )
-      try row.insert(db)
-      return row.toModel()
+      do {
+        var row = UserRow(
+          id: id,
+          username: trimmed,
+          kind: kind.rawValue,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: nil,
+        )
+        try row.insert(db)
+        return row.toModel()
+      } catch let error as DatabaseError where error.resultCode == .SQLITE_CONSTRAINT_UNIQUE {
+        throw WuhuUserStoreError.usernameAlreadyExists(trimmed)
+      }
     }
   }
 
@@ -66,8 +76,17 @@ public actor SQLiteUserStore {
 
     return try await dbQueue.write { db in
       if var existing = try UserRow.filter(Column("username") == trimmed).fetchOne(db) {
+        var changed = false
         if existing.kind != kind.rawValue {
           existing.kind = kind.rawValue
+          changed = true
+        }
+        // Restore soft-deleted user on upsert
+        if existing.deletedAt != nil {
+          existing.deletedAt = nil
+          changed = true
+        }
+        if changed {
           existing.updatedAt = now
           try existing.update(db)
         }
@@ -81,6 +100,7 @@ public actor SQLiteUserStore {
         kind: kind.rawValue,
         createdAt: now,
         updatedAt: now,
+        deletedAt: nil,
       )
       try row.insert(db)
       return (user: row.toModel(), created: true)
@@ -89,7 +109,7 @@ public actor SQLiteUserStore {
 
   public func getUser(id: String) async throws -> WuhuUser {
     try await dbQueue.read { db in
-      guard let row = try UserRow.fetchOne(db, key: id) else {
+      guard let row = try UserRow.filter(key: id).filter(Self.activeFilter).fetchOne(db) else {
         throw WuhuUserStoreError.userNotFound(id)
       }
       return row.toModel()
@@ -99,22 +119,33 @@ public actor SQLiteUserStore {
   public func getUserByUsername(_ username: String) async throws -> WuhuUser? {
     let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
     return try await dbQueue.read { db in
-      try UserRow.filter(Column("username") == trimmed).fetchOne(db)?.toModel()
+      try UserRow
+        .filter(Column("username") == trimmed)
+        .filter(Self.activeFilter)
+        .fetchOne(db)?
+        .toModel()
     }
   }
 
   public func listUsers() async throws -> [WuhuUser] {
     try await dbQueue.read { db in
-      try UserRow.order(Column("username").asc).fetchAll(db).map { $0.toModel() }
+      try UserRow
+        .filter(Self.activeFilter)
+        .order(Column("username").asc)
+        .fetchAll(db)
+        .map { $0.toModel() }
     }
   }
 
   public func deleteUser(id: String) async throws {
+    let now = Date()
     try await dbQueue.write { db in
-      guard let row = try UserRow.fetchOne(db, key: id) else {
+      guard var row = try UserRow.filter(key: id).filter(Self.activeFilter).fetchOne(db) else {
         throw WuhuUserStoreError.userNotFound(id)
       }
-      _ = try row.delete(db)
+      row.deletedAt = now
+      row.updatedAt = now
+      try row.update(db)
     }
   }
 }

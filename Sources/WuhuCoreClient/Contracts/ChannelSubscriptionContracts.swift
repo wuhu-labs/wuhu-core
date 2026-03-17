@@ -1,34 +1,6 @@
 import Foundation
 import WuhuAPI
 
-/// Cursor for channel message pagination.
-public struct ChannelMessageCursor: RawRepresentable, Sendable, Hashable, Codable {
-  public var rawValue: String
-
-  public init(rawValue: String) {
-    self.rawValue = rawValue
-  }
-
-  public init(messageID: Int64) {
-    rawValue = String(messageID)
-  }
-
-  public var messageID: Int64? {
-    Int64(rawValue)
-  }
-}
-
-/// Parameters for establishing a channel subscription.
-public struct ChannelSubscriptionRequest: Sendable, Hashable, Codable {
-  public var messageSince: ChannelMessageCursor?
-  public var pageSize: Int
-
-  public init(messageSince: ChannelMessageCursor? = nil, pageSize: Int = 50) {
-    self.messageSince = messageSince
-    self.pageSize = pageSize
-  }
-}
-
 /// Initial payload for a channel subscription.
 public struct ChannelInitialState: Sendable, Hashable, Codable {
   public var channel: WuhuChannel
