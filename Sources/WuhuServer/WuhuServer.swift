@@ -1,5 +1,6 @@
 import Dependencies
 import Foundation
+import HTTPTypes
 import Hummingbird
 import HummingbirdCore
 import HummingbirdWebSocket
@@ -34,7 +35,10 @@ public struct WuhuServer: Sendable {
     }()
     try ensureDirectoryExists(forDatabasePath: dbPath)
 
-    let store = try SQLiteSessionStore(path: dbPath)
+    let database = try WuhuDatabase(path: dbPath)
+    let store = SQLiteSessionStore(database: database)
+    let userStore = SQLiteUserStore(database: database)
+    let channelStore = SQLiteChannelStore(database: database)
 
     let blobRoot: String = {
       let dbDir = URL(fileURLWithPath: dbPath, isDirectory: false).deletingLastPathComponent()
@@ -129,6 +133,16 @@ public struct WuhuServer: Sendable {
       runnerRegistry: runnerRegistry,
     )
     await service.startAgentLoopManager()
+
+    // Seed users from config
+    if let seedUsers = config.users, !seedUsers.isEmpty {
+      for seedUser in seedUsers {
+        let kind = WuhuUserKind(rawValue: seedUser.kind ?? "human") ?? .human
+        _ = try await userStore.upsertUser(username: seedUser.username, kind: kind)
+      }
+    }
+
+    let channelHub = WuhuChannelSubscriptionHub()
 
     let router = Router(context: WuhuRequestContext.self)
 
@@ -574,6 +588,343 @@ public struct WuhuServer: Sendable {
             }
           } catch {
             // Best-effort: close stream. Clients retry.
+          }
+
+          continuation.finish()
+        }
+
+        continuation.onTermination = { _ in
+          task.cancel()
+        }
+      }
+
+      var headers = HTTPFields()
+      headers[.contentType] = "text/event-stream"
+      headers[.cacheControl] = "no-cache"
+      headers[.connection] = "keep-alive"
+
+      return Response(
+        status: .ok,
+        headers: headers,
+        body: ResponseBody(asyncSequence: byteStream),
+      )
+    }
+
+    // MARK: - Users
+
+    router.get("v1/users") { request, context async throws -> Response in
+      let users = try await userStore.listUsers()
+      return try context.responseEncoder.encode(users, from: request, context: context)
+    }
+
+    router.post("v1/users") { request, context async throws -> Response in
+      let create = try await request.decode(as: WuhuCreateUserRequest.self, context: context)
+      let username = create.username.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !username.isEmpty else {
+        throw HTTPError(.badRequest, message: "Username is required")
+      }
+      let kind = create.kind ?? .human
+      do {
+        let user = try await userStore.createUser(username: username, kind: kind)
+        return try context.responseEncoder.encode(user, from: request, context: context)
+      } catch let err as WuhuUserStoreError {
+        switch err {
+        case .usernameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.get("v1/users/:id") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      do {
+        let user = try await userStore.getUser(id: id)
+        return try context.responseEncoder.encode(user, from: request, context: context)
+      } catch let err as WuhuUserStoreError {
+        switch err {
+        case .userNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.delete("v1/users/:id") { _, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      do {
+        try await userStore.deleteUser(id: id)
+        return Response(status: .noContent)
+      } catch let err as WuhuUserStoreError {
+        switch err {
+        case .userNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    // MARK: - Channels
+
+    /// Resolve the calling user from X-Wuhu-User header.
+    /// In permissive mode, auto-creates the user if not found.
+    @Sendable func resolveCallingUser(_ request: Request) async throws -> WuhuUser {
+      let headerValue = request.headers[HTTPField.Name("X-Wuhu-User")!]
+      let username = (headerValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !username.isEmpty else {
+        throw HTTPError(.unauthorized, message: "Missing X-Wuhu-User header")
+      }
+      let (user, _) = try await userStore.upsertUser(username: username)
+      return user
+    }
+
+    router.get("v1/channels") { request, context async throws -> Response in
+      let channels = try await channelStore.listChannels()
+      return try context.responseEncoder.encode(channels, from: request, context: context)
+    }
+
+    router.post("v1/channels") { request, context async throws -> Response in
+      let create = try await request.decode(as: WuhuCreateChannelRequest.self, context: context)
+      let name = create.name.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !name.isEmpty else {
+        throw HTTPError(.badRequest, message: "Channel name is required")
+      }
+      do {
+        let channel = try await channelStore.createChannel(
+          name: name,
+          topic: create.topic,
+          kind: create.kind ?? .channel,
+        )
+        return try context.responseEncoder.encode(channel, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.get("v1/channels/:id") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      do {
+        let channel = try await channelStore.getChannel(id: id)
+        return try context.responseEncoder.encode(channel, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.patch("v1/channels/:id") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      let update = try await request.decode(as: WuhuUpdateChannelRequest.self, context: context)
+      do {
+        let channel = try await channelStore.updateChannel(id: id, name: update.name, topic: update.topic)
+        await channelHub.publish(channelID: id, event: ChannelEvent.channelUpdated(channel))
+        return try context.responseEncoder.encode(channel, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        case .channelNameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.delete("v1/channels/:id") { _, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      do {
+        try await channelStore.deleteChannel(id: id)
+        return Response(status: .noContent)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    // MARK: - Channel Members
+
+    router.get("v1/channels/:id/members") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      do {
+        let members = try await channelStore.listMembers(channelID: id)
+        return try context.responseEncoder.encode(members, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.post("v1/channels/:id/members") { request, context async throws -> Response in
+      let channelID = try context.parameters.require("id")
+      let body = try await request.decode(as: WuhuAddChannelMemberRequest.self, context: context)
+      do {
+        let member = try await channelStore.addMember(
+          channelID: channelID,
+          userID: body.userID,
+          role: body.role ?? .member,
+        )
+        await channelHub.publish(channelID: channelID, event: ChannelEvent.memberJoined(member))
+        return try context.responseEncoder.encode(member, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        case .userNotFound:
+          throw HTTPError(.badRequest, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.delete("v1/channels/:id/members/:uid") { _, context async throws -> Response in
+      let channelID = try context.parameters.require("id")
+      let userID = try context.parameters.require("uid")
+      do {
+        try await channelStore.removeMember(channelID: channelID, userID: userID)
+        await channelHub.publish(channelID: channelID, event: ChannelEvent.memberLeft(userID: userID))
+        return Response(status: .noContent)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    // MARK: - Channel Messages
+
+    router.get("v1/channels/:id/messages") { request, context async throws -> Response in
+      let channelID = try context.parameters.require("id")
+      struct Query: Decodable {
+        var before: Int64?
+        var limit: Int?
+      }
+      let query = try request.uri.decodeQuery(as: Query.self, context: context)
+      do {
+        let messages = try await channelStore.listMessages(
+          channelID: channelID,
+          beforeID: query.before,
+          limit: query.limit ?? 50,
+        )
+        return try context.responseEncoder.encode(messages, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    router.post("v1/channels/:id/messages") { request, context async throws -> Response in
+      let channelID = try context.parameters.require("id")
+      let caller = try await resolveCallingUser(request)
+      let body = try await request.decode(as: WuhuPostMessageRequest.self, context: context)
+      do {
+        let message = try await channelStore.postMessage(
+          channelID: channelID,
+          authorID: caller.id,
+          content: body.content,
+          threadID: body.threadID,
+        )
+        await channelHub.publish(channelID: channelID, event: ChannelEvent.messagePosted(message))
+        return try context.responseEncoder.encode(message, from: request, context: context)
+      } catch let err as WuhuChannelStoreError {
+        switch err {
+        case .channelNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        case .userNotFound:
+          throw HTTPError(.unauthorized, message: "User not found")
+        case .emptyMessage:
+          throw HTTPError(.badRequest, message: err.description)
+        case .threadNotFound:
+          throw HTTPError(.badRequest, message: err.description)
+        case .nestedThreadsNotAllowed:
+          throw HTTPError(.badRequest, message: err.description)
+        default:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      }
+    }
+
+    // MARK: - Channel SSE Subscription
+
+    router.get("v1/channels/:id/subscribe") { request, context async throws -> Response in
+      let channelID = try context.parameters.require("id")
+
+      struct Query: Decodable {
+        var messageSince: String?
+        var pageSize: Int?
+      }
+      let query = try request.uri.decodeQuery(as: Query.self, context: context)
+
+      let sinceID = query.messageSince.flatMap { Int64($0) } ?? 0
+      let pageSize = query.pageSize ?? 50
+
+      // Subscribe first, then backfill (race-free)
+      let live = await channelHub.subscribe(channelID: channelID)
+
+      let channel = try await channelStore.getChannel(id: channelID)
+      let members = try await channelStore.listMembers(channelID: channelID)
+      let messages: [WuhuChannelMessage] = if sinceID > 0 {
+        try await channelStore.getMessagesSince(channelID: channelID, sinceID: sinceID, limit: pageSize)
+      } else {
+        try await channelStore.listMessages(channelID: channelID, limit: pageSize)
+      }
+
+      let initial = ChannelInitialState(channel: channel, members: members, messages: messages)
+      let lastInitialID = messages.last?.id ?? sinceID
+
+      let byteStream = AsyncStream<ByteBuffer> { continuation in
+        let task = Task {
+          func yieldFrame(_ frame: ChannelSubscriptionSSEFrame) -> Bool {
+            guard let data = try? WuhuJSON.encoder.encode(frame) else { return false }
+            var s = "data: "
+            s += String(decoding: data, as: UTF8.self)
+            s += "\n\n"
+            continuation.yield(ByteBuffer(string: s))
+            return true
+          }
+
+          guard yieldFrame(.initial(initial)) else {
+            continuation.finish()
+            return
+          }
+
+          for await event in live {
+            if Task.isCancelled { break }
+            // Deduplicate: skip messages already in the initial batch
+            if case let .messagePosted(msg) = event, msg.id <= lastInitialID {
+              continue
+            }
+            if !yieldFrame(.event(event)) {
+              break
+            }
           }
 
           continuation.finish()

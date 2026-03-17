@@ -26,7 +26,11 @@ let package = Package(
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/swift-websocket.git", from: "1.0.0"),
-    .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+    // Pinned to 1.32.0: 1.32.1 switched `import Foundation` to `import FoundationEssentials`,
+    // which breaks NIOFoundationCompat symbol linkage on Linux (mangled name mismatch).
+    // See: https://github.com/swift-server/async-http-client/issues/XXX
+    // TODO: Unpin once the upstream issue is resolved.
+    .package(url: "https://github.com/swift-server/async-http-client.git", exact: "1.32.0"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
@@ -119,6 +123,7 @@ let package = Package(
         "WuhuServer",
         "WuhuRunner",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
         .product(name: "Yams", package: "Yams"),
       ],
     ),

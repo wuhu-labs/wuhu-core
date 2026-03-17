@@ -343,4 +343,132 @@ public struct WuhuClient: Sendable {
     let (data, _) = try await http.data(for: req)
     return try WuhuJSON.decoder.decode([WuhuRunnerInfo].self, from: data)
   }
+
+  // MARK: - Users
+
+  public func listUsers() async throws -> [WuhuUser] {
+    let url = baseURL.appending(path: "v1").appending(path: "users")
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([WuhuUser].self, from: data)
+  }
+
+  public func createUser(username: String, kind: WuhuUserKind = .human) async throws -> WuhuUser {
+    let url = baseURL.appending(path: "v1").appending(path: "users")
+    var req = HTTPRequest(url: url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    req.body = try WuhuJSON.encoder.encode(WuhuCreateUserRequest(username: username, kind: kind))
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuUser.self, from: data)
+  }
+
+  public func getUser(id: String) async throws -> WuhuUser {
+    let url = baseURL.appending(path: "v1").appending(path: "users").appending(path: id)
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuUser.self, from: data)
+  }
+
+  public func deleteUser(id: String) async throws {
+    let url = baseURL.appending(path: "v1").appending(path: "users").appending(path: id)
+    let req = HTTPRequest(url: url, method: "DELETE")
+    _ = try await http.data(for: req)
+  }
+
+  // MARK: - Channels
+
+  public func listChannels() async throws -> [WuhuChannel] {
+    let url = baseURL.appending(path: "v1").appending(path: "channels")
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([WuhuChannel].self, from: data)
+  }
+
+  public func createChannel(name: String, topic: String? = nil, kind: WuhuChannelKind = .channel) async throws -> WuhuChannel {
+    let url = baseURL.appending(path: "v1").appending(path: "channels")
+    var req = HTTPRequest(url: url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    req.body = try WuhuJSON.encoder.encode(WuhuCreateChannelRequest(name: name, topic: topic, kind: kind))
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuChannel.self, from: data)
+  }
+
+  public func getChannel(id: String) async throws -> WuhuChannel {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: id)
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuChannel.self, from: data)
+  }
+
+  public func updateChannel(id: String, name: String? = nil, topic: String? = nil) async throws -> WuhuChannel {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: id)
+    var req = HTTPRequest(url: url, method: "PATCH")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    req.body = try WuhuJSON.encoder.encode(WuhuUpdateChannelRequest(name: name, topic: topic))
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuChannel.self, from: data)
+  }
+
+  public func deleteChannel(id: String) async throws {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: id)
+    let req = HTTPRequest(url: url, method: "DELETE")
+    _ = try await http.data(for: req)
+  }
+
+  // MARK: - Channel Members
+
+  public func listChannelMembers(channelID: String) async throws -> [WuhuChannelMember] {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: channelID).appending(path: "members")
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([WuhuChannelMember].self, from: data)
+  }
+
+  public func addChannelMember(channelID: String, userID: String, role: WuhuChannelMemberRole = .member) async throws -> WuhuChannelMember {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: channelID).appending(path: "members")
+    var req = HTTPRequest(url: url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    req.body = try WuhuJSON.encoder.encode(WuhuAddChannelMemberRequest(userID: userID, role: role))
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuChannelMember.self, from: data)
+  }
+
+  public func removeChannelMember(channelID: String, userID: String) async throws {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: channelID).appending(path: "members").appending(path: userID)
+    let req = HTTPRequest(url: url, method: "DELETE")
+    _ = try await http.data(for: req)
+  }
+
+  // MARK: - Channel Messages
+
+  public func listChannelMessages(channelID: String, before: Int64? = nil, limit: Int? = nil) async throws -> [WuhuChannelMessage] {
+    var url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: channelID).appending(path: "messages")
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    var items: [URLQueryItem] = []
+    if let before { items.append(.init(name: "before", value: String(before))) }
+    if let limit { items.append(.init(name: "limit", value: String(limit))) }
+    components?.queryItems = items.isEmpty ? nil : items
+    url = components?.url ?? url
+
+    let req = HTTPRequest(url: url, method: "GET")
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode([WuhuChannelMessage].self, from: data)
+  }
+
+  public func postChannelMessage(channelID: String, content: String, threadID: Int64? = nil, username: String? = nil) async throws -> WuhuChannelMessage {
+    let url = baseURL.appending(path: "v1").appending(path: "channels").appending(path: channelID).appending(path: "messages")
+    var req = HTTPRequest(url: url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    if let username {
+      req.setHeader(username, for: "X-Wuhu-User")
+    }
+    req.body = try WuhuJSON.encoder.encode(WuhuPostMessageRequest(content: content, threadID: threadID))
+    let (data, _) = try await http.data(for: req)
+    return try WuhuJSON.decoder.decode(WuhuChannelMessage.self, from: data)
+  }
 }
