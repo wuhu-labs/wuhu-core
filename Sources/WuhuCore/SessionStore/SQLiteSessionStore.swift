@@ -6,13 +6,16 @@ import WuhuAPI
 public actor SQLiteSessionStore: SessionStore {
   let dbQueue: DatabaseQueue
 
+  /// Create a session store backed by its own database file.
+  /// Prefer ``init(database:)`` when sharing a database with other stores.
   public init(path: String) throws {
-    var config = Configuration()
-    config.foreignKeysEnabled = true
-    config.busyMode = .timeout(5)
+    let db = try WuhuDatabase(path: path)
+    dbQueue = db.dbQueue
+  }
 
-    dbQueue = try DatabaseQueue(path: path, configuration: config)
-    try Self.migrator.migrate(dbQueue)
+  /// Create a session store sharing a ``WuhuDatabase``.
+  public init(database: WuhuDatabase) {
+    dbQueue = database.dbQueue
   }
 
   // MARK: - Mount Templates

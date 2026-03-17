@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import PiAI
+import PiAIAsyncHTTPClient
 import WuhuAPI
 import WuhuClient
 import WuhuCLIKit
@@ -73,6 +74,8 @@ struct WuhuCLI: AsyncParsableCommand {
         ListSkills.self,
         ListSessions.self,
         Workspace.self,
+        User.self,
+        Channel.self,
       ],
     )
 
@@ -507,6 +510,391 @@ struct WuhuCLI: AsyncParsableCommand {
           for row in rows {
             let values = columns.map { row[$0] ?? "NULL" }
             FileHandle.standardOutput.write(Data((values.joined(separator: "\t") + "\n").utf8))
+          }
+        }
+      }
+    }
+
+    // MARK: - User commands
+
+    struct User: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        commandName: "user",
+        abstract: "User management commands.",
+        subcommands: [
+          ListUsers.self,
+          CreateUser.self,
+          DeleteUser.self,
+        ],
+      )
+
+      struct ListUsers: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "list",
+          abstract: "List all users.",
+        )
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let users = try await client.listUsers()
+          if users.isEmpty {
+            FileHandle.standardOutput.write(Data("(no users)\n".utf8))
+            return
+          }
+          for u in users {
+            FileHandle.standardOutput.write(Data("\(u.id)  \(u.username)  kind=\(u.kind.rawValue)  created=\(u.createdAt)\n".utf8))
+          }
+        }
+      }
+
+      struct CreateUser: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "create",
+          abstract: "Create a new user.",
+        )
+
+        @Argument(help: "Username.")
+        var username: String
+
+        @Option(help: "User kind (human, bot). Default: human.")
+        var kind: String = "human"
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let userKind = WuhuUserKind(rawValue: kind) ?? .human
+          let user = try await client.createUser(username: username, kind: userKind)
+          FileHandle.standardOutput.write(Data("\(user.id)  \(user.username)  kind=\(user.kind.rawValue)\n".utf8))
+        }
+      }
+
+      struct DeleteUser: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "delete",
+          abstract: "Delete a user by ID.",
+        )
+
+        @Argument(help: "User ID.")
+        var id: String
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          try await client.deleteUser(id: id)
+          FileHandle.standardOutput.write(Data("deleted\n".utf8))
+        }
+      }
+    }
+
+    // MARK: - Channel commands
+
+    struct Channel: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        commandName: "channel",
+        abstract: "Channel management commands.",
+        subcommands: [
+          ListChannels.self,
+          CreateChannel.self,
+          DeleteChannel.self,
+          Members.self,
+          Send.self,
+          History.self,
+          Follow.self,
+        ],
+      )
+
+      struct ListChannels: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "list",
+          abstract: "List all channels.",
+        )
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let channels = try await client.listChannels()
+          if channels.isEmpty {
+            FileHandle.standardOutput.write(Data("(no channels)\n".utf8))
+            return
+          }
+          for ch in channels {
+            let topicStr = ch.topic.map { " topic=\"\($0)\"" } ?? ""
+            FileHandle.standardOutput.write(Data("\(ch.id)  #\(ch.name)  kind=\(ch.kind.rawValue)\(topicStr)\n".utf8))
+          }
+        }
+      }
+
+      struct CreateChannel: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "create",
+          abstract: "Create a new channel.",
+        )
+
+        @Argument(help: "Channel name.")
+        var name: String
+
+        @Option(help: "Channel topic.")
+        var topic: String?
+
+        @Option(help: "Channel kind (channel, dm). Default: channel.")
+        var kind: String = "channel"
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let channelKind = WuhuChannelKind(rawValue: kind) ?? .channel
+          let channel = try await client.createChannel(name: name, topic: topic, kind: channelKind)
+          FileHandle.standardOutput.write(Data("\(channel.id)  #\(channel.name)\n".utf8))
+        }
+      }
+
+      struct DeleteChannel: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "delete",
+          abstract: "Delete a channel by ID.",
+        )
+
+        @Argument(help: "Channel ID.")
+        var id: String
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          try await client.deleteChannel(id: id)
+          FileHandle.standardOutput.write(Data("deleted\n".utf8))
+        }
+      }
+
+      struct Members: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "members",
+          abstract: "List, add, or remove channel members.",
+          subcommands: [
+            ListMembers.self,
+            AddMember.self,
+            RemoveMember.self,
+          ],
+        )
+
+        struct ListMembers: AsyncParsableCommand {
+          static let configuration = CommandConfiguration(
+            commandName: "list",
+            abstract: "List members of a channel.",
+          )
+
+          @Argument(help: "Channel ID.")
+          var channelID: String
+
+          @OptionGroup
+          var shared: Shared
+
+          func run() async throws {
+            let client = try makeClient(shared.server)
+            let members = try await client.listChannelMembers(channelID: channelID)
+            if members.isEmpty {
+              FileHandle.standardOutput.write(Data("(no members)\n".utf8))
+              return
+            }
+            for m in members {
+              FileHandle.standardOutput.write(Data("\(m.userID)  \(m.username)  role=\(m.role.rawValue)\n".utf8))
+            }
+          }
+        }
+
+        struct AddMember: AsyncParsableCommand {
+          static let configuration = CommandConfiguration(
+            commandName: "add",
+            abstract: "Add a member to a channel.",
+          )
+
+          @Argument(help: "Channel ID.")
+          var channelID: String
+
+          @Argument(help: "User ID to add.")
+          var userID: String
+
+          @Option(help: "Role (member, admin). Default: member.")
+          var role: String = "member"
+
+          @OptionGroup
+          var shared: Shared
+
+          func run() async throws {
+            let client = try makeClient(shared.server)
+            let memberRole = WuhuChannelMemberRole(rawValue: role) ?? .member
+            let member = try await client.addChannelMember(channelID: channelID, userID: userID, role: memberRole)
+            FileHandle.standardOutput.write(Data("added  \(member.username)  role=\(member.role.rawValue)\n".utf8))
+          }
+        }
+
+        struct RemoveMember: AsyncParsableCommand {
+          static let configuration = CommandConfiguration(
+            commandName: "remove",
+            abstract: "Remove a member from a channel.",
+          )
+
+          @Argument(help: "Channel ID.")
+          var channelID: String
+
+          @Argument(help: "User ID to remove.")
+          var userID: String
+
+          @OptionGroup
+          var shared: Shared
+
+          func run() async throws {
+            let client = try makeClient(shared.server)
+            try await client.removeChannelMember(channelID: channelID, userID: userID)
+            FileHandle.standardOutput.write(Data("removed\n".utf8))
+          }
+        }
+      }
+
+      struct Send: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "send",
+          abstract: "Send a message to a channel.",
+        )
+
+        @Argument(help: "Channel ID.")
+        var channelID: String
+
+        @Argument(parsing: .remaining, help: "Message text.")
+        var message: [String] = []
+
+        @Option(help: "Thread parent message ID (for replies).")
+        var thread: Int64?
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let text = message.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+          guard !text.isEmpty else { throw ValidationError("Expected message text.") }
+          let username = resolveWuhuUsername(shared.username)
+          let msg = try await client.postChannelMessage(
+            channelID: channelID,
+            content: text,
+            threadID: thread,
+            username: username,
+          )
+          FileHandle.standardOutput.write(Data("[\(msg.id)] \(msg.authorUsername): \(msg.content)\n".utf8))
+        }
+      }
+
+      struct History: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "history",
+          abstract: "Show channel message history.",
+        )
+
+        @Argument(help: "Channel ID.")
+        var channelID: String
+
+        @Option(help: "Max messages to show.")
+        var limit: Int = 50
+
+        @Option(help: "Show messages before this message ID.")
+        var before: Int64?
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let messages = try await client.listChannelMessages(channelID: channelID, before: before, limit: limit)
+          if messages.isEmpty {
+            FileHandle.standardOutput.write(Data("(no messages)\n".utf8))
+            return
+          }
+          for msg in messages {
+            let threadStr = msg.threadID.map { " (thread:\($0))" } ?? ""
+            FileHandle.standardOutput.write(Data("[\(msg.id)] \(msg.authorUsername): \(msg.content)\(threadStr)\n".utf8))
+          }
+        }
+      }
+
+      struct Follow: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "follow",
+          abstract: "Follow a channel in real-time via SSE.",
+        )
+
+        @Argument(help: "Channel ID.")
+        var channelID: String
+
+        @Option(help: "Show messages after this message ID.")
+        var since: Int64?
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+
+          var url = client.baseURL
+            .appending(path: "v1")
+            .appending(path: "channels")
+            .appending(path: channelID)
+            .appending(path: "subscribe")
+
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+          var items: [URLQueryItem] = []
+          if let since { items.append(.init(name: "messageSince", value: String(since))) }
+          components?.queryItems = items.isEmpty ? nil : items
+          url = components?.url ?? url
+
+          var req = HTTPRequest(url: url, method: "GET")
+          req.setHeader("text/event-stream", for: "Accept")
+
+          let http = AsyncHTTPClientTransport()
+          let sseResponse = try await http.sse(for: req)
+
+          for try await message in sseResponse.events {
+            guard let data = message.data.data(using: .utf8) else { continue }
+            let frame = try WuhuJSON.decoder.decode(ChannelSubscriptionSSEFrame.self, from: data)
+
+            switch frame {
+            case let .initial(state):
+              FileHandle.standardOutput.write(Data("--- #\(state.channel.name) ---\n".utf8))
+              if !state.members.isEmpty {
+                let names = state.members.map(\.username).joined(separator: ", ")
+                FileHandle.standardOutput.write(Data("members: \(names)\n".utf8))
+              }
+              FileHandle.standardOutput.write(Data("---\n".utf8))
+              for msg in state.messages {
+                let threadStr = msg.threadID.map { " (thread:\($0))" } ?? ""
+                FileHandle.standardOutput.write(Data("[\(msg.id)] \(msg.authorUsername): \(msg.content)\(threadStr)\n".utf8))
+              }
+
+            case let .event(event):
+              switch event {
+              case let .messagePosted(msg):
+                let threadStr = msg.threadID.map { " (thread:\($0))" } ?? ""
+                FileHandle.standardOutput.write(Data("[\(msg.id)] \(msg.authorUsername): \(msg.content)\(threadStr)\n".utf8))
+              case let .memberJoined(member):
+                FileHandle.standardOutput.write(Data("* \(member.username) joined\n".utf8))
+              case let .memberLeft(userID):
+                FileHandle.standardOutput.write(Data("* \(userID) left\n".utf8))
+              case let .channelUpdated(channel):
+                let topicStr = channel.topic.map { " topic=\"\($0)\"" } ?? ""
+                FileHandle.standardOutput.write(Data("* channel updated: #\(channel.name)\(topicStr)\n".utf8))
+              }
+            }
           }
         }
       }
