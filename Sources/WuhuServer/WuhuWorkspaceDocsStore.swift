@@ -1,8 +1,8 @@
 import Foundation
-import PiAI
 import WorkspaceContracts
 import WorkspaceEngine
 import WorkspaceScanner
+import WuhuAI
 import WuhuAPI
 
 enum WuhuWorkspaceDocsStoreError: Error, Sendable, CustomStringConvertible {

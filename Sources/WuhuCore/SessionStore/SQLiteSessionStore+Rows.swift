@@ -1,6 +1,6 @@
 import Foundation
 import GRDB
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 // MARK: - Row types

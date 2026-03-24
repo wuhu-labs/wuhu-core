@@ -1,6 +1,6 @@
+import Fetch
+import FetchSSE
 import Foundation
-import PiAI
-import PiAIAsyncHTTPClient
 
 /// Transport-level connection lifecycle for SSE subscriptions.
 ///
@@ -52,20 +52,20 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
   public typealias Sleeper = @Sendable (_ seconds: Double) async throws -> Void
 
   public var baseURL: URL
-  private let http: any HTTPClient
+  private let fetch: FetchClient
   private let retryPolicy: RetryPolicy
   private let sleep: Sleeper
 
   public init(
     baseURL: URL,
-    http: any HTTPClient = AsyncHTTPClientTransport(),
+    fetch: FetchClient = sharedFetchClient,
     retryPolicy: RetryPolicy = RetryPolicy(),
     sleep: @escaping Sleeper = { seconds in
       try await Task.sleep(for: .seconds(seconds))
     },
   ) {
     self.baseURL = baseURL
-    self.http = http
+    self.fetch = fetch
     self.retryPolicy = retryPolicy
     self.sleep = sleep
   }
@@ -80,13 +80,14 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     components?.queryItems = [URLQueryItem(name: "lane", value: lane.rawValue)]
 
-    var req = HTTPRequest(url: components?.url ?? url, method: "POST")
+    var req = Request(url: components?.url ?? url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.body = try WuhuJSON.encoder.encode(message)
+    try req.setBody(WuhuJSON.encoder.encode(message), contentType: "application/json")
 
-    let (data, _) = try await http.data(for: req)
-    return try WuhuJSON.decoder.decode(QueueItemID.self, from: data)
+    let response = try await fetch(req)
+    try response.validateStatus()
+    return try await response.json(QueueItemID.self, decoder: WuhuJSON.decoder)
   }
 
   public func cancel(sessionID: SessionID, id: QueueItemID, lane: UserQueueLane) async throws {
@@ -101,12 +102,14 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     components?.queryItems = [URLQueryItem(name: "lane", value: lane.rawValue)]
 
-    var req = HTTPRequest(url: components?.url ?? url, method: "POST")
+    var req = Request(url: components?.url ?? url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.body = try WuhuJSON.encoder.encode(CancelBody(id: id))
+    try req.setBody(WuhuJSON.encoder.encode(CancelBody(id: id)), contentType: "application/json")
 
-    _ = try await http.data(for: req)
+    let response = try await fetch(req)
+    try response.validateStatus()
+    _ = try await response.data()
   }
 
   public func subscribe(sessionID: SessionID, since request0: SessionSubscriptionRequest) async throws -> SessionSubscription {
@@ -144,12 +147,13 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
 
       while !Task.isCancelled {
         do {
-          let sseResponse = try await http.sse(for: makeSubscribeRequest(sessionID: sessionID, request: request))
+          let response = try await fetch(makeSubscribeRequest(sessionID: sessionID, request: request))
+          try response.validateStatus()
 
           attempt = 0
           connectionContinuation.yield(.connected)
 
-          for try await message in sseResponse.events {
+          for try await message in response.sse() {
             try Task.checkCancellation()
             guard let data = message.data.data(using: .utf8) else { continue }
 
@@ -247,7 +251,7 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     )
   }
 
-  private func makeSubscribeRequest(sessionID: SessionID, request: SessionSubscriptionRequest) -> HTTPRequest {
+  private func makeSubscribeRequest(sessionID: SessionID, request: SessionSubscriptionRequest) -> Request {
     var url = baseURL
       .appending(path: "v1")
       .appending(path: "sessions")
@@ -275,7 +279,7 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     components?.queryItems = items.isEmpty ? nil : items
     url = components?.url ?? url
 
-    var req = HTTPRequest(url: url, method: "GET")
+    var req = Request(url: url, method: "GET")
     req.setHeader("text/event-stream", for: "Accept")
     return req
   }

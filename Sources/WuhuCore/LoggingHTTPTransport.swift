@@ -1,14 +1,14 @@
+import Fetch
 import Foundation
-import PiAI
 import ServiceContextModule
 import Tracing
 
-/// An `HTTPClient` wrapper that logs raw HTTP requests and responses to disk,
+/// A `FetchClient` wrapper that logs raw HTTP requests and responses to disk,
 /// and creates an `http.request` tracing span for each call.
 ///
 /// For each request, creates a directory at:
 ///   `<baseDir>/<year>/<month>/<day>/<hour>/<requestID>/`
-/// containing `request.txt` (headers + body) and `response.txt` (headers + body or SSE events).
+/// containing `request.txt` (headers + body) and `response.txt` (headers + body).
 ///
 /// The span records:
 /// - `http.method`, `http.url`, `http.status_code` — request/response metadata
@@ -20,53 +20,30 @@ import Tracing
 /// a fresh UUID, so the `llm.call` span and payload directory share the same ID.
 ///
 /// Sensitive headers (`authorization`, `x-api-key`) are redacted.
-public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
-  private let underlying: any PiAI.HTTPClient
+public struct LoggingHTTPTransport: Sendable {
+  private let underlying: FetchClient
   private let baseDir: URL
 
   private static let sensitiveHeaders: Set<String> = ["authorization", "x-api-key"]
 
-  public init(underlying: any PiAI.HTTPClient, baseDir: URL) {
+  public init(underlying: FetchClient, baseDir: URL) {
     self.underlying = underlying
     self.baseDir = baseDir
   }
 
-  // MARK: - HTTPClient conformance
-
-  public func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-    let (dir, relativeDir, span) = beginRequest(request)
-    writeRequest(request, to: dir)
-    span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
-
-    let responseData: Data
-    let response: HTTPResponse
-    do {
-      (responseData, response) = try await underlying.data(for: request)
-    } catch {
-      span.recordError(error)
-      span.setStatus(.init(code: .error, message: "\(error)"))
-      span.end()
-      throw error
-    }
-
-    span.attributes["http.status_code"] = response.statusCode
-    setHeaderAttributes(response.headers, prefix: "http.response.header", on: span)
-
-    writeDataResponse(response: response, body: responseData, to: dir)
-    span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
-    span.end()
-
-    return (responseData, response)
+  public var client: FetchClient {
+    FetchClient(fetch: callAsFunction)
   }
 
-  public func sse(for request: HTTPRequest) async throws -> SSEResponse {
+  public func callAsFunction(_ request: Request) async throws -> Response {
     let (dir, relativeDir, span) = beginRequest(request)
-    writeRequest(request, to: dir)
+    let (materializedRequest, requestBody) = try await materialize(request)
+    writeRequest(materializedRequest, body: requestBody, to: dir)
     span.attributes["http.payload.request_path"] = "\(relativeDir)/request.txt"
 
-    let sseResponse: SSEResponse
+    let response: Response
     do {
-      sseResponse = try await underlying.sse(for: request)
+      response = try await underlying(materializedRequest)
     } catch {
       span.recordError(error)
       span.setStatus(.init(code: .error, message: "\(error)"))
@@ -74,21 +51,18 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
       throw error
     }
 
-    span.attributes["http.status_code"] = sseResponse.response.statusCode
-    setHeaderAttributes(sseResponse.response.headers, prefix: "http.response.header", on: span)
+    span.attributes["http.status_code"] = response.status.code
+    setHeaderAttributes(response.headers, prefix: "http.response.header", on: span)
 
-    let statusCode = sseResponse.response.statusCode
-    let responseHeaders = sseResponse.response.headers
-
-    let wrappedEvents = AsyncThrowingStream<SSEMessage, any Error> { continuation in
+    let wrappedBody = BodyStream { continuation in
       let task = Task {
-        var captured: [SSEMessage] = []
+        var captured: Bytes = []
         var terminalError: (any Error)?
 
         defer {
-          writeSSEResponse(
-            response: HTTPResponse(statusCode: statusCode, headers: responseHeaders),
-            events: captured,
+          writeResponse(
+            response: Response(status: response.status, headers: response.headers),
+            body: Data(captured),
             to: dir,
             error: terminalError,
           )
@@ -103,9 +77,9 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
         }
 
         do {
-          for try await event in sseResponse.events {
-            captured.append(event)
-            switch continuation.yield(event) {
+          for try await chunk in response.body {
+            captured.append(contentsOf: chunk)
+            switch continuation.yield(chunk) {
             case .enqueued, .dropped:
               continue
             case .terminated:
@@ -137,30 +111,27 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
       }
     }
 
-    return SSEResponse(response: sseResponse.response, events: wrappedEvents)
+    return Response(
+      status: response.status,
+      headers: response.headers,
+      body: wrappedBody,
+    )
   }
 
-  // MARK: - Shared span + directory setup
-
-  /// Create the payload directory and start an `http.request` span.
-  /// Shared by both `data(for:)` and `sse(for:)`.
-  private func beginRequest(_ request: HTTPRequest) -> (dir: URL, relativeDir: String, span: any Span) {
+  private func beginRequest(_ request: Request) -> (dir: URL, relativeDir: String, span: any Span) {
     let context = ServiceContext.current ?? .topLevel
     let requestID = context.llmCallID ?? UUID().uuidString.lowercased()
     let dir = directoryURL(base: baseDir, for: requestID, at: Date())
     let relativeDir = relativePath(of: dir)
 
     let span = startSpan("http.request", context: context, ofKind: .client)
-    span.attributes["http.method"] = request.method
+    span.attributes["http.method"] = request.method.rawValue
     span.attributes["http.url"] = request.url.absoluteString
     setHeaderAttributes(request.headers, prefix: "http.request.header", on: span)
 
     return (dir, relativeDir, span)
   }
 
-  // MARK: - Directory layout
-
-  /// `<baseDir>/<year>/<month>/<day>/<hour>/<requestID>/`
   private func directoryURL(base: URL, for requestID: String, at date: Date) -> URL {
     let cal = Calendar(identifier: .gregorian)
     let comps = cal.dateComponents(in: TimeZone(identifier: "UTC")!, from: date)
@@ -177,7 +148,6 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
       .appendingPathComponent(requestID)
   }
 
-  /// Relative path from `baseDir` to the given directory URL.
   private func relativePath(of dir: URL) -> String {
     let basePath = baseDir.standardizedFileURL.path
     let dirPath = dir.standardizedFileURL.path
@@ -187,30 +157,29 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
     return relative
   }
 
-  // MARK: - Request logging
-
-  private func writeRequest(_ request: HTTPRequest, to dir: URL) {
+  private func writeRequest(_ request: Request, body: Data?, to dir: URL) {
     do {
       try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
       var lines: [String] = []
-      lines.append("\(request.method) \(request.url.absoluteString)")
+      lines.append("\(request.method.rawValue) \(request.url.absoluteString)")
       lines.append("")
 
-      let sortedHeaders = request.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
-      for (name, values) in sortedHeaders {
+      let sortedHeaders = request.headers.sorted {
+        $0.name.rawName.lowercased() < $1.name.rawName.lowercased()
+      }
+      for header in sortedHeaders {
+        let name = header.name.rawName
         if Self.sensitiveHeaders.contains(name.lowercased()) {
           lines.append("\(name): [REDACTED]")
         } else {
-          for value in values {
-            lines.append("\(name): \(value)")
-          }
+          lines.append("\(name): \(header.value)")
         }
       }
 
       lines.append("")
 
-      if let body = request.body {
+      if let body {
         if let json = try? JSONSerialization.jsonObject(with: body),
            let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         {
@@ -227,19 +196,22 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
     }
   }
 
-  // MARK: - Response logging (non-SSE)
-
-  private func writeDataResponse(response: HTTPResponse, body: Data, to dir: URL) {
+  private func writeResponse(
+    response: Response,
+    body: Data,
+    to dir: URL,
+    error: (any Error)? = nil,
+  ) {
     do {
       var lines: [String] = []
-      lines.append("HTTP \(response.statusCode)")
+      lines.append("HTTP \(response.status.code)")
       lines.append("")
 
-      let sortedHeaders = response.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
-      for (name, values) in sortedHeaders {
-        for value in values {
-          lines.append("\(name): \(value)")
-        }
+      let sortedHeaders = response.headers.sorted {
+        $0.name.rawName.lowercased() < $1.name.rawName.lowercased()
+      }
+      for header in sortedHeaders {
+        lines.append("\(header.name.rawName): \(header.value)")
       }
 
       lines.append("")
@@ -250,47 +222,6 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
         lines.append(String(decoding: pretty, as: UTF8.self))
       } else {
         lines.append(String(decoding: body, as: UTF8.self))
-      }
-
-      let content = lines.joined(separator: "\n")
-      try content.write(to: dir.appendingPathComponent("response.txt"), atomically: true, encoding: .utf8)
-    } catch {
-      // Best-effort
-    }
-  }
-
-  // MARK: - Response logging (SSE)
-
-  private func writeSSEResponse(
-    response: HTTPResponse,
-    events: [SSEMessage],
-    to dir: URL,
-    error: (any Error)? = nil,
-  ) {
-    do {
-      var lines: [String] = []
-      lines.append("HTTP \(response.statusCode)")
-      lines.append("")
-
-      let sortedHeaders = response.headers.sorted { $0.key.lowercased() < $1.key.lowercased() }
-      for (name, values) in sortedHeaders {
-        for value in values {
-          lines.append("\(name): \(value)")
-        }
-      }
-
-      lines.append("")
-      lines.append("--- SSE Events (\(events.count)) ---")
-      lines.append("")
-
-      for (i, event) in events.enumerated() {
-        if let eventType = event.event {
-          lines.append("event: \(eventType)")
-        }
-        lines.append("data: \(event.data)")
-        if i < events.count - 1 {
-          lines.append("")
-        }
       }
 
       if let error {
@@ -306,18 +237,29 @@ public struct LoggingHTTPTransport: PiAI.HTTPClient, Sendable {
     }
   }
 
-  /// Set non-secret headers as span attributes.
-  /// Header names are normalized: lowercased, dashes become underscores.
   private func setHeaderAttributes(
-    _ headers: [String: [String]],
+    _ headers: Headers,
     prefix: String,
     on span: any Span,
   ) {
-    for (name, values) in headers {
+    for header in headers {
+      let name = header.name.rawName
       guard !Self.sensitiveHeaders.contains(name.lowercased()) else { continue }
       let normalizedName = name.lowercased().replacingOccurrences(of: "-", with: "_")
-      let key = "\(prefix).\(normalizedName)"
-      span.attributes[key] = values.joined(separator: ", ")
+      span.attributes["\(prefix).\(normalizedName)"] = header.value
     }
+  }
+
+  private func materialize(_ request: Request) async throws -> (Request, Data?) {
+    guard let body = request.body else { return (request, nil) }
+
+    var bytes: Bytes = []
+    for try await chunk in body.stream {
+      bytes.append(contentsOf: chunk)
+    }
+
+    var copy = request
+    copy.body = .bytes(bytes, contentType: body.contentType)
+    return (copy, Data(bytes))
   }
 }

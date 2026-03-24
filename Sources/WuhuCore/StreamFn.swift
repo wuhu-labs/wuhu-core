@@ -1,9 +1,10 @@
 import Dependencies
+import Fetch
 import Foundation
-import PiAI
-import PiAIAsyncHTTPClient
 import ServiceContextModule
 import Tracing
+import WuhuAI
+import WuhuCoreClient
 
 public typealias StreamFn = @Sendable (Model, Context, RequestOptions) async throws
   -> AsyncThrowingStream<AssistantMessageEvent, any Error>
@@ -12,18 +13,18 @@ public typealias StreamFn = @Sendable (Model, Context, RequestOptions) async thr
 
 /// Shared HTTP transport for LLM requests. Kept alive for the process lifetime to avoid
 /// connection teardown mid-stream when providers are created as temporaries.
-public let sharedHTTPTransport = AsyncHTTPClientTransport()
+public let sharedLLMFetchClient = sharedFetchClient
 
-/// Build a `StreamFn` that dispatches to the appropriate provider using the given HTTP client.
-public func makeStreamFn(http: any PiAI.HTTPClient) -> StreamFn {
+/// Build a `StreamFn` that dispatches to the appropriate provider using the given fetch client.
+public func makeStreamFn(fetch: FetchClient) -> StreamFn {
   { model, context, options in
     switch model.provider {
     case .openai:
-      try await OpenAIResponsesProvider(http: http).stream(model: model, context: context, options: options)
+      try await OpenAIResponsesProvider(fetch: fetch).stream(model: model, context: context, options: options)
     case .openaiCodex:
-      try await OpenAICodexResponsesProvider(http: http).stream(model: model, context: context, options: options)
+      try await OpenAICodexResponsesProvider(fetch: fetch).stream(model: model, context: context, options: options)
     case .anthropic:
-      try await AnthropicMessagesProvider(http: http).stream(model: model, context: context, options: options)
+      try await AnthropicMessagesProvider(fetch: fetch).stream(model: model, context: context, options: options)
     }
   }
 }
@@ -126,8 +127,8 @@ public func tracedStreamFn(wrapping inner: @escaping StreamFn) -> StreamFn {
 // MARK: - Dependency registration
 
 private enum StreamFnKey: DependencyKey {
-  static let liveValue: StreamFn = makeStreamFn(http: sharedHTTPTransport)
-  static let testValue: StreamFn = makeStreamFn(http: sharedHTTPTransport)
+  static let liveValue: StreamFn = makeStreamFn(fetch: sharedLLMFetchClient)
+  static let testValue: StreamFn = makeStreamFn(fetch: sharedLLMFetchClient)
 }
 
 public extension DependencyValues {

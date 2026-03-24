@@ -1,6 +1,8 @@
+import Fetch
+import FetchSSE
 import Foundation
-import PiAI
 import Testing
+import WuhuAI
 @testable import WuhuCore
 
 struct LoggingHTTPTransportTests {
@@ -9,26 +11,20 @@ struct LoggingHTTPTransportTests {
     defer { try? FileManager.default.removeItem(at: baseDir) }
 
     let transport = LoggingHTTPTransport(
-      underlying: LoggingHTTPClientMock(
-        dataHandler: { request in
-          #expect(request.method == "POST")
-          #expect(request.headers["Authorization"] == ["Bearer secret-token"])
+      underlying: MockFetchClient { request in
+        #expect(request.method.rawValue == "POST")
+        #expect(headerValues(request.headers, named: "Authorization") == ["Bearer secret-token"])
 
-          let body = try #require(request.body)
-          let payload = try JSONSerialization.jsonObject(with: body) as? [String: String]
-          #expect(payload?["prompt"] == "hi")
+        let payload = try JSONSerialization.jsonObject(with: #require(try await bodyData(request))) as? [String: String]
+        #expect(payload?["prompt"] == "hi")
 
-          let responseBody = try JSONEncoder().encode(["status": "ok"])
-          return (
-            responseBody,
-            HTTPResponse(statusCode: 201, headers: ["Content-Type": ["application/json"]]),
-          )
-        },
-      ),
+        let responseBody = try JSONEncoder().encode(["status": "ok"])
+        return jsonResponse(responseBody, status: 201)
+      }.client,
       baseDir: baseDir,
     )
 
-    var request = try HTTPRequest(
+    var request = try Request(
       url: #require(URL(string: "https://example.com/v1/chat")),
       method: "POST",
       headers: [
@@ -39,21 +35,21 @@ struct LoggingHTTPTransportTests {
     )
     request.addHeader("text/plain", for: "Accept")
 
-    let (data, response) = try await transport.data(for: request)
-    let payload = try JSONSerialization.jsonObject(with: data) as? [String: String]
+    let response = try await transport(request)
+    let payload = try await JSONSerialization.jsonObject(with: response.data()) as? [String: String]
 
-    #expect(response.statusCode == 201)
+    #expect(response.status.code == 201)
     #expect(payload?["status"] == "ok")
 
     let files = try payloadFiles(in: baseDir)
-    let requestText = try String(contentsOf: files.request, encoding: .utf8)
-    let responseText = try String(contentsOf: files.response, encoding: .utf8)
+    let requestText = try String(contentsOf: files.request, encoding: .utf8).lowercased()
+    let responseText = try String(contentsOf: files.response, encoding: .utf8).lowercased()
 
-    #expect(requestText.contains("POST https://example.com/v1/chat"))
-    #expect(requestText.contains("Authorization: [REDACTED]"))
+    #expect(requestText.contains("post https://example.com/v1/chat"))
+    #expect(requestText.contains("authorization: [redacted]"))
     #expect(requestText.contains("\"prompt\""))
-    #expect(responseText.contains("HTTP 201"))
-    #expect(responseText.contains("Content-Type: application/json"))
+    #expect(responseText.contains("http 201"))
+    #expect(responseText.contains("content-type: application/json"))
     #expect(responseText.contains("\"status\""))
   }
 
@@ -61,47 +57,35 @@ struct LoggingHTTPTransportTests {
     let baseDir = try makeTempDirectory()
     defer { try? FileManager.default.removeItem(at: baseDir) }
 
-    let expected: [SSEMessage] = [
-      .init(event: "message", data: "hello"),
+    let expected: [SSEEvent] = [
+      .init(data: "hello"),
       .init(data: "world"),
     ]
 
     let transport = LoggingHTTPTransport(
-      underlying: LoggingHTTPClientMock(
-        sseHandler: { _ in
-          let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-            for event in expected {
-              continuation.yield(event)
-            }
-            continuation.finish()
-          }
-          return SSEResponse(
-            response: HTTPResponse(statusCode: 200, headers: ["Content-Type": ["text/event-stream"]]),
-            events: events,
-          )
-        },
-      ),
+      underlying: MockFetchClient { _ in
+        sseResponse(expected)
+      }.client,
       baseDir: baseDir,
     )
 
-    let response = try await transport.sse(for: HTTPRequest(url: #require(URL(string: "https://example.com/stream"))))
+    let response = try await transport(Request(url: #require(URL(string: "https://example.com/stream")), method: "GET"))
 
-    var received: [SSEMessage] = []
-    for try await event in response.events {
+    var received: [SSEEvent] = []
+    for try await event in response.sse() {
       received.append(event)
     }
 
     #expect(received == expected)
 
     let files = try payloadFiles(in: baseDir)
-    let responseText = try String(contentsOf: files.response, encoding: .utf8)
+    let responseText = try String(contentsOf: files.response, encoding: .utf8).lowercased()
 
-    #expect(responseText.contains("HTTP 200"))
-    #expect(responseText.contains("--- SSE Events (2) ---"))
-    #expect(responseText.contains("event: message"))
+    #expect(responseText.contains("http 200"))
+    #expect(responseText.contains("content-type: text/event-stream"))
     #expect(responseText.contains("data: hello"))
     #expect(responseText.contains("data: world"))
-    #expect(!responseText.contains("--- Error ---"))
+    #expect(!responseText.contains("--- error ---"))
   }
 
   @Test func sse_cancellationLogsPartialTranscriptAndCancelsUpstream() async throws {
@@ -109,49 +93,58 @@ struct LoggingHTTPTransportTests {
     defer { try? FileManager.default.removeItem(at: baseDir) }
 
     let probe = CancellationProbe()
+    let firstEvent = SeenProbe()
 
     let transport = LoggingHTTPTransport(
-      underlying: LoggingHTTPClientMock(
-        sseHandler: { _ in
-          let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-            let producer = Task {
-              continuation.yield(.init(data: "first"))
-              do {
-                try await Task.sleep(for: .seconds(60))
-                continuation.yield(.init(data: "second"))
-                continuation.finish()
-              } catch {
-                continuation.finish()
-              }
-            }
+      underlying: MockFetchClient { _ in
+        var headers = Headers()
+        headers[.contentType] = "text/event-stream"
 
-            continuation.onTermination = { _ in
-              producer.cancel()
-              Task {
-                await probe.markCancelled()
-              }
+        let body = BodyStream { continuation in
+          let producer = Task {
+            continuation.yield(Array(serializeSSEEvent(.init(data: "first")).utf8))
+            do {
+              try await Task.sleep(for: .seconds(60))
+              continuation.yield(Array(serializeSSEEvent(.init(data: "second")).utf8))
+              continuation.finish()
+            } catch {
+              continuation.finish()
             }
           }
 
-          return SSEResponse(response: HTTPResponse(statusCode: 200), events: events)
-        },
-      ),
+          continuation.onTermination = { _ in
+            producer.cancel()
+            Task {
+              await probe.markCancelled()
+            }
+          }
+        }
+
+        return Response(status: Status(code: 200), headers: headers, body: body)
+      }.client,
       baseDir: baseDir,
     )
 
-    var response: SSEResponse? = try await transport.sse(
-      for: HTTPRequest(url: #require(URL(string: "https://example.com/cancel"))),
+    var response: Response? = try await transport(
+      Request(url: #require(URL(string: "https://example.com/cancel")), method: "GET"),
     )
+    let activeResponse = try #require(response)
 
-    do {
-      let events = try #require(response).events
-      try await Task {
-        for try await event in events {
-          #expect(event.data == "first")
-          break
+    let consumer = Task {
+      do {
+        for try await chunk in activeResponse.body {
+          #expect(String(decoding: chunk, as: UTF8.self).contains("data: first"))
+          await firstEvent.markSeen()
         }
-      }.value
+      } catch is CancellationError {}
     }
+
+    try await waitUntil {
+      await firstEvent.wasSeen()
+    }
+
+    consumer.cancel()
+    _ = await consumer.result
 
     response = nil
 
@@ -160,39 +153,19 @@ struct LoggingHTTPTransportTests {
     }
 
     let responseURL = try await waitForPayloadFile(named: "response.txt", in: baseDir)
-    let responseText = try String(contentsOf: responseURL, encoding: .utf8)
+    let responseText = try String(contentsOf: responseURL, encoding: .utf8).lowercased()
 
-    #expect(responseText.contains("--- SSE Events (1) ---"))
     #expect(responseText.contains("data: first"))
     #expect(!responseText.contains("data: second"))
-    #expect(responseText.contains("--- Error ---"))
+    #expect(responseText.contains("--- error ---"))
   }
 }
 
-private struct LoggingHTTPClientMock: HTTPClient {
-  var dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))?
-  var sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)?
+private struct MockFetchClient {
+  var handler: @Sendable (Request) async throws -> Response
 
-  init(
-    dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))? = nil,
-    sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)? = nil,
-  ) {
-    self.dataHandler = dataHandler
-    self.sseHandler = sseHandler
-  }
-
-  func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-    guard let dataHandler else {
-      throw PiAIError.unsupported("LoggingHTTPClientMock.dataHandler not set")
-    }
-    return try await dataHandler(request)
-  }
-
-  func sse(for request: HTTPRequest) async throws -> SSEResponse {
-    guard let sseHandler else {
-      throw PiAIError.unsupported("LoggingHTTPClientMock.sseHandler not set")
-    }
-    return try await sseHandler(request)
+  var client: FetchClient {
+    FetchClient(fetch: handler)
   }
 }
 
@@ -206,6 +179,64 @@ private actor CancellationProbe {
   func wasCancelled() -> Bool {
     cancelled
   }
+}
+
+private actor SeenProbe {
+  private var seen = false
+
+  func markSeen() {
+    seen = true
+  }
+
+  func wasSeen() -> Bool {
+    seen
+  }
+}
+
+private func jsonResponse(_ data: Data, status: Int = 200) -> Response {
+  var headers = Headers()
+  headers[.contentType] = "application/json"
+  return Response(
+    status: Status(code: status),
+    headers: headers,
+    body: .chunk(Array(data)),
+  )
+}
+
+private func sseResponse(_ events: [SSEEvent], status: Int = 200) -> Response {
+  var headers = Headers()
+  headers[.contentType] = "text/event-stream"
+  let payload = events.map(serializeSSEEvent).joined()
+  return Response(
+    status: Status(code: status),
+    headers: headers,
+    body: .chunk(Array(payload.utf8)),
+  )
+}
+
+private func serializeSSEEvent(_ event: SSEEvent) -> String {
+  var lines: [String] = []
+
+  if event.event != "message" {
+    lines.append("event: \(event.event)")
+  }
+  if let id = event.id {
+    lines.append("id: \(id)")
+  }
+  if let retry = event.retry {
+    lines.append("retry: \(retry)")
+  }
+
+  let dataLines = event.data.split(separator: "\n", omittingEmptySubsequences: false)
+  if dataLines.isEmpty {
+    lines.append("data:")
+  } else {
+    for line in dataLines {
+      lines.append("data: \(line)")
+    }
+  }
+
+  return lines.joined(separator: "\n") + "\n\n"
 }
 
 private func makeTempDirectory() throws -> URL {
@@ -258,7 +289,5 @@ private func waitUntilResult<T>(
     try await Task.sleep(for: .milliseconds(25))
   }
 
-  throw TimeoutError()
+  throw CancellationError()
 }
-
-private struct TimeoutError: Error {}

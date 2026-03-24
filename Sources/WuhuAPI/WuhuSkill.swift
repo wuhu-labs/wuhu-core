@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct WuhuSkill: Sendable, Hashable, Codable, Identifiable {
   public var name: String

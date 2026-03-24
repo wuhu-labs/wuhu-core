@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 struct WuhuCompactionSettings: Sendable, Hashable {
@@ -421,7 +421,7 @@ enum WuhuCompactionEngine {
     let stream = try await streamFn(model, ctx, opts)
     let final = try await collectFinalAssistantMessage(from: stream)
     if final.stopReason == .error {
-      throw PiAIError.unsupported("Summarization failed: \(final.errorMessage ?? "Unknown error")")
+      throw WuhuAIError.unsupported("Summarization failed: \(final.errorMessage ?? "Unknown error")")
     }
 
     return final.content.compactMap { block in
@@ -447,7 +447,7 @@ enum WuhuCompactionEngine {
     }
     if let final { return final }
     if let partial { return partial }
-    throw PiAIError.unsupported("No summarization output")
+    throw WuhuAIError.unsupported("No summarization output")
   }
 
   private static func calculateContextTokens(usage: Usage) -> Int {

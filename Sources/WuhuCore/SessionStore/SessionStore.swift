@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 public enum WuhuStoreError: Error, Sendable, CustomStringConvertible {

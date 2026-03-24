@@ -1,6 +1,6 @@
 import Dispatch
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuCore
 
 #if canImport(Darwin)
@@ -86,7 +86,7 @@ private func parseOptions(_ args: ArraySlice<String>) throws -> Options {
 
   func nextValue(_ flag: String) throws -> String {
     guard let v = it.next() else {
-      throw PiAIError.unsupported("Missing value for \(flag)")
+      throw WuhuAIError.unsupported("Missing value for \(flag)")
     }
     return v
   }
@@ -118,7 +118,7 @@ private func parseOptions(_ args: ArraySlice<String>) throws -> Options {
     case "-h", "--help":
       printHelpAndExit()
     default:
-      throw PiAIError.unsupported("Unknown argument: \(arg)")
+      throw WuhuAIError.unsupported("Unknown argument: \(arg)")
     }
   }
 
@@ -158,7 +158,7 @@ private func runWuhuFind(options: Options) async throws -> [String] {
   let root = options.root
   let tools = WuhuTools.codingAgentTools(cwdProvider: { root })
   guard let tool = tools.first(where: { $0.tool.name == "find" }) else {
-    throw PiAIError.unsupported("find tool not found")
+    throw WuhuAIError.unsupported("find tool not found")
   }
 
   var args: [String: JSONValue] = [
@@ -274,7 +274,7 @@ private func runProcess(executable: String, args: [String]) throws -> String {
 
   if p.terminationStatus != 0 {
     let stderr = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-    throw PiAIError.unsupported("CLI find failed (\(p.terminationStatus)): \(stderr)")
+    throw WuhuAIError.unsupported("CLI find failed (\(p.terminationStatus)): \(stderr)")
   }
 
   return String(decoding: outData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)

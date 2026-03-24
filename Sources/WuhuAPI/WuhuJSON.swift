@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public enum WuhuJSON {
   public static let encoder: JSONEncoder = {

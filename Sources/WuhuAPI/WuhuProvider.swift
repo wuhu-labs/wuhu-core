@@ -1,4 +1,4 @@
-import PiAI
+import WuhuAI
 
 public enum WuhuProvider: String, Sendable, Codable, CaseIterable, Hashable {
   case openai

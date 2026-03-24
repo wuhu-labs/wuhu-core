@@ -1,6 +1,6 @@
 import ArgumentParser
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 #if canImport(Darwin)

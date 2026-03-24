@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct WuhuModelOption: Sendable, Hashable, Identifiable {
   public var id: String

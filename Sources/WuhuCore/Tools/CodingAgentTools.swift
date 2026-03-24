@@ -1,6 +1,6 @@
 import Dependencies
 import Foundation
-import PiAI
+import WuhuAI
 
 /// Closure that resolves the current working directory for the session.
 /// Returns nil when no mount has been set yet.

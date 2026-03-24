@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 @testable import WuhuCore
 
 // MARK: - MockStreamFn
@@ -39,7 +39,7 @@ final class MockStreamFn: @unchecked Sendable {
   var streamFn: StreamFn {
     { [weak self] model, context, _ in
       guard let self else {
-        throw PiAIError.unsupported("MockStreamFn deallocated")
+        throw WuhuAIError.unsupported("MockStreamFn deallocated")
       }
       let response = nextResponse(context: context)
       return makeStream(response: response, model: model)
@@ -77,7 +77,7 @@ final class MockStreamFn: @unchecked Sendable {
       }
     case let .transientError(code):
       AsyncThrowingStream { continuation in
-        continuation.finish(throwing: PiAIError.httpStatus(code: code, body: "overloaded"))
+        continuation.finish(throwing: WuhuAIError.httpStatus(code: code, body: "overloaded"))
       }
     }
   }

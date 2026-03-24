@@ -1,7 +1,7 @@
 import Dependencies
 import Foundation
-import PiAI
 import Testing
+import WuhuAI
 import WuhuAPI
 import WuhuCore
 

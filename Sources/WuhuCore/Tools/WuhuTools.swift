@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public enum WuhuTools {
   public static func simulatedWeatherTool() -> AnyAgentTool {

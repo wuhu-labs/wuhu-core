@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct AgentToolResult: Sendable, Hashable {
   public var content: [ContentBlock]
