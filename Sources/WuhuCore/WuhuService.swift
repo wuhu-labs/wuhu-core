@@ -596,8 +596,8 @@ private func loadProfiles(at workspaceRoot: String) throws -> [WuhuProfile] {
     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 }
 
-extension WuhuService {
-  fileprivate func requireProfile(named profileName: String) throws -> WuhuProfile {
+private extension WuhuService {
+  func requireProfile(named profileName: String) throws -> WuhuProfile {
     guard let workspaceRoot else {
       throw WuhuProfileResolutionError.profilesUnavailable
     }

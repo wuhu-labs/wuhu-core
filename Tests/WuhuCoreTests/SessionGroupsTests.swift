@@ -114,7 +114,7 @@ struct SessionGroupsTests {
     #expect(firstSession.sessionGroupID == group.id)
     #expect(firstSession.profileName == "research")
 
-    let firstAgentsText = try #require(agentsContextText(from: await harness.transcript(sessionID: firstSession.id)))
+    let firstAgentsText = try #require(await agentsContextText(from: harness.transcript(sessionID: firstSession.id)))
     #expect(firstAgentsText.contains("research profile instructions"))
     #expect(!firstAgentsText.contains("workspace agents instructions"))
 

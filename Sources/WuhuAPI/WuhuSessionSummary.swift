@@ -12,7 +12,9 @@ public struct WuhuSessionSummary: Sendable, Hashable, Codable, Identifiable {
   public var lastMessageRole: MessageRole?
   public var lastMessageText: String?
 
-  public var id: String { session.id }
+  public var id: String {
+    session.id
+  }
 
   public init(
     session: WuhuSession,

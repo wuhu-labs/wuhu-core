@@ -31,7 +31,9 @@ public struct WuhuProfile: Sendable, Hashable, Codable, Identifiable {
   public var name: String
   public var agentsPath: String
 
-  public var id: String { name }
+  public var id: String {
+    name
+  }
 
   public init(name: String, agentsPath: String) {
     self.name = name
