@@ -27,7 +27,9 @@ public protocol SessionStore: Sendable {
     reasoningEffort: ReasoningEffort?,
     systemPrompt: String,
     cwd: String?,
+    sessionGroupID: String?,
     parentSessionID: String?,
+    profileName: String?,
   ) async throws -> WuhuSession
 
   func getSession(id: String) async throws -> WuhuSession

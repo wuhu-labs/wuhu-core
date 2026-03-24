@@ -6,7 +6,11 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
   public var model: String
   /// Working directory for tool execution. Nil if the session has no mount (pure chat).
   public var cwd: String?
+  public var sessionGroupID: String
   public var parentSessionID: String?
+  /// Snapshot of the profile used to emit workspace-level context when the session was created.
+  /// Nil means the session used the workspace default context.
+  public var profileName: String?
   /// User-supplied custom title. When non-nil, clients should display this instead of the
   /// auto-derived title (e.g., first user message).
   public var customTitle: String?
@@ -23,7 +27,9 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
     provider: WuhuProvider,
     model: String,
     cwd: String? = nil,
+    sessionGroupID: String = WuhuSessionGroup.defaultID,
     parentSessionID: String? = nil,
+    profileName: String? = nil,
     customTitle: String? = nil,
     isArchived: Bool = false,
     createdAt: Date,
@@ -35,7 +41,9 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
     self.provider = provider
     self.model = model
     self.cwd = cwd
+    self.sessionGroupID = sessionGroupID
     self.parentSessionID = parentSessionID
+    self.profileName = profileName
     self.customTitle = customTitle
     self.isArchived = isArchived
     self.createdAt = createdAt
@@ -49,7 +57,9 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
     case provider
     case model
     case cwd
+    case sessionGroupID
     case parentSessionID
+    case profileName
     case customTitle
     case isArchived
     case createdAt
@@ -64,7 +74,9 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
     provider = try c.decode(WuhuProvider.self, forKey: .provider)
     model = try c.decode(String.self, forKey: .model)
     cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+    sessionGroupID = try c.decodeIfPresent(String.self, forKey: .sessionGroupID) ?? WuhuSessionGroup.defaultID
     parentSessionID = try c.decodeIfPresent(String.self, forKey: .parentSessionID)
+    profileName = try c.decodeIfPresent(String.self, forKey: .profileName)
     customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
     isArchived = try c.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     createdAt = try c.decode(Date.self, forKey: .createdAt)
@@ -79,7 +91,9 @@ public struct WuhuSession: Sendable, Hashable, Codable, Identifiable {
     try c.encode(provider, forKey: .provider)
     try c.encode(model, forKey: .model)
     try c.encodeIfPresent(cwd, forKey: .cwd)
+    try c.encode(sessionGroupID, forKey: .sessionGroupID)
     try c.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
+    try c.encodeIfPresent(profileName, forKey: .profileName)
     try c.encodeIfPresent(customTitle, forKey: .customTitle)
     try c.encode(isArchived, forKey: .isArchived)
     try c.encode(createdAt, forKey: .createdAt)

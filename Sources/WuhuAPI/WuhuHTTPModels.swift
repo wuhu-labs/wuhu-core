@@ -10,6 +10,7 @@ public struct WuhuCreateSessionRequest: Sendable, Hashable, Codable {
   public var mountTemplate: String?
   /// Direct path mount (bypass mount templates). Optional.
   public var mountPath: String?
+  public var sessionGroupID: String?
   public var parentSessionID: String?
 
   public init(
@@ -19,6 +20,7 @@ public struct WuhuCreateSessionRequest: Sendable, Hashable, Codable {
     systemPrompt: String? = nil,
     mountTemplate: String? = nil,
     mountPath: String? = nil,
+    sessionGroupID: String? = nil,
     parentSessionID: String? = nil,
   ) {
     self.provider = provider
@@ -27,7 +29,28 @@ public struct WuhuCreateSessionRequest: Sendable, Hashable, Codable {
     self.systemPrompt = systemPrompt
     self.mountTemplate = mountTemplate
     self.mountPath = mountPath
+    self.sessionGroupID = sessionGroupID
     self.parentSessionID = parentSessionID
+  }
+}
+
+public struct WuhuCreateSessionGroupRequest: Sendable, Hashable, Codable {
+  public var name: String
+  public var profileName: String?
+
+  public init(name: String, profileName: String? = nil) {
+    self.name = name
+    self.profileName = profileName
+  }
+}
+
+public struct WuhuUpdateSessionGroupRequest: Sendable, Hashable, Codable {
+  public var name: String
+  public var profileName: String?
+
+  public init(name: String, profileName: String? = nil) {
+    self.name = name
+    self.profileName = profileName
   }
 }
 
