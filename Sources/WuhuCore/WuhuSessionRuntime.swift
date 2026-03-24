@@ -10,20 +10,16 @@ actor WuhuSessionRuntime {
   private let runtimeConfig: WuhuSessionRuntimeConfig
   private let onIdle: (@Sendable (_ sessionID: String) async -> Void)?
 
-  private var publishedSystemCursor: QueueCursor = .init(rawValue: "0")
-  private var publishedSteerCursor: QueueCursor = .init(rawValue: "0")
-  private var publishedFollowUpCursor: QueueCursor = .init(rawValue: "0")
-
   private let behavior: WuhuSessionBehavior
   private let loop: AgentLoop<WuhuSessionBehavior>
 
   private var startTask: Task<Void, Never>?
   private var observeTask: Task<Void, Never>?
 
-  private var streaming: Bool = false
-  private var inflightText: String = ""
+  private var streaming = false
+  private var inflightText = ""
   private var observedState: WuhuSessionLoopState = .empty
-  private var observationReady: Bool = false
+  private var observationReady = false
 
   init(
     sessionID: SessionID,
@@ -55,13 +51,14 @@ actor WuhuSessionRuntime {
         } catch is CancellationError {
           return
         } catch {
-          // Best-effort: keep the per-session loop alive for the process lifetime.
           let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n"
           FileHandle.standardError.write(Data(line.utf8))
           try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
       }
     }
+
+    await loop.waitUntilLoaded()
 
     observeTask = Task { [weak self] in
       guard let self else { return }
@@ -82,11 +79,9 @@ actor WuhuSessionRuntime {
   }
 
   func isIdle() -> Bool {
-    // Fast-path: don't block callers on observation if they only need a best-effort hint.
     !streaming && !behavior.hasWork(state: observedState)
   }
 
-  /// Returns accumulated streaming text if inference is in progress, nil otherwise.
   func currentInflightText() -> String? {
     guard streaming else { return nil }
     return inflightText
@@ -121,7 +116,6 @@ actor WuhuSessionRuntime {
 
     if !streaming, !behavior.hasWork(state: observedState) {
       try await loop.send(.applyModelSelection(selection))
-      // Observe if the session updates quickly; otherwise treat as deferred.
       let updated = try await store.getSession(id: sessionID.rawValue)
       return updated.model == selection.model && updated.provider == selection.provider
     }
@@ -152,19 +146,12 @@ actor WuhuSessionRuntime {
     streaming = false
     inflightText = ""
     observedState = .empty
-
-    publishedSystemCursor = .init(rawValue: "0")
-    publishedSteerCursor = .init(rawValue: "0")
-    publishedFollowUpCursor = .init(rawValue: "0")
   }
-
-  // MARK: - Observation handling
 
   private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
     observedState = observation.state
     streaming = observation.inflight != nil
 
-    // Seed inflight text from the loop's accumulated stream actions.
     if let actions = observation.inflight {
       inflightText = actions.map { action in
         switch action {
@@ -175,66 +162,18 @@ actor WuhuSessionRuntime {
       inflightText = ""
     }
 
-    publishedSystemCursor = observation.state.systemUrgent.cursor
-    publishedSteerCursor = observation.state.steer.cursor
-    publishedFollowUpCursor = observation.state.followUp.cursor
-
     observationReady = true
   }
 
-  private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionCommittedAction, WuhuSessionStreamAction>) async {
+  private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionLoopState, WuhuSessionStreamAction>) async {
     switch event {
-    case let .committed(action):
+    case let .stateUpdated(nextState):
       let wasIdle = isIdle()
-      behavior.apply(action, to: &observedState)
-      switch action {
-      case let .entryAppended(entry):
-        await eventHub.publish(sessionID: sessionID.rawValue, event: .entryAppended(entry))
-        await subscriptionHub.publish(
-          sessionID: sessionID.rawValue,
-          event: .transcriptAppended([entry]),
-        )
+      let oldState = observedState
+      observedState = nextState
 
-      case .sessionUpdated:
-        break
-
-      case .toolCallStatusUpdated:
-        break
-
-      case .systemQueueUpdated:
-        let delta = try? await store.loadSystemQueueJournal(sessionID: sessionID, since: publishedSystemCursor)
-        if let delta {
-          publishedSystemCursor = delta.cursor
-          if !delta.entries.isEmpty {
-            await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .systemUrgentQueue(cursor: delta.cursor, entries: delta.entries))
-          }
-        }
-
-      case let .userQueueUpdated(lane, _):
-        switch lane {
-        case .steer:
-          let delta = try? await store.loadUserQueueJournal(sessionID: sessionID, lane: lane, since: publishedSteerCursor)
-          if let delta {
-            publishedSteerCursor = delta.cursor
-            if !delta.entries.isEmpty {
-              await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .userQueue(cursor: delta.cursor, entries: delta.entries))
-            }
-          }
-        case .followUp:
-          let delta = try? await store.loadUserQueueJournal(sessionID: sessionID, lane: lane, since: publishedFollowUpCursor)
-          if let delta {
-            publishedFollowUpCursor = delta.cursor
-            if !delta.entries.isEmpty {
-              await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .userQueue(cursor: delta.cursor, entries: delta.entries))
-            }
-          }
-        }
-
-      case let .settingsUpdated(settings):
-        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .settingsUpdated(settings))
-
-      case let .statusUpdated(status):
-        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(status))
+      if let diff = behavior.diff(from: oldState, to: nextState) {
+        await publish(diff: diff, nextState: nextState)
       }
 
       let nowIdle = isIdle()
@@ -243,7 +182,6 @@ actor WuhuSessionRuntime {
         if let onIdle {
           Task { await onIdle(sessionID.rawValue) }
         }
-        // Best-effort: apply deferred model changes once idle.
         Task { [weak self] in
           try? await self?.applyPendingModelIfPossible()
         }
@@ -274,6 +212,47 @@ actor WuhuSessionRuntime {
           Task { await onIdle(sessionID.rawValue) }
         }
       }
+    }
+  }
+
+  private func publish(diff: WuhuSessionPersistenceDiff, nextState: WuhuSessionLoopState) async {
+    if !diff.appendedEntries.isEmpty {
+      for entry in diff.appendedEntries {
+        await eventHub.publish(sessionID: sessionID.rawValue, event: .entryAppended(entry))
+      }
+      await subscriptionHub.publish(
+        sessionID: sessionID.rawValue,
+        event: .transcriptAppended(diff.appendedEntries),
+      )
+    }
+
+    if !diff.systemJournalEntries.isEmpty {
+      await subscriptionHub.publish(
+        sessionID: sessionID.rawValue,
+        event: .systemUrgentQueue(cursor: nextState.systemUrgent.cursor, entries: diff.systemJournalEntries),
+      )
+    }
+
+    if !diff.steerJournalEntries.isEmpty {
+      await subscriptionHub.publish(
+        sessionID: sessionID.rawValue,
+        event: .userQueue(cursor: nextState.steer.cursor, entries: diff.steerJournalEntries),
+      )
+    }
+
+    if !diff.followUpJournalEntries.isEmpty {
+      await subscriptionHub.publish(
+        sessionID: sessionID.rawValue,
+        event: .userQueue(cursor: nextState.followUp.cursor, entries: diff.followUpJournalEntries),
+      )
+    }
+
+    if diff.settingsChanged {
+      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .settingsUpdated(nextState.settings))
+    }
+
+    if diff.statusChanged {
+      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(nextState.status))
     }
   }
 }
