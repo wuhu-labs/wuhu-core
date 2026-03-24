@@ -79,7 +79,9 @@ struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   var pendingReasoningEffort: String?
   var executionStatus: String
   var cwd: String?
+  var sessionGroupID: String
   var parentSessionID: String?
+  var profileName: String?
   var customTitle: String?
   var isArchived: Bool
   var createdAt: Date
@@ -99,13 +101,37 @@ struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
       provider: provider,
       model: model,
       cwd: cwd,
+      sessionGroupID: sessionGroupID,
       parentSessionID: parentSessionID,
+      profileName: profileName,
       customTitle: customTitle,
       isArchived: isArchived,
       createdAt: createdAt,
       updatedAt: updatedAt,
       headEntryID: headEntryID,
       tailEntryID: tailEntryID,
+    )
+  }
+}
+
+struct SessionGroupRow: Codable, FetchableRecord, MutablePersistableRecord {
+  static let databaseTableName = "session_groups"
+
+  var id: String
+  var name: String
+  var profileName: String?
+  var isDefault: Bool
+  var createdAt: Date
+  var updatedAt: Date
+
+  func toModel() -> WuhuSessionGroup {
+    .init(
+      id: id,
+      name: name,
+      profileName: profileName,
+      isDefault: isDefault,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
     )
   }
 }

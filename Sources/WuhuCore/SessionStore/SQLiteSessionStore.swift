@@ -195,7 +195,9 @@ public actor SQLiteSessionStore: SessionStore {
     reasoningEffort: ReasoningEffort?,
     systemPrompt: String,
     cwd: String?,
-    parentSessionID: String?,
+    sessionGroupID: String? = nil,
+    parentSessionID: String? = nil,
+    profileName: String? = nil,
   ) async throws -> WuhuSession {
     let now = Date()
     let sessionID = rawSessionID.lowercased()
@@ -211,7 +213,9 @@ public actor SQLiteSessionStore: SessionStore {
         pendingReasoningEffort: nil,
         executionStatus: SessionExecutionStatus.idle.rawValue,
         cwd: cwd,
+        sessionGroupID: sessionGroupID ?? WuhuSessionGroup.defaultID,
         parentSessionID: parentSessionID,
+        profileName: profileName,
         isArchived: false,
         createdAt: now,
         updatedAt: now,

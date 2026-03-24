@@ -27,6 +27,7 @@ public final class WuhuDatabase: Sendable {
     Migration_V6.register(in: &migrator)
     Migration_V7.register(in: &migrator)
     Migration_V8.register(in: &migrator)
+    Migration_V9.register(in: &migrator)
     return migrator
   }()
 }
