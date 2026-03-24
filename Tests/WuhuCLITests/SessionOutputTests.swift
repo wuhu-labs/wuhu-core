@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 import Testing
 import WuhuAPI
 @testable import WuhuCLIKit

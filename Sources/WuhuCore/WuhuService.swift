@@ -1,6 +1,6 @@
 import Dependencies
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 public actor WuhuService {
@@ -123,7 +123,7 @@ public actor WuhuService {
       beforeEntryID = entries.last?.id
     }
 
-    throw PiAIError.unsupported("No final assistant message found for session '\(sessionID)'")
+    throw WuhuAIError.unsupported("No final assistant message found for session '\(sessionID)'")
   }
 
   public func renameSession(sessionID: String, title: String) async throws -> WuhuSession {

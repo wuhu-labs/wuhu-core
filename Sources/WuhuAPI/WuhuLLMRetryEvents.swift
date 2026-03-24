@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public enum WuhuLLMCustomEntryTypes {
   public static let retry: String = "wuhu_llm_retry_v1"

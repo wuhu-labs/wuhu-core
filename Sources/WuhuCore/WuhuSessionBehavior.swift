@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 enum WuhuSessionStreamAction: Sendable, Hashable {
@@ -246,7 +246,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
     if let final { return final }
     if let partial { return partial }
-    throw PiAIError.unsupported("No model output")
+    throw WuhuAIError.unsupported("No model output")
   }
 
   func persistAssistantEntry(_ message: AssistantMessage, state _: State) async throws -> [CommittedAction] {
@@ -289,7 +289,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   func executeToolCall(_ call: ToolCall) async throws -> ToolResult {
     let tools = await runtimeConfig.tools()
     guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
-      throw PiAIError.unsupported("Unknown tool: \(call.name)")
+      throw WuhuAIError.unsupported("Unknown tool: \(call.name)")
     }
     return try await tool.execute(toolCallId: call.id, args: call.arguments)
   }

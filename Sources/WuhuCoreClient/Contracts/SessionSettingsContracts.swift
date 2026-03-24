@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 /// Snapshot of session-level settings that influence LLM requests.
 public struct SessionSettingsSnapshot: Sendable, Hashable, Codable {

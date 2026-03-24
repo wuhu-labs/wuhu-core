@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 import WuhuAPI
 
 actor WuhuAsyncBashCompletionRouter {

@@ -1,7 +1,8 @@
 import ArgumentParser
+import Fetch
+import FetchSSE
 import Foundation
-import PiAI
-import PiAIAsyncHTTPClient
+import WuhuAI
 import WuhuAPI
 import WuhuClient
 import WuhuCLIKit
@@ -858,13 +859,13 @@ struct WuhuCLI: AsyncParsableCommand {
           components?.queryItems = items.isEmpty ? nil : items
           url = components?.url ?? url
 
-          var req = HTTPRequest(url: url, method: "GET")
+          var req = Request(url: url, method: "GET")
           req.setHeader("text/event-stream", for: "Accept")
 
-          let http = AsyncHTTPClientTransport()
-          let sseResponse = try await http.sse(for: req)
+          let response = try await sharedFetchClient(req)
+          try response.validateStatus()
 
-          for try await message in sseResponse.events {
+          for try await message in response.sse() {
             guard let data = message.data.data(using: .utf8) else { continue }
             let frame = try WuhuJSON.decoder.decode(ChannelSubscriptionSSEFrame.self, from: data)
 

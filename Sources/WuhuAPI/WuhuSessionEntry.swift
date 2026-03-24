@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct WuhuSessionHeader: Sendable, Hashable, Codable {
   public var version: Int

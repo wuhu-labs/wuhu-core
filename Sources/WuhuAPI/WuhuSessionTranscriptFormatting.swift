@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public enum WuhuSessionVerbosity: String, CaseIterable, Sendable, Hashable, Codable {
   case full

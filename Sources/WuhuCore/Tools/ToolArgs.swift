@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 struct ToolArgumentParseError: Error, Sendable, CustomStringConvertible {
   var message: String

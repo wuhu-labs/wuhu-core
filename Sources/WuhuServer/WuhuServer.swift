@@ -1,4 +1,5 @@
 import Dependencies
+import Fetch
 import Foundation
 import HTTPTypes
 import Hummingbird
@@ -7,10 +8,9 @@ import HummingbirdWebSocket
 import Logging
 import NIOCore
 import OTel
-import PiAI
-import PiAIAsyncHTTPClient
 import ServiceLifecycle
 import Tracing
+import WuhuAI
 import WuhuAPI
 import WuhuCore
 
@@ -90,15 +90,15 @@ public struct WuhuServer: Sendable {
     // shared HTTP transport with LoggingHTTPTransport for payload capture.
     // The StreamFn is always wrapped with a traced span for model/usage/duration.
     prepareDependencies {
-      let http: any PiAI.HTTPClient
+      let fetch: FetchClient
       if let logDirRaw = effectiveLogDir {
         let expanded = (logDirRaw as NSString).expandingTildeInPath
         let logDirURL = URL(fileURLWithPath: expanded, isDirectory: true)
-        http = LoggingHTTPTransport(underlying: sharedHTTPTransport, baseDir: logDirURL)
+        fetch = LoggingHTTPTransport(underlying: sharedLLMFetchClient, baseDir: logDirURL).client
       } else {
-        http = sharedHTTPTransport
+        fetch = sharedLLMFetchClient
       }
-      $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(http: http))
+      $0.streamFn = tracedStreamFn(wrapping: makeStreamFn(fetch: fetch))
     }
 
     // Declare configured runner names so they always appear in list_runners

@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct WuhuAsyncBashToolContext: Sendable {
   public var registry: WuhuAsyncBashRegistry
@@ -203,7 +203,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
     ) throws -> WuhuAsyncBashStarted {
       var isDir: ObjCBool = false
       guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
-        throw PiAIError.unsupported("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
+        throw WuhuAIError.unsupported("Working directory does not exist: \(cwd)\nCannot execute bash commands.")
       }
 
       let id = UUID().uuidString.lowercased()
@@ -365,7 +365,7 @@ public struct WuhuAsyncBashCompletion: Sendable, Hashable {
       ownerID _: String? = nil,
       timeoutSeconds _: Double? = nil,
     ) throws -> WuhuAsyncBashStarted {
-      throw PiAIError.unsupported("Async bash is not supported on this platform.")
+      throw WuhuAIError.unsupported("Async bash is not supported on this platform.")
     }
 
     public func status(id _: String) -> WuhuAsyncBashStatus? {

@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 /// Shared bash execution logic used by `LocalRunner` and tool implementations.
 /// Extracted to avoid duplication between runner and tool layers.
@@ -142,7 +142,7 @@ public enum LocalBash {
       #endif
       return BashResult(exitCode: exitCode, output: output, timedOut: timedOut, terminated: terminated, fullOutputPath: outputURL.path)
     #else
-      throw PiAIError.unsupported("bash is not supported on this platform")
+      throw WuhuAIError.unsupported("bash is not supported on this platform")
     #endif
   }
 }

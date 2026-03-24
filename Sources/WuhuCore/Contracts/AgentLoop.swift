@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
 ///
@@ -251,7 +251,7 @@ public actor AgentLoop<B: AgentBehavior> {
   /// Whether an error is transient and worth retrying.
   private nonisolated static func isTransientError(_ error: any Error) -> Bool {
     // PiAI HTTP status errors: retry on server errors and rate limits.
-    if let piError = error as? PiAIError,
+    if let piError = error as? WuhuAIError,
        case let .httpStatus(code, _) = piError
     {
       // 429 = rate limited, 500/502/503 = server errors, 529 = overloaded

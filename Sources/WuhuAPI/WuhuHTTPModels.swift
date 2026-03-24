@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public struct WuhuCreateSessionRequest: Sendable, Hashable, Codable {
   public var provider: WuhuProvider

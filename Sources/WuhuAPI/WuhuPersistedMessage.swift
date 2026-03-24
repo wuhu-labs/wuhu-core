@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 public enum WuhuContentBlock: Sendable, Hashable, Codable {
   case text(text: String, signature: String?)

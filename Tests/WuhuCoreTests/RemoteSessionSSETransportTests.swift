@@ -1,6 +1,8 @@
+import Fetch
+import FetchSSE
 import Foundation
-import PiAI
 import Testing
+import WuhuAI
 import WuhuAPI
 @testable import WuhuCoreClient
 
@@ -45,23 +47,17 @@ struct RemoteSessionSSETransportTests {
       .event(.statusUpdated(.init(status: .running))),
     ]
 
-    let http = MockHTTPClient(
-      sseHandler: { request in
-        #expect(request.url.absoluteString.contains("/v1/sessions/s1/subscribe"))
-        #expect(request.headers["Accept"] == ["text/event-stream"])
+    let http = MockFetchClient { request in
+      #expect(request.url.absoluteString.contains("/v1/sessions/s1/subscribe"))
+      #expect(headerValues(request.headers, named: "Accept") == ["text/event-stream"])
 
-        let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-          for frame in frames {
-            let data = try! WuhuJSON.encoder.encode(frame)
-            continuation.yield(.init(data: String(decoding: data, as: UTF8.self)))
-          }
-          continuation.finish()
-        }
-        return SSEResponse(response: HTTPResponse(statusCode: 200), events: events)
-      },
-    )
+      return sseResponse(frames.map { frame in
+        let data = try! WuhuJSON.encoder.encode(frame)
+        return .init(data: String(decoding: data, as: UTF8.self))
+      })
+    }
 
-    let transport = RemoteSessionSSETransport(baseURL: baseURL, http: http, sleep: { _ in })
+    let transport = RemoteSessionSSETransport(baseURL: baseURL, fetch: http.client, sleep: { _ in })
     let subscription = try await transport.subscribe(sessionID: .init(rawValue: "s1"), since: .init())
 
     #expect(subscription.initial == initialState)
@@ -102,6 +98,7 @@ struct RemoteSessionSSETransportTests {
 
     actor SleepRecorder {
       private var delays: [Double] = []
+
       func record(_ delay: Double) {
         delays.append(delay)
       }
@@ -114,27 +111,19 @@ struct RemoteSessionSSETransportTests {
     let counter = Counter()
     let sleeper = SleepRecorder()
 
-    let http = MockHTTPClient(
-      sseHandler: { _ in
-        let attempt = await counter.next()
-        if attempt <= 2 {
-          throw URLError(.notConnectedToInternet)
-        }
+    let http = MockFetchClient { _ in
+      let attempt = await counter.next()
+      if attempt <= 2 {
+        throw URLError(.notConnectedToInternet)
+      }
 
-        let events = AsyncThrowingStream<SSEMessage, any Error> { continuation in
-          let data = try! WuhuJSON.encoder.encode(SessionSubscriptionSSEFrame.initial(initialState))
-          continuation.yield(.init(data: String(decoding: data, as: UTF8.self)))
-          continuation.onTermination = { _ in
-            continuation.finish()
-          }
-        }
-        return SSEResponse(response: HTTPResponse(statusCode: 200), events: events)
-      },
-    )
+      let data = try! WuhuJSON.encoder.encode(SessionSubscriptionSSEFrame.initial(initialState))
+      return sseResponse([.init(data: String(decoding: data, as: UTF8.self))])
+    }
 
     let transport = RemoteSessionSSETransport(
       baseURL: baseURL,
-      http: http,
+      fetch: http.client,
       retryPolicy: .init(maxDelaySeconds: 30),
       sleep: { seconds in
         await sleeper.record(seconds)
@@ -168,22 +157,22 @@ struct RemoteSessionSSETransportTests {
 
     let expectedID = QueueItemID(rawValue: "q1")
 
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.method == "POST")
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/enqueue?lane=followUp")
-        #expect(request.headers["Content-Type"] == ["application/json"])
+    let http = MockFetchClient { request in
+      #expect(request.method.rawValue == "POST")
+      #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/enqueue?lane=followUp")
+      #expect(headerValues(request.headers, named: "Content-Type") == ["application/json"])
 
-        let decoded = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: request.body ?? Data())
-        #expect(decoded.author == .unknown)
-        #expect(decoded.content == .text("hello"))
+      let decoded = try WuhuJSON.decoder.decode(
+        QueuedUserMessage.self,
+        from: try #require(try await bodyData(request)),
+      )
+      #expect(decoded.author == .unknown)
+      #expect(decoded.content == .text("hello"))
 
-        let data = try WuhuJSON.encoder.encode(expectedID)
-        return (data, HTTPResponse(statusCode: 200))
-      },
-    )
+      return jsonResponse(try WuhuJSON.encoder.encode(expectedID))
+    }
 
-    let transport = RemoteSessionSSETransport(baseURL: baseURL, http: http)
+    let transport = RemoteSessionSSETransport(baseURL: baseURL, fetch: http.client)
     let id = try await transport.enqueue(
       sessionID: .init(rawValue: "s1"),
       message: .init(author: .unknown, content: .text("hello")),
@@ -196,20 +185,21 @@ struct RemoteSessionSSETransportTests {
   @Test func cancel_sendsPOSTWithLaneQuery() async throws {
     let baseURL = try #require(URL(string: "http://127.0.0.1:5530"))
 
-    let http = MockHTTPClient(
-      dataHandler: { request in
-        #expect(request.method == "POST")
-        #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/cancel?lane=steer")
+    let http = MockFetchClient { request in
+      #expect(request.method.rawValue == "POST")
+      #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/cancel?lane=steer")
 
-        struct Body: Decodable { var id: QueueItemID }
-        let decoded = try WuhuJSON.decoder.decode(Body.self, from: request.body ?? Data())
-        #expect(decoded.id == .init(rawValue: "q1"))
+      struct Body: Decodable { var id: QueueItemID }
+      let decoded = try WuhuJSON.decoder.decode(
+        Body.self,
+        from: try #require(try await bodyData(request)),
+      )
+      #expect(decoded.id == .init(rawValue: "q1"))
 
-        return (Data(), HTTPResponse(statusCode: 200))
-      },
-    )
+      return jsonResponse(Data())
+    }
 
-    let transport = RemoteSessionSSETransport(baseURL: baseURL, http: http)
+    let transport = RemoteSessionSSETransport(baseURL: baseURL, fetch: http.client)
     try await transport.cancel(
       sessionID: .init(rawValue: "s1"),
       id: .init(rawValue: "q1"),
@@ -218,29 +208,56 @@ struct RemoteSessionSSETransportTests {
   }
 }
 
-private struct MockHTTPClient: HTTPClient {
-  var dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))?
-  var sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)?
+private struct MockFetchClient {
+  var handler: @Sendable (Request) async throws -> Response
 
-  init(
-    dataHandler: (@Sendable (HTTPRequest) async throws -> (Data, HTTPResponse))? = nil,
-    sseHandler: (@Sendable (HTTPRequest) async throws -> SSEResponse)? = nil,
-  ) {
-    self.dataHandler = dataHandler
-    self.sseHandler = sseHandler
+  var client: FetchClient {
+    FetchClient(fetch: self.handler)
+  }
+}
+
+private func jsonResponse(_ data: Data, status: Int = 200) -> Response {
+  var headers = Headers()
+  headers[.contentType] = "application/json"
+  return Response(
+    status: Status(code: status),
+    headers: headers,
+    body: .chunk(Array(data))
+  )
+}
+
+private func sseResponse(_ events: [SSEEvent], status: Int = 200) -> Response {
+  var headers = Headers()
+  headers[.contentType] = "text/event-stream"
+  let payload = events.map(serializeSSEEvent).joined()
+  return Response(
+    status: Status(code: status),
+    headers: headers,
+    body: .chunk(Array(payload.utf8))
+  )
+}
+
+private func serializeSSEEvent(_ event: SSEEvent) -> String {
+  var lines: [String] = []
+
+  if event.event != "message" {
+    lines.append("event: \(event.event)")
+  }
+  if let id = event.id {
+    lines.append("id: \(id)")
+  }
+  if let retry = event.retry {
+    lines.append("retry: \(retry)")
   }
 
-  func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-    guard let dataHandler else {
-      throw PiAIError.unsupported("MockHTTPClient.dataHandler not set")
+  let dataLines = event.data.split(separator: "\n", omittingEmptySubsequences: false)
+  if dataLines.isEmpty {
+    lines.append("data:")
+  } else {
+    for line in dataLines {
+      lines.append("data: \(line)")
     }
-    return try await dataHandler(request)
   }
 
-  func sse(for request: HTTPRequest) async throws -> SSEResponse {
-    guard let sseHandler else {
-      throw PiAIError.unsupported("MockHTTPClient.sseHandler not set")
-    }
-    return try await sseHandler(request)
-  }
+  return lines.joined(separator: "\n") + "\n\n"
 }

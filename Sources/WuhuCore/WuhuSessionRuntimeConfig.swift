@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import WuhuAI
 
 actor WuhuSessionRuntimeConfig {
   private var _tools: [AnyAgentTool] = []

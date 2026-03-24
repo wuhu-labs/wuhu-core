@@ -19,18 +19,16 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.4.1"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.5.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-fetch.git", exact: "0.1.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.3"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
     .package(url: "https://github.com/hummingbird-project/swift-websocket.git", from: "1.0.0"),
-    // Pinned to 1.32.0: 1.32.1 switched `import Foundation` to `import FoundationEssentials`,
-    // which breaks NIOFoundationCompat symbol linkage on Linux (mangled name mismatch).
-    // See: https://github.com/swift-server/async-http-client/issues/XXX
-    // TODO: Unpin once the upstream issue is resolved.
-    .package(url: "https://github.com/swift-server/async-http-client.git", exact: "1.32.0"),
+    // Keep this aligned with the released wuhu-fetch adapter package.
+    .package(url: "https://github.com/swift-server/async-http-client.git", exact: "1.30.3"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
@@ -42,14 +40,14 @@ let package = Package(
     .target(
       name: "WuhuAPI",
       dependencies: [
-        .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
         .product(name: "WorkspaceContracts", package: "wuhu-workspace-engine"),
       ],
     ),
     .target(
       name: "WuhuCLIKit",
       dependencies: [
-        .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
         "WuhuAPI",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ],
@@ -58,8 +56,11 @@ let package = Package(
       name: "WuhuCoreClient",
       dependencies: [
         "WuhuAPI",
-        .product(name: "PiAI", package: "wuhu-ai"),
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+        .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
+        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
+        .product(name: "AsyncHTTPClient", package: "async-http-client"),
       ],
     ),
     .target(
@@ -67,8 +68,8 @@ let package = Package(
       dependencies: [
         "WuhuCoreClient",
         "WuhuAPI",
-        .product(name: "PiAI", package: "wuhu-ai"),
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+        .product(name: "Fetch", package: "wuhu-fetch"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "GRDB", package: "GRDB.swift"),
@@ -83,15 +84,16 @@ let package = Package(
       dependencies: [
         "WuhuAPI",
         "WuhuCoreClient",
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
       ],
     ),
     .target(
       name: "WuhuServer",
       dependencies: [
         "WuhuCore",
-        .product(name: "PiAI", package: "wuhu-ai"),
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+        .product(name: "Fetch", package: "wuhu-fetch"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
@@ -123,7 +125,8 @@ let package = Package(
         "WuhuServer",
         "WuhuRunner",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
-        .product(name: "PiAIAsyncHTTPClient", package: "wuhu-ai"),
+        .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
         .product(name: "Yams", package: "Yams"),
       ],
     ),
@@ -131,7 +134,7 @@ let package = Package(
       name: "WuhuBenchFind",
       dependencies: [
         "WuhuCore",
-        .product(name: "PiAI", package: "wuhu-ai"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
       ],
     ),
     .testTarget(
@@ -139,6 +142,8 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         "WuhuCoreClient",
+        .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
         .product(name: "Hummingbird", package: "hummingbird"),
@@ -151,6 +156,8 @@ let package = Package(
       name: "WuhuClientTests",
       dependencies: [
         "WuhuClient",
+        .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
       ],
     ),
     .testTarget(
