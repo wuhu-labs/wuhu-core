@@ -152,7 +152,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
 
     if !diff.appendedEntries.isEmpty,
-       (!diff.systemJournalEntries.isEmpty || !diff.steerJournalEntries.isEmpty),
+       !diff.systemJournalEntries.isEmpty || !diff.steerJournalEntries.isEmpty,
        diff.followUpJournalEntries.isEmpty
     {
       _ = try await store.drainInterruptCheckpoint(
@@ -420,7 +420,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let provider = session.provider.piProvider
     let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-    var requestOptions = makeRequestOptions(model: apiModel, settings: try await store.loadSettingsSnapshot(sessionID: sessionID), userModelID: session.model)
+    var requestOptions = try await makeRequestOptions(model: apiModel, settings: store.loadSettingsSnapshot(sessionID: sessionID), userModelID: session.model)
     requestOptions.sessionId = sessionID.rawValue
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 

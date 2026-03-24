@@ -60,7 +60,7 @@ struct ContractSessionCoreTests {
     #expect(next.session.tailEntryID == reloaded.session.tailEntryID)
     #expect(next.entries.map(\.id) == reloaded.entries.map(\.id))
     #expect(next.entries.map(\.parentEntryID) == reloaded.entries.map(\.parentEntryID))
-    #expect(next.entries.map { $0.payload.typeString } == reloaded.entries.map { $0.payload.typeString })
+    #expect(next.entries.map(\.payload.typeString) == reloaded.entries.map(\.payload.typeString))
     #expect(next.toolCallStatus == reloaded.toolCallStatus)
     #expect(next.settings == reloaded.settings)
     #expect(next.status == reloaded.status)

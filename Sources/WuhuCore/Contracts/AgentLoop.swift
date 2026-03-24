@@ -24,6 +24,10 @@ public actor AgentLoop<B: AgentBehavior> {
   private var stateLoaded = false
   private var signal: AsyncStream<Void>.Continuation?
 
+  // MARK: Transition Ordering
+
+  private var transitionTail: Task<Void, Never>?
+
   // MARK: Observation
 
   private var observers: [UUID: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.Continuation] = [:]
@@ -120,11 +124,24 @@ public actor AgentLoop<B: AgentBehavior> {
   private func transition(
     _ work: @escaping @Sendable (B.State) async throws -> B.State,
   ) async throws -> Bool {
-    let nextState = try await work(state)
-    guard nextState != state else { return false }
-    state = nextState
-    try await flush()
-    return true
+    let previous = transitionTail
+    return try await withCheckedThrowingContinuation { continuation in
+      transitionTail = Task {
+        _ = await previous?.result
+        do {
+          let nextState = try await work(self.state)
+          guard nextState != self.state else {
+            continuation.resume(returning: false)
+            return
+          }
+          self.state = nextState
+          try await self.flush()
+          continuation.resume(returning: true)
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
   }
 
   private func flush() async throws {
