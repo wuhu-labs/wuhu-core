@@ -127,120 +127,21 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State {
-    if diff.settingsChanged,
-       diff.appendedEntries.isEmpty,
-       diff.systemJournalEntries.isEmpty,
-       diff.steerJournalEntries.isEmpty,
-       diff.followUpJournalEntries.isEmpty,
-       diff.toolCallStatusChanges.isEmpty,
-       !diff.statusChanged
-    {
-      guard let pending = newState.settings.pendingModel else {
-        throw WuhuStoreError.sessionCorrupt("Missing pending model in settings-only diff")
-      }
-      let selection = WuhuSessionSettings(
-        provider: WuhuProvider(rawValue: pending.provider.rawValue) ?? .openai,
-        model: pending.id,
-        reasoningEffort: newState.settings.pendingReasoningEffort,
-      )
-      _ = try await store.setPendingModelSelection(sessionID: sessionID, selection: selection)
-      return try await loadState()
-    }
+    let materializedEntryIDs = materializedTranscriptEntryIDs(diff)
+    let standaloneEntries = diff.appendedEntries.filter { !materializedEntryIDs.contains($0.id) }
 
-    if !diff.appendedEntries.isEmpty,
-       !diff.systemJournalEntries.isEmpty || !diff.steerJournalEntries.isEmpty,
-       diff.followUpJournalEntries.isEmpty
-    {
-      _ = try await store.drainInterruptCheckpoint(sessionID: sessionID)
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if !diff.appendedEntries.isEmpty,
-       diff.systemJournalEntries.isEmpty,
-       diff.steerJournalEntries.isEmpty,
-       !diff.followUpJournalEntries.isEmpty
-    {
-      _ = try await store.drainTurnBoundary(sessionID: sessionID)
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if diff.appendedEntries.isEmpty,
-       diff.systemJournalEntries.count == 1,
-       diff.steerJournalEntries.isEmpty,
-       diff.followUpJournalEntries.isEmpty
-    {
-      guard case let .enqueued(item) = diff.systemJournalEntries[0] else {
-        throw WuhuStoreError.sessionCorrupt("Unsupported system queue diff")
-      }
-      _ = try await store.enqueueSystemInput(
-        sessionID: sessionID,
-        id: item.id,
-        input: item.input,
-        enqueuedAt: item.enqueuedAt,
-      )
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if diff.appendedEntries.isEmpty,
-       diff.systemJournalEntries.isEmpty,
-       diff.followUpJournalEntries.isEmpty,
-       diff.steerJournalEntries.count == 1
-    {
-      try await persistUserQueueJournalEntry(diff.steerJournalEntries[0], lane: .steer)
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if diff.appendedEntries.isEmpty,
-       diff.systemJournalEntries.isEmpty,
-       diff.steerJournalEntries.isEmpty,
-       diff.followUpJournalEntries.count == 1
-    {
-      try await persistUserQueueJournalEntry(diff.followUpJournalEntries[0], lane: .followUp)
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if diff.appendedEntries.count == 1,
-       let entry = diff.appendedEntries.first,
-       case let .sessionSettings(selection) = entry.payload
-    {
-      if oldState.settings.pendingModel != nil {
-        _ = try await store.applyPendingModelIfPossible(sessionID: sessionID)
-      } else {
-        _ = try await store.applyModelSelection(sessionID: sessionID, selection: selection)
-      }
-      if diff.statusChanged {
-        try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
-      }
-      return try await loadState()
-    }
-
-    if diff.appendedEntries.count > 1 {
-      throw WuhuStoreError.sessionCorrupt("Unsupported multi-entry diff outside queue drains")
-    }
-
-    if let entry = diff.appendedEntries.first {
-      let payload = try await persistedPayload(entry.payload)
-      _ = try await store.appendEntryWithSession(
-        sessionID: sessionID,
-        payload: payload,
-        createdAt: entry.createdAt,
-      )
-    }
+    try await persistPendingSettingsIfNeeded(
+      diff: diff,
+      oldState: oldState,
+      newState: newState,
+      standaloneEntries: standaloneEntries,
+    )
+    try await persistInterruptJournalEntries(
+      systemEntries: diff.systemJournalEntries,
+      steerEntries: diff.steerJournalEntries,
+    )
+    try await persistFollowUpJournalEntries(diff.followUpJournalEntries)
+    try await persistStandaloneEntries(standaloneEntries, oldState: oldState)
 
     for change in diff.toolCallStatusChanges {
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: change.id, status: change.status)
@@ -674,6 +575,176 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
+  private func persistPendingSettingsIfNeeded(
+    diff: PersistenceDiff,
+    oldState: State,
+    newState: State,
+    standaloneEntries: [WuhuSessionEntry],
+  ) async throws {
+    guard diff.settingsChanged else { return }
+    guard !standaloneEntries.contains(where: isSessionSettingsEntry(_:)) else { return }
+    guard oldState.settings.pendingModel != newState.settings.pendingModel
+      || oldState.settings.pendingReasoningEffort != newState.settings.pendingReasoningEffort
+    else { return }
+    guard let pending = newState.settings.pendingModel else { return }
+
+    let selection = WuhuSessionSettings(
+      provider: WuhuProvider(rawValue: pending.provider.rawValue) ?? .openai,
+      model: pending.id,
+      reasoningEffort: newState.settings.pendingReasoningEffort,
+    )
+    _ = try await store.setPendingModelSelection(sessionID: sessionID, selection: selection)
+  }
+
+  private func persistInterruptJournalEntries(
+    systemEntries: [SystemUrgentQueueJournalEntry],
+    steerEntries: [UserQueueJournalEntry],
+  ) async throws {
+    enum ReplayEntry {
+      case system(SystemUrgentQueueJournalEntry)
+      case steer(UserQueueJournalEntry)
+
+      var timestamp: Date {
+        switch self {
+        case let .system(.enqueued(item)):
+          item.enqueuedAt
+        case let .system(.materialized(_, _, at)):
+          at
+        case let .steer(.enqueued(_, item)):
+          item.enqueuedAt
+        case let .steer(.canceled(_, _, at)):
+          at
+        case let .steer(.materialized(_, _, _, at)):
+          at
+        }
+      }
+
+      var stableID: String {
+        switch self {
+        case let .system(.enqueued(item)):
+          item.id.rawValue
+        case let .system(.materialized(id, _, _)):
+          id.rawValue
+        case let .steer(.enqueued(_, item)):
+          item.id.rawValue
+        case let .steer(.canceled(_, id, _)):
+          id.rawValue
+        case let .steer(.materialized(_, id, _, _)):
+          id.rawValue
+        }
+      }
+
+      var laneOrder: Int {
+        switch self {
+        case .system:
+          0
+        case .steer:
+          1
+        }
+      }
+
+      var isMaterialized: Bool {
+        switch self {
+        case let .system(entry):
+          if case .materialized = entry { return true }
+          return false
+        case let .steer(entry):
+          if case .materialized = entry { return true }
+          return false
+        }
+      }
+    }
+
+    var entries = systemEntries.map(ReplayEntry.system)
+    entries += steerEntries.map(ReplayEntry.steer)
+    entries.sort { lhs, rhs in
+      if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+      if lhs.isMaterialized != rhs.isMaterialized { return !lhs.isMaterialized }
+      if lhs.stableID != rhs.stableID { return lhs.stableID < rhs.stableID }
+      return lhs.laneOrder < rhs.laneOrder
+    }
+
+    var index = 0
+    while index < entries.count {
+      let entry = entries[index]
+
+      if entry.isMaterialized {
+        _ = try await store.drainInterruptCheckpoint(sessionID: sessionID)
+        repeat {
+          index += 1
+        } while index < entries.count && entries[index].isMaterialized
+        continue
+      }
+
+      switch entry {
+      case let .system(systemEntry):
+        try await persistSystemQueueJournalEntry(systemEntry)
+      case let .steer(steerEntry):
+        try await persistUserQueueJournalEntry(steerEntry, lane: .steer)
+      }
+
+      index += 1
+    }
+  }
+
+  private func persistFollowUpJournalEntries(_ entries: [UserQueueJournalEntry]) async throws {
+    var remaining = entries[...]
+
+    while !remaining.isEmpty {
+      let materializedIndex = remaining.firstIndex(where: isMaterialized(_:))
+      let prefixEnd = materializedIndex ?? remaining.endIndex
+
+      for entry in remaining[..<prefixEnd] {
+        try await persistUserQueueJournalEntry(entry, lane: .followUp)
+      }
+
+      remaining.removeFirst(remaining.distance(from: remaining.startIndex, to: prefixEnd))
+
+      guard remaining.first.map(isMaterialized(_:)) == true else { break }
+      _ = try await store.drainTurnBoundary(sessionID: sessionID)
+
+      while remaining.first.map(isMaterialized(_:)) == true {
+        remaining.removeFirst()
+      }
+    }
+  }
+
+  private func persistStandaloneEntries(_ entries: [WuhuSessionEntry], oldState: State) async throws {
+    for entry in entries {
+      switch entry.payload {
+      case let .sessionSettings(selection):
+        if oldState.settings.pendingModel != nil {
+          _ = try await store.applyPendingModelIfPossible(sessionID: sessionID)
+        } else {
+          _ = try await store.applyModelSelection(sessionID: sessionID, selection: selection)
+        }
+
+      default:
+        let payload = try await persistedPayload(entry.payload)
+        _ = try await store.appendEntryWithSession(
+          sessionID: sessionID,
+          payload: payload,
+          createdAt: entry.createdAt,
+        )
+      }
+    }
+  }
+
+  private func persistSystemQueueJournalEntry(_ entry: SystemUrgentQueueJournalEntry) async throws {
+    switch entry {
+    case let .enqueued(item):
+      _ = try await store.enqueueSystemInput(
+        sessionID: sessionID,
+        id: item.id,
+        input: item.input,
+        enqueuedAt: item.enqueuedAt,
+      )
+
+    case .materialized:
+      throw WuhuStoreError.sessionCorrupt("Unexpected materialized system queue diff")
+    }
+  }
+
   private func persistUserQueueJournalEntry(_ entry: UserQueueJournalEntry, lane: UserQueueLane) async throws {
     switch entry {
     case let .enqueued(_, item):
@@ -689,6 +760,47 @@ struct WuhuSessionBehavior: AgentBehavior {
     case .materialized:
       throw WuhuStoreError.sessionCorrupt("Unexpected materialized queue journal diff")
     }
+  }
+
+  private func materializedTranscriptEntryIDs(_ diff: PersistenceDiff) -> Set<Int64> {
+    var ids: Set<Int64> = []
+    for entry in diff.systemJournalEntries {
+      if case let .materialized(_, transcriptEntryID, _) = entry,
+         let id = Int64(transcriptEntryID.rawValue)
+      {
+        ids.insert(id)
+      }
+    }
+    for entry in diff.steerJournalEntries {
+      if case let .materialized(_, _, transcriptEntryID, _) = entry,
+         let id = Int64(transcriptEntryID.rawValue)
+      {
+        ids.insert(id)
+      }
+    }
+    for entry in diff.followUpJournalEntries {
+      if case let .materialized(_, _, transcriptEntryID, _) = entry,
+         let id = Int64(transcriptEntryID.rawValue)
+      {
+        ids.insert(id)
+      }
+    }
+    return ids
+  }
+
+  private func isSessionSettingsEntry(_ entry: WuhuSessionEntry) -> Bool {
+    if case .sessionSettings = entry.payload { return true }
+    return false
+  }
+
+  private func isMaterialized(_ entry: UserQueueJournalEntry) -> Bool {
+    if case .materialized = entry { return true }
+    return false
+  }
+
+  private func isMaterialized(_ entry: SystemUrgentQueueJournalEntry) -> Bool {
+    if case .materialized = entry { return true }
+    return false
   }
 
   private func applyModelSelection(_ selection: WuhuSessionSettings, state: inout State) {

@@ -222,7 +222,12 @@ actor WuhuSessionRuntime {
       streaming = false
       inflightText = ""
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
-      let nowIdle = isIdle(state: observedState)
+      let snapshot = if let loop {
+        await loop.currentStateSnapshot()
+      } else {
+        (state: observedState, hasPendingFlush: false)
+      }
+      let nowIdle = !snapshot.hasPendingFlush && isIdle(state: snapshot.state)
       if nowIdle, !wasIdle {
         await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
         if let onIdle {
