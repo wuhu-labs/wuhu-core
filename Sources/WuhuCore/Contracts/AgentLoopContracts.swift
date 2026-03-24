@@ -53,7 +53,7 @@ public protocol AgentBehavior: Sendable {
   // MARK: External Actions
 
   /// Handle a command from outside the loop by mutating the in-memory state.
-  func handle(_ action: ExternalAction, state: inout State) throws
+  func handle(_ action: ExternalAction, state: inout State)
 
   // MARK: Drain
 

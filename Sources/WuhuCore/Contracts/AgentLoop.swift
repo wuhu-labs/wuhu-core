@@ -68,9 +68,9 @@ public actor AgentLoop<B: AgentBehavior> {
   ///
   /// The behavior updates the live in-memory state first. The loop persists the
   /// diff to durable storage and only then publishes the new state.
-  public func send(_ action: B.ExternalAction) async throws {
-    try mutate { [behavior] state in
-      try behavior.handle(action, state: &state)
+  public func send(_ action: B.ExternalAction) async {
+    mutate { [behavior] state in
+      behavior.handle(action, state: &state)
     }
   }
 
@@ -107,10 +107,10 @@ public actor AgentLoop<B: AgentBehavior> {
 
   @discardableResult
   private func mutate(
-    _ work: @escaping @Sendable (inout B.State) throws -> Void,
-  ) throws -> Bool {
+    _ work: @escaping @Sendable (inout B.State) -> Void,
+  ) -> Bool {
     var nextState = state
-    try work(&nextState)
+    work(&nextState)
     guard nextState != state else { return false }
     state = nextState
     return true
@@ -130,17 +130,14 @@ public actor AgentLoop<B: AgentBehavior> {
 
   /// Run the loop until idle: recover → (drain → infer → tools → compact)*
   private func runUntilIdle() async throws {
-    var hasToolResults = try await recoverStaleToolCalls()
-    if hasToolResults {
-      try await flushIfNeeded()
-    }
+    var hasToolResults = recoverStaleToolCalls()
 
     if !hasToolResults, behavior.needsInference(state: state) {
       hasToolResults = true
     }
 
     while !Task.isCancelled {
-      let drainedInterrupts = try mutate { [behavior] state in
+      let drainedInterrupts = mutate { [behavior] state in
         behavior.drainInterruptItems(state: &state)
       }
 
@@ -149,7 +146,7 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       if !drainedInterrupts, !hasToolResults {
-        let drainedTurnItems = try mutate { [behavior] state in
+        let drainedTurnItems = mutate { [behavior] state in
           behavior.drainTurnItems(state: &state)
         }
         if !drainedTurnItems { break }
@@ -166,10 +163,9 @@ public actor AgentLoop<B: AgentBehavior> {
         try await flushIfNeeded()
       }
 
-      try mutate { [behavior] state in
+      mutate { [behavior] state in
         behavior.persistAssistantEntry(message, state: &state)
       }
-      try await flushIfNeeded()
 
       let toolCalls = message.content.compactMap { block -> ToolCall? in
         if case let .toolCall(call) = block { return call }
@@ -190,7 +186,6 @@ public actor AgentLoop<B: AgentBehavior> {
         } else if behavior.shouldCompact(state: state) {
           signal?.yield(())
         }
-        try await flushIfNeeded()
       }
     }
   }
@@ -273,10 +268,10 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: - Crash Recovery
 
-  private func recoverStaleToolCalls() async throws -> Bool {
+  private func recoverStaleToolCalls() -> Bool {
     let staleIDs = behavior.staleToolCallIDs(in: state)
     for id in staleIDs {
-      try mutate { [behavior] state in
+      mutate { [behavior] state in
         behavior.recoverStaleToolCall(id: id, state: &state)
       }
     }
@@ -299,14 +294,14 @@ public actor AgentLoop<B: AgentBehavior> {
     }
 
     for call in calls {
-      try mutate { [behavior] state in
+      mutate { [behavior] state in
         behavior.toolWillExecute(call, state: &state)
       }
     }
 
     for call in blocked {
       let error = ToolCallRepetitionError.blocked
-      try mutate { [behavior] state in
+      mutate { [behavior] state in
         behavior.toolDidFail(call, error: error, state: &state)
       }
     }
@@ -351,7 +346,7 @@ public actor AgentLoop<B: AgentBehavior> {
         } else {
           toolResult
         }
-        try mutate { [behavior] state in
+        mutate { [behavior] state in
           behavior.toolDidExecute(call, result: finalResult, state: &state)
         }
       case let .failure(error):
@@ -362,7 +357,7 @@ public actor AgentLoop<B: AgentBehavior> {
           argsHash: argsHash,
           resultHash: errorHash,
         )
-        try mutate { [behavior] state in
+        mutate { [behavior] state in
           behavior.toolDidFail(call, error: error, state: &state)
         }
       }

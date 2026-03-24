@@ -253,7 +253,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     return try await loadState()
   }
 
-  func handle(_ action: ExternalAction, state: inout State) throws {
+  func handle(_ action: ExternalAction, state: inout State) {
     switch action {
     case let .enqueueUser(id, message, lane):
       let item = UserQueuePendingItem(id: id, enqueuedAt: Date(), message: message)
@@ -262,7 +262,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       state.status = .init(status: .running)
 
     case let .cancelUser(id, lane):
-      let backfill = try cancelUser(id: id, lane: lane, from: state)
+      guard let backfill = cancelUser(id: id, lane: lane, from: state) else { return }
       applyUserQueue(backfill, lane: lane, to: &state)
       state.status = .init(status: statusForOperationalState(state))
 
@@ -728,13 +728,11 @@ struct WuhuSessionBehavior: AgentBehavior {
     return backfill
   }
 
-  private func cancelUser(id: QueueItemID, lane: UserQueueLane, from state: State) throws -> UserQueueBackfill {
+  private func cancelUser(id: QueueItemID, lane: UserQueueLane, from state: State) -> UserQueueBackfill? {
     var backfill = lane == .steer ? state.steer : state.followUp
     let before = backfill.pending.count
     backfill.pending.removeAll { $0.id == id }
-    guard before != backfill.pending.count else {
-      throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
-    }
+    guard before != backfill.pending.count else { return nil }
     backfill.journal.append(.canceled(lane: lane, id: id, at: Date()))
     backfill.cursor = advancedCursor(backfill.cursor, by: 1)
     return backfill

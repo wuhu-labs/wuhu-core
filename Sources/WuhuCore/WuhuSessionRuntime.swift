@@ -107,7 +107,7 @@ actor WuhuSessionRuntime {
     await ensureStarted()
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
-    try await loop.send(.enqueueUser(id: id, message: message, lane: lane))
+    await loop.send(.enqueueUser(id: id, message: message, lane: lane))
     hasAcceptedInMemoryWork = true
     return id
   }
@@ -115,7 +115,7 @@ actor WuhuSessionRuntime {
   func cancel(id: QueueItemID, lane: UserQueueLane) async throws {
     await ensureStarted()
     guard let loop else { throw CancellationError() }
-    try await loop.send(.cancelUser(id: id, lane: lane))
+    await loop.send(.cancelUser(id: id, lane: lane))
     hasAcceptedInMemoryWork = true
   }
 
@@ -123,7 +123,7 @@ actor WuhuSessionRuntime {
     await ensureStarted()
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
-    try await loop.send(.enqueueSystem(id: id, input: input, enqueuedAt: enqueuedAt))
+    await loop.send(.enqueueSystem(id: id, input: input, enqueuedAt: enqueuedAt))
     hasAcceptedInMemoryWork = true
   }
 
@@ -132,11 +132,11 @@ actor WuhuSessionRuntime {
     guard let loop else { throw CancellationError() }
 
     if !streaming, !behavior.hasWork(state: observedState) {
-      try await loop.send(.applyModelSelection(selection))
+      await loop.send(.applyModelSelection(selection))
       return true
     }
 
-    try await loop.send(.setPendingModelSelection(selection))
+    await loop.send(.setPendingModelSelection(selection))
     return false
   }
 
@@ -144,7 +144,7 @@ actor WuhuSessionRuntime {
     await ensureStarted()
     if streaming || behavior.hasWork(state: observedState) { return }
     guard let loop else { throw CancellationError() }
-    try await loop.send(.applyPendingModelIfPossible)
+    await loop.send(.applyPendingModelIfPossible)
   }
 
   func stop() async {
