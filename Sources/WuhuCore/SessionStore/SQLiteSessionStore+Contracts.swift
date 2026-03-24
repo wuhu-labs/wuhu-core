@@ -31,6 +31,120 @@ extension SQLiteSessionStore {
     var status: ToolCallStatus
   }
 
+  func persistLoopStateTransition(
+    sessionID: SessionID,
+    from oldState: WuhuSessionLoopState,
+    to newState: WuhuSessionLoopState,
+  ) async throws -> [WuhuSessionPersistedEvent] {
+    try await dbQueue.write { db in
+      guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
+        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+      }
+
+      var events: [WuhuSessionPersistedEvent] = []
+
+      let appendedEntries = Array(newState.entries.dropFirst(oldState.entries.count))
+      if !appendedEntries.isEmpty {
+        for entry in appendedEntries {
+          let payload = try WuhuJSON.encoder.encode(entry.payload)
+          try db.execute(
+            sql: """
+            INSERT INTO session_entries (id, sessionID, parentEntryID, type, payload, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [entry.id, entry.sessionID, entry.parentEntryID, entry.payload.typeString, payload, entry.createdAt],
+          )
+        }
+        events.append(.transcriptAppended(appendedEntries))
+      }
+
+      try Self.replaceSystemPendingRows(db: db, sessionID: sessionID, pending: newState.systemUrgent.pending)
+      try Self.replaceUserPendingRows(db: db, sessionID: sessionID, lane: .steer, pending: newState.steer.pending)
+      try Self.replaceUserPendingRows(db: db, sessionID: sessionID, lane: .followUp, pending: newState.followUp.pending)
+
+      let appendedSystemJournal = Array(newState.systemUrgent.journal.dropFirst(oldState.systemUrgent.journal.count))
+      if !appendedSystemJournal.isEmpty {
+        for entry in appendedSystemJournal {
+          try db.execute(
+            sql: "INSERT INTO system_queue_journal (sessionID, payload, createdAt) VALUES (?, ?, ?)",
+            arguments: [sessionID.rawValue, try WuhuJSON.encoder.encode(entry), Self.createdAt(for: entry)],
+          )
+        }
+        let cursor = try Self.currentSystemQueueCursor(db: db, sessionID: sessionID)
+        events.append(.systemQueue(cursor: .init(rawValue: "\(cursor)"), entries: appendedSystemJournal))
+      }
+
+      let appendedSteerJournal = Array(newState.steer.journal.dropFirst(oldState.steer.journal.count))
+      if !appendedSteerJournal.isEmpty {
+        try Self.insertUserJournalRows(db: db, sessionID: sessionID, lane: .steer, entries: appendedSteerJournal)
+        let cursor = try Self.currentUserQueueCursor(db: db, sessionID: sessionID, lane: .steer)
+        events.append(.userQueue(lane: .steer, cursor: .init(rawValue: "\(cursor)"), entries: appendedSteerJournal))
+      }
+
+      let appendedFollowUpJournal = Array(newState.followUp.journal.dropFirst(oldState.followUp.journal.count))
+      if !appendedFollowUpJournal.isEmpty {
+        try Self.insertUserJournalRows(db: db, sessionID: sessionID, lane: .followUp, entries: appendedFollowUpJournal)
+        let cursor = try Self.currentUserQueueCursor(db: db, sessionID: sessionID, lane: .followUp)
+        events.append(.userQueue(lane: .followUp, cursor: .init(rawValue: "\(cursor)"), entries: appendedFollowUpJournal))
+      }
+
+      let allToolIDs = Set(oldState.toolCallStatus.keys).union(newState.toolCallStatus.keys)
+      for id in allToolIDs.sorted() {
+        let oldStatus = oldState.toolCallStatus[id]
+        let newStatus = newState.toolCallStatus[id]
+        guard oldStatus != newStatus, let newStatus else { continue }
+        let now = Date()
+        try db.execute(
+          sql: """
+          INSERT INTO tool_call_status (sessionID, toolCallID, status, createdAt, updatedAt)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(sessionID, toolCallID)
+          DO UPDATE SET status = excluded.status, updatedAt = excluded.updatedAt
+          """,
+          arguments: [sessionID.rawValue, id, newStatus.rawValue, now, now],
+        )
+      }
+
+      let didChange =
+        oldState.session != newState.session
+        || oldState.settings != newState.settings
+        || oldState.status != newState.status
+        || oldState.systemUrgent != newState.systemUrgent
+        || oldState.steer != newState.steer
+        || oldState.followUp != newState.followUp
+        || oldState.toolCallStatus != newState.toolCallStatus
+        || !appendedEntries.isEmpty
+
+      if didChange {
+        sessionRow.provider = newState.session.provider.rawValue
+        sessionRow.model = newState.session.model
+        sessionRow.effectiveReasoningEffort = newState.settings.effectiveReasoningEffort?.rawValue
+        sessionRow.pendingProvider = newState.settings.pendingModel?.provider.rawValue
+        sessionRow.pendingModel = newState.settings.pendingModel?.id
+        sessionRow.pendingReasoningEffort = newState.settings.pendingReasoningEffort?.rawValue
+        sessionRow.executionStatus = newState.status.status.rawValue
+        sessionRow.cwd = newState.session.cwd
+        sessionRow.parentSessionID = newState.session.parentSessionID
+        sessionRow.customTitle = newState.session.customTitle
+        sessionRow.isArchived = newState.session.isArchived
+        sessionRow.createdAt = newState.session.createdAt
+        sessionRow.updatedAt = max(newState.session.updatedAt, Date())
+        sessionRow.headEntryID = newState.session.headEntryID
+        sessionRow.tailEntryID = newState.session.tailEntryID
+        try sessionRow.update(db)
+      }
+
+      if oldState.settings != newState.settings {
+        events.append(.settingsUpdated(newState.settings))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+
+      return events
+    }
+  }
+
   func loadLoopStateParts(sessionID: SessionID) async throws -> LoopStateParts {
     let session = try await getSession(id: sessionID.rawValue)
     let entries = try await getEntries(sessionID: sessionID.rawValue)
@@ -557,6 +671,94 @@ extension SQLiteSessionStore {
       sql: "UPDATE sessions SET updatedAt = ? WHERE id = ?",
       arguments: [Date(), sessionID],
     )
+  }
+
+  private static func replaceSystemPendingRows(
+    db: Database,
+    sessionID: SessionID,
+    pending: [SystemUrgentPendingItem],
+  ) throws {
+    try db.execute(
+      sql: "DELETE FROM system_queue_pending WHERE sessionID = ?",
+      arguments: [sessionID.rawValue],
+    )
+    for item in pending {
+      try db.execute(
+        sql: "INSERT INTO system_queue_pending (id, sessionID, enqueuedAt, payload) VALUES (?, ?, ?, ?)",
+        arguments: [item.id.rawValue, sessionID.rawValue, item.enqueuedAt, try WuhuJSON.encoder.encode(item.input)],
+      )
+    }
+  }
+
+  private static func replaceUserPendingRows(
+    db: Database,
+    sessionID: SessionID,
+    lane: UserQueueLane,
+    pending: [UserQueuePendingItem],
+  ) throws {
+    try db.execute(
+      sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ?",
+      arguments: [sessionID.rawValue, lane.rawValue],
+    )
+    for item in pending {
+      try db.execute(
+        sql: """
+        INSERT INTO user_queue_pending (id, sessionID, lane, enqueuedAt, payload)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        arguments: [item.id.rawValue, sessionID.rawValue, lane.rawValue, item.enqueuedAt, try WuhuJSON.encoder.encode(item.message)],
+      )
+    }
+  }
+
+  private static func insertUserJournalRows(
+    db: Database,
+    sessionID: SessionID,
+    lane: UserQueueLane,
+    entries: [UserQueueJournalEntry],
+  ) throws {
+    for entry in entries {
+      try db.execute(
+        sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
+        arguments: [sessionID.rawValue, lane.rawValue, try WuhuJSON.encoder.encode(entry), createdAt(for: entry)],
+      )
+    }
+  }
+
+  private static func currentSystemQueueCursor(db: Database, sessionID: SessionID) throws -> Int64 {
+    try Int64.fetchOne(
+      db,
+      sql: "SELECT MAX(id) FROM system_queue_journal WHERE sessionID = ?",
+      arguments: [sessionID.rawValue],
+    ) ?? 0
+  }
+
+  private static func currentUserQueueCursor(db: Database, sessionID: SessionID, lane: UserQueueLane) throws -> Int64 {
+    try Int64.fetchOne(
+      db,
+      sql: "SELECT MAX(id) FROM user_queue_journal WHERE sessionID = ? AND lane = ?",
+      arguments: [sessionID.rawValue, lane.rawValue],
+    ) ?? 0
+  }
+
+  private static func createdAt(for entry: SystemUrgentQueueJournalEntry) -> Date {
+    switch entry {
+    case let .enqueued(item):
+      item.enqueuedAt
+    case let .materialized(id: _, transcriptEntryID: _, at):
+      at
+    }
+  }
+
+  private static func createdAt(for entry: UserQueueJournalEntry) -> Date {
+    switch entry {
+    case let .enqueued(lane: _, item):
+      item.enqueuedAt
+    case let .canceled(lane: _, id: _, at):
+      at
+    case let .materialized(lane: _, id: _, transcriptEntryID: _, at):
+      at
+    }
   }
 
   private static func setExecutionStatus(db: Database, sessionID: String, status: SessionExecutionStatus) throws {

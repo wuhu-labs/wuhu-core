@@ -35,9 +35,13 @@ public protocol AgentBehavior: Sendable {
   /// observation snapshots and invariant checks.
   associatedtype State: Sendable & Equatable
 
-  /// Describes a persisted mutation. Applied to state by ``apply(_:to:)``,
-  /// then emitted to observers.
-  associatedtype CommittedAction: Sendable
+  /// Describes an in-memory mutation. Applied to state by ``apply(_:to:)``,
+  /// then emitted immediately to observers of the live actor state.
+  associatedtype Mutation: Sendable
+
+  /// Describes a durable change that was successfully flushed by the
+  /// persistence tail.
+  associatedtype PersistedEvent: Sendable
 
   /// Describes an ephemeral streaming update (inference text delta, etc.).
   /// Not persisted, not applied to committed state.
@@ -69,7 +73,7 @@ public protocol AgentBehavior: Sendable {
   /// Pure reducer. Apply a committed action to in-memory state.
   ///
   /// - Important: Must be synchronous — no IO, no suspension.
-  func apply(_ action: CommittedAction, to state: inout State)
+  func apply(_ mutation: Mutation, to state: inout State)
 
   // MARK: External Actions
 
@@ -78,7 +82,7 @@ public protocol AgentBehavior: Sendable {
   /// Persists the effect and returns actions. For example, an enqueue
   /// command persists the queue item (and possibly flips `has_work`)
   /// and returns actions that update in-memory queue state.
-  func handle(_ action: ExternalAction, state: State) async throws -> [CommittedAction]
+  func handle(_ action: ExternalAction, state: State) async throws -> [Mutation]
 
   // MARK: Drain
 
@@ -87,13 +91,13 @@ public protocol AgentBehavior: Sendable {
   ///
   /// Called at the **interrupt checkpoint** — after tool results are
   /// collected, before next inference.
-  func drainInterruptItems(state: State) async throws -> [CommittedAction]
+  func drainInterruptItems(state: State) async throws -> [Mutation]
 
   /// Atomically drain turn-boundary items and write them to the
   /// transcript. Returns actions describing what was drained.
   ///
   /// Called at the **turn boundary** — the agent would otherwise go idle.
-  func drainTurnItems(state: State) async throws -> [CommittedAction]
+  func drainTurnItems(state: State) async throws -> [Mutation]
 
   // MARK: Inference
 
@@ -118,7 +122,7 @@ public protocol AgentBehavior: Sendable {
   func persistAssistantEntry(
     _ message: AssistantMessage,
     state: State,
-  ) async throws -> [CommittedAction]
+  ) async throws -> [Mutation]
 
   // MARK: Tool Lifecycle
 
@@ -129,7 +133,7 @@ public protocol AgentBehavior: Sendable {
   func toolWillExecute(
     _ call: ToolCall,
     state: State,
-  ) async throws -> [CommittedAction]
+  ) async throws -> [Mutation]
 
   /// Execute a tool call. Runs outside the serialized path (parallel).
   func executeToolCall(_ call: ToolCall) async throws -> ToolResult
@@ -145,14 +149,14 @@ public protocol AgentBehavior: Sendable {
     _ call: ToolCall,
     result: ToolResult,
     state: State,
-  ) async throws -> [CommittedAction]
+  ) async throws -> [Mutation]
 
   /// Persist an error for a tool call that threw during execution.
   func toolDidFail(
     _ call: ToolCall,
     error: any Error,
     state: State,
-  ) async throws -> [CommittedAction]
+  ) async throws -> [Mutation]
 
   // MARK: Compaction
 
@@ -160,7 +164,7 @@ public protocol AgentBehavior: Sendable {
   func shouldCompact(state: State) -> Bool
 
   /// Perform compaction and return actions.
-  func performCompaction(state: State) async throws -> [CommittedAction]
+  func performCompaction(state: State) async throws -> [Mutation]
 
   // MARK: Crash Recovery
 
@@ -171,7 +175,11 @@ public protocol AgentBehavior: Sendable {
   func recoverStaleToolCall(
     id: String,
     state: State,
-  ) async throws -> [CommittedAction]
+  ) async throws -> [Mutation]
+
+  /// Persist the delta between two snapshots and describe what durable paths
+  /// became externally observable as a result.
+  func persist(from oldState: State, to newState: State) async throws -> [PersistedEvent]
 
   // MARK: Cold Start
 
@@ -234,9 +242,12 @@ public struct AgentStreamSink<Action: Sendable>: Sendable {
 /// Committed actions advance the persisted state. Stream events are
 /// ephemeral — they are not persisted and do not advance the stable
 /// version.
-public enum AgentLoopEvent<CommittedAction: Sendable, StreamAction: Sendable>: Sendable {
-  /// A persisted mutation was applied to state.
-  case committed(CommittedAction)
+public enum AgentLoopEvent<Mutation: Sendable, PersistedEvent: Sendable, StreamAction: Sendable>: Sendable {
+  /// An in-memory mutation was applied to the actor-owned state.
+  case mutated(Mutation)
+
+  /// A durable change was flushed by the persistence tail.
+  case persisted(PersistedEvent)
 
   /// Inference streaming has begun.
   case streamBegan
@@ -263,12 +274,12 @@ public struct AgentLoopObservation<B: AgentBehavior>: Sendable {
   public var inflight: [B.StreamAction]?
 
   /// Live event stream from the point of observation.
-  public var events: AsyncStream<AgentLoopEvent<B.CommittedAction, B.StreamAction>>
+  public var events: AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>
 
   public init(
     state: B.State,
     inflight: [B.StreamAction]?,
-    events: AsyncStream<AgentLoopEvent<B.CommittedAction, B.StreamAction>>,
+    events: AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>,
   ) {
     self.state = state
     self.inflight = inflight
