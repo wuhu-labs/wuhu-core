@@ -126,7 +126,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     )
   }
 
-  func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws {
+  func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State {
     if diff.settingsChanged,
        diff.appendedEntries.isEmpty,
        diff.systemJournalEntries.isEmpty,
@@ -144,21 +144,18 @@ struct WuhuSessionBehavior: AgentBehavior {
         reasoningEffort: newState.settings.pendingReasoningEffort,
       )
       _ = try await store.setPendingModelSelection(sessionID: sessionID, selection: selection)
-      return
+      return try await loadState()
     }
 
     if !diff.appendedEntries.isEmpty,
        !diff.systemJournalEntries.isEmpty || !diff.steerJournalEntries.isEmpty,
        diff.followUpJournalEntries.isEmpty
     {
-      _ = try await store.drainInterruptCheckpoint(
-        sessionID: sessionID,
-        reservedEntryIDs: diff.appendedEntries.map(\.id),
-      )
+      _ = try await store.drainInterruptCheckpoint(sessionID: sessionID)
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if !diff.appendedEntries.isEmpty,
@@ -166,14 +163,11 @@ struct WuhuSessionBehavior: AgentBehavior {
        diff.steerJournalEntries.isEmpty,
        !diff.followUpJournalEntries.isEmpty
     {
-      _ = try await store.drainTurnBoundary(
-        sessionID: sessionID,
-        reservedEntryIDs: diff.appendedEntries.map(\.id),
-      )
+      _ = try await store.drainTurnBoundary(sessionID: sessionID)
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if diff.appendedEntries.isEmpty,
@@ -193,7 +187,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if diff.appendedEntries.isEmpty,
@@ -205,7 +199,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if diff.appendedEntries.isEmpty,
@@ -217,7 +211,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if diff.appendedEntries.count == 1,
@@ -225,14 +219,14 @@ struct WuhuSessionBehavior: AgentBehavior {
        case let .sessionSettings(selection) = entry.payload
     {
       if oldState.settings.pendingModel != nil {
-        _ = try await store.applyPendingModelIfPossible(sessionID: sessionID, entryID: entry.id)
+        _ = try await store.applyPendingModelIfPossible(sessionID: sessionID)
       } else {
-        _ = try await store.applyModelSelection(sessionID: sessionID, selection: selection, entryID: entry.id)
+        _ = try await store.applyModelSelection(sessionID: sessionID, selection: selection)
       }
       if diff.statusChanged {
         try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
       }
-      return
+      return try await loadState()
     }
 
     if diff.appendedEntries.count > 1 {
@@ -240,11 +234,11 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
 
     if let entry = diff.appendedEntries.first {
+      let payload = try await persistedPayload(entry.payload)
       _ = try await store.appendEntryWithSession(
         sessionID: sessionID,
-        payload: entry.payload,
+        payload: payload,
         createdAt: entry.createdAt,
-        entryID: entry.id,
       )
     }
 
@@ -255,51 +249,48 @@ struct WuhuSessionBehavior: AgentBehavior {
     if diff.statusChanged {
       try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
     }
+
+    return try await loadState()
   }
 
-  func handle(_ action: ExternalAction, state: State) async throws -> State {
-    var next = state
+  func handle(_ action: ExternalAction, state: inout State) throws {
     switch action {
     case let .enqueueUser(id, message, lane):
       let item = UserQueuePendingItem(id: id, enqueuedAt: Date(), message: message)
       let backfill = enqueueUser(item: item, lane: lane, into: state)
-      applyUserQueue(backfill, lane: lane, to: &next)
-      next.status = .init(status: .running)
-      return next
+      applyUserQueue(backfill, lane: lane, to: &state)
+      state.status = .init(status: .running)
 
     case let .cancelUser(id, lane):
       let backfill = try cancelUser(id: id, lane: lane, from: state)
-      applyUserQueue(backfill, lane: lane, to: &next)
-      next.status = .init(status: statusForOperationalState(next))
-      return next
+      applyUserQueue(backfill, lane: lane, to: &state)
+      state.status = .init(status: statusForOperationalState(state))
 
     case let .enqueueSystem(id, input, enqueuedAt):
       let item = SystemUrgentPendingItem(id: id, enqueuedAt: enqueuedAt, input: input)
-      next.systemUrgent = enqueueSystem(item: item, into: state)
-      next.status = .init(status: .running)
-      return next
+      state.systemUrgent = enqueueSystem(item: item, into: state)
+      state.status = .init(status: .running)
 
     case let .setPendingModelSelection(selection):
-      next.settings = setPendingModelSelection(selection, from: state.settings)
-      return next
+      state.settings = setPendingModelSelection(selection, from: state.settings)
 
     case let .applyModelSelection(selection):
-      return try await applyModelSelection(selection, state: state)
+      applyModelSelection(selection, state: &state)
 
     case .applyPendingModelIfPossible:
-      guard let pending = state.settings.pendingModel else { return state }
-      guard state.status.status == .idle, !hasPendingWork(state), !needsInference(state: state) else { return state }
+      guard let pending = state.settings.pendingModel else { return }
+      guard state.status.status == .idle, !hasPendingWork(state), !needsInference(state: state) else { return }
       let selection = WuhuSessionSettings(
         provider: WuhuProvider(rawValue: pending.provider.rawValue) ?? .openai,
         model: pending.id,
         reasoningEffort: state.settings.pendingReasoningEffort,
       )
-      return try await applyModelSelection(selection, state: state)
+      applyModelSelection(selection, state: &state)
     }
   }
 
-  func drainInterruptItems(state: State) async throws -> State {
-    if state.status.status == .stopped { return state }
+  func drainInterruptItems(state: inout State) {
+    if state.status.status == .stopped { return }
 
     struct Candidate {
       enum Kind {
@@ -323,37 +314,31 @@ struct WuhuSessionBehavior: AgentBehavior {
       return a.stableID < b.stableID
     }
 
-    guard !candidates.isEmpty else { return state }
+    guard !candidates.isEmpty else { return }
 
-    let entryIDs = try await store.reserveEntryIDs(count: candidates.count)
-    var next = state
-    next.systemUrgent.pending = []
-    next.steer.pending = []
+    state.systemUrgent.pending = []
+    state.steer.pending = []
 
-    for (candidate, entryID) in zip(candidates, entryIDs) {
+    for candidate in candidates {
       switch candidate.kind {
       case let .system(item):
         let entry = appendEntry(
-          id: entryID,
           createdAt: item.enqueuedAt,
           payload: materializedPayload(for: item),
-          to: &next.session,
+          to: &state,
         )
-        next.entries.append(entry)
-        next.systemUrgent.journal.append(.materialized(
+        state.systemUrgent.journal.append(.materialized(
           id: item.id,
           transcriptEntryID: .init(rawValue: "\(entry.id)"),
           at: Date(),
         ))
       case let .steer(item):
         let entry = appendEntry(
-          id: entryID,
           createdAt: item.enqueuedAt,
           payload: materializedPayload(for: item),
-          to: &next.session,
+          to: &state,
         )
-        next.entries.append(entry)
-        next.steer.journal.append(.materialized(
+        state.steer.journal.append(.materialized(
           lane: .steer,
           id: item.id,
           transcriptEntryID: .init(rawValue: "\(entry.id)"),
@@ -362,43 +347,43 @@ struct WuhuSessionBehavior: AgentBehavior {
       }
     }
 
-    next.systemUrgent.cursor = advancedCursor(state.systemUrgent.cursor, by: state.systemUrgent.pending.count)
-    next.steer.cursor = advancedCursor(state.steer.cursor, by: state.steer.pending.count)
-    next.status = .init(status: state.status.status == .stopped ? .stopped : .running)
-    return next
+    state.systemUrgent.cursor = advancedCursor(
+      state.systemUrgent.cursor,
+      by: candidates.count { if case .system = $0.kind { true } else { false } },
+    )
+    state.steer.cursor = advancedCursor(
+      state.steer.cursor,
+      by: candidates.count { if case .steer = $0.kind { true } else { false } },
+    )
+    state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
   }
 
-  func drainTurnItems(state: State) async throws -> State {
-    if state.status.status == .stopped { return state }
-    guard !state.followUp.pending.isEmpty else { return state }
+  func drainTurnItems(state: inout State) {
+    if state.status.status == .stopped { return }
+    guard !state.followUp.pending.isEmpty else { return }
 
     let items = state.followUp.pending.sorted {
       if $0.enqueuedAt != $1.enqueuedAt { return $0.enqueuedAt < $1.enqueuedAt }
       return $0.id.rawValue < $1.id.rawValue
     }
-    let entryIDs = try await store.reserveEntryIDs(count: items.count)
 
-    var next = state
-    next.followUp.pending = []
+    state.followUp.pending = []
 
-    for (item, entryID) in zip(items, entryIDs) {
+    for item in items {
       let entry = appendEntry(
-        id: entryID,
         createdAt: item.enqueuedAt,
         payload: materializedPayload(for: item),
-        to: &next.session,
+        to: &state,
       )
-      next.entries.append(entry)
-      next.followUp.journal.append(.materialized(
+      state.followUp.journal.append(.materialized(
         lane: .followUp,
         id: item.id,
         transcriptEntryID: .init(rawValue: "\(entry.id)"),
         at: Date(),
       ))
     }
-    next.followUp.cursor = advancedCursor(state.followUp.cursor, by: items.count)
-    next.status = .init(status: state.status.status == .stopped ? .stopped : .running)
-    return next
+    state.followUp.cursor = advancedCursor(state.followUp.cursor, by: items.count)
+    state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
   }
 
   func buildContext(state: State) -> Context {
@@ -451,33 +436,26 @@ struct WuhuSessionBehavior: AgentBehavior {
     throw WuhuAIError.unsupported("No model output")
   }
 
-  func persistAssistantEntry(_ message: AssistantMessage, state: State) async throws -> State {
-    let entryID = try await firstReservedEntryID()
-    var next = state
-    let entry = appendEntry(
-      id: entryID,
+  func persistAssistantEntry(_ message: AssistantMessage, state: inout State) {
+    _ = appendEntry(
       createdAt: message.timestamp,
       payload: .message(.fromPi(.assistant(message))),
-      to: &next.session,
+      to: &state,
     )
-    next.entries.append(entry)
 
     let calls = message.content.compactMap { block -> ToolCall? in
       if case let .toolCall(call) = block { return call }
       return nil
     }
     for call in calls {
-      next.toolCallStatus[call.id] = .pending
+      state.toolCallStatus[call.id] = .pending
     }
-    next.status = .init(status: statusForOperationalState(next))
-    return next
+    state.status = .init(status: statusForOperationalState(state))
   }
 
-  func toolWillExecute(_ call: ToolCall, state: State) async throws -> State {
-    var next = state
-    next.toolCallStatus[call.id] = .started
-    next.status = .init(status: .running)
-    return next
+  func toolWillExecute(_ call: ToolCall, state: inout State) {
+    state.toolCallStatus[call.id] = .started
+    state.status = .init(status: .running)
   }
 
   func executeToolCall(_ call: ToolCall) async throws -> ToolResult {
@@ -494,44 +472,27 @@ struct WuhuSessionBehavior: AgentBehavior {
     return copy
   }
 
-  func toolDidExecute(_ call: ToolCall, result: ToolResult, state: State) async throws -> State {
+  func toolDidExecute(_ call: ToolCall, result: ToolResult, state: inout State) {
     let now = Date()
-
-    let persistedContent = try result.content.map { block -> WuhuContentBlock in
-      if case let .image(img) = block, !img.data.hasPrefix("blob://") {
-        guard let rawData = Data(base64Encoded: img.data) else {
-          return WuhuContentBlock.fromPi(block)
-        }
-        let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: img.mimeType)
-        return .image(blobURI: uri, mimeType: img.mimeType)
-      }
-      return WuhuContentBlock.fromPi(block)
-    }
-
     let toolResultMessage = WuhuToolResultMessage(
       toolCallId: call.id,
       toolName: call.name,
-      content: persistedContent,
+      content: result.content.map(WuhuContentBlock.fromPi),
       details: result.details,
       isError: false,
       timestamp: now,
     )
 
-    let entryID = try await firstReservedEntryID()
-    var next = state
-    let entry = appendEntry(
-      id: entryID,
+    _ = appendEntry(
       createdAt: now,
       payload: .message(.toolResult(toolResultMessage)),
-      to: &next.session,
+      to: &state,
     )
-    next.entries.append(entry)
-    next.toolCallStatus[call.id] = .completed
-    next.status = .init(status: statusForOperationalState(next))
-    return next
+    state.toolCallStatus[call.id] = .completed
+    state.status = .init(status: statusForOperationalState(state))
   }
 
-  func toolDidFail(_ call: ToolCall, error: any Error, state: State) async throws -> State {
+  func toolDidFail(_ call: ToolCall, error: any Error, state: inout State) {
     let now = Date()
     let toolResult: Message = .toolResult(.init(
       toolCallId: call.id,
@@ -544,18 +505,13 @@ struct WuhuSessionBehavior: AgentBehavior {
       timestamp: now,
     ))
 
-    let entryID = try await firstReservedEntryID()
-    var next = state
-    let entry = appendEntry(
-      id: entryID,
+    _ = appendEntry(
       createdAt: now,
       payload: .message(.fromPi(toolResult)),
-      to: &next.session,
+      to: &state,
     )
-    next.entries.append(entry)
-    next.toolCallStatus[call.id] = .errored
-    next.status = .init(status: statusForOperationalState(next))
-    return next
+    state.toolCallStatus[call.id] = .errored
+    state.status = .init(status: statusForOperationalState(state))
   }
 
   func shouldCompact(state: State) -> Bool {
@@ -595,10 +551,8 @@ struct WuhuSessionBehavior: AgentBehavior {
       firstKeptEntryID: prep.firstKeptEntryID,
     ))
 
-    let entryID = try await firstReservedEntryID()
     var next = state
-    let entry = appendEntry(id: entryID, createdAt: Date(), payload: payload, to: &next.session)
-    next.entries.append(entry)
+    _ = appendEntry(createdAt: Date(), payload: payload, to: &next)
     return next
   }
 
@@ -616,17 +570,15 @@ struct WuhuSessionBehavior: AgentBehavior {
     }.sorted()
   }
 
-  func recoverStaleToolCall(id: String, state: State) async throws -> State {
-    var next = state
-
+  func recoverStaleToolCall(id: String, state: inout State) {
     if state.entries.contains(where: { entry in
       guard case let .message(message) = entry.payload else { return false }
       guard case let .toolResult(toolResult) = message else { return false }
       return toolResult.toolCallId == id
     }) {
-      next.toolCallStatus[id] = .errored
-      next.status = .init(status: statusForOperationalState(next))
-      return next
+      state.toolCallStatus[id] = .errored
+      state.status = .init(status: statusForOperationalState(state))
+      return
     }
 
     let toolName: String = {
@@ -654,17 +606,13 @@ struct WuhuSessionBehavior: AgentBehavior {
       timestamp: now,
     ))
 
-    let entryID = try await firstReservedEntryID()
-    let entry = appendEntry(
-      id: entryID,
+    _ = appendEntry(
       createdAt: now,
       payload: .message(.fromPi(repaired)),
-      to: &next.session,
+      to: &state,
     )
-    next.entries.append(entry)
-    next.toolCallStatus[id] = .errored
-    next.status = .init(status: statusForOperationalState(next))
-    return next
+    state.toolCallStatus[id] = .errored
+    state.status = .init(status: statusForOperationalState(state))
   }
 
   func hasWork(state: State) -> Bool {
@@ -743,25 +691,20 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  private func applyModelSelection(_ selection: WuhuSessionSettings, state: State) async throws -> State {
-    let entryID = try await firstReservedEntryID()
-    var next = state
-    let entry = appendEntry(
-      id: entryID,
+  private func applyModelSelection(_ selection: WuhuSessionSettings, state: inout State) {
+    _ = appendEntry(
       createdAt: Date(),
       payload: .sessionSettings(selection),
-      to: &next.session,
+      to: &state,
     )
-    next.entries.append(entry)
-    next.session.provider = selection.provider
-    next.session.model = selection.model
-    next.settings = .init(
+    state.session.provider = selection.provider
+    state.session.model = selection.model
+    state.settings = .init(
       effectiveModel: .init(provider: .init(rawValue: selection.provider.rawValue), id: selection.model),
       pendingModel: nil,
       effectiveReasoningEffort: selection.reasoningEffort,
       pendingReasoningEffort: nil,
     )
-    return next
   }
 
   private func applyUserQueue(_ backfill: UserQueueBackfill, lane: UserQueueLane, to state: inout State) {
@@ -831,21 +774,27 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   private func appendEntry(
-    id: Int64,
     createdAt: Date,
     payload: WuhuEntryPayload,
-    to session: inout WuhuSession,
+    to state: inout State,
   ) -> WuhuSessionEntry {
+    let id = nextTemporaryEntryID(in: state)
     let entry = WuhuSessionEntry(
       id: id,
-      sessionID: session.id,
-      parentEntryID: session.tailEntryID,
+      sessionID: state.session.id,
+      parentEntryID: state.session.tailEntryID,
       createdAt: createdAt,
       payload: payload,
     )
-    session.tailEntryID = id
-    session.updatedAt = Date()
+    state.session.tailEntryID = id
+    state.session.updatedAt = Date()
+    state.entries.append(entry)
     return entry
+  }
+
+  private func nextTemporaryEntryID(in state: State) -> Int64 {
+    let minEntryID = state.entries.map(\.id).min() ?? state.session.tailEntryID
+    return min(minEntryID - 1, -1)
   }
 
   private func materializedPayload(for item: UserQueuePendingItem) -> WuhuEntryPayload {
@@ -875,11 +824,53 @@ struct WuhuSessionBehavior: AgentBehavior {
     return .init(rawValue: "\(current + Int64(count))")
   }
 
-  private func firstReservedEntryID() async throws -> Int64 {
-    guard let id = try await store.reserveEntryIDs(count: 1).first else {
-      throw WuhuStoreError.sessionCorrupt("Failed to reserve entry id")
+  private func persistedPayload(_ payload: WuhuEntryPayload) async throws -> WuhuEntryPayload {
+    switch payload {
+    case let .message(message):
+      try await .message(persistedMessage(message))
+    default:
+      payload
     }
-    return id
+  }
+
+  private func persistedMessage(_ message: WuhuPersistedMessage) async throws -> WuhuPersistedMessage {
+    switch message {
+    case var .user(user):
+      user.content = try await persistedBlocks(user.content)
+      return .user(user)
+    case var .assistant(assistant):
+      assistant.content = try await persistedBlocks(assistant.content)
+      return .assistant(assistant)
+    case var .toolResult(toolResult):
+      toolResult.content = try await persistedBlocks(toolResult.content)
+      return .toolResult(toolResult)
+    case var .customMessage(custom):
+      custom.content = try await persistedBlocks(custom.content)
+      return .customMessage(custom)
+    case .unknown:
+      return message
+    }
+  }
+
+  private func persistedBlocks(_ blocks: [WuhuContentBlock]) async throws -> [WuhuContentBlock] {
+    var persisted: [WuhuContentBlock] = []
+    persisted.reserveCapacity(blocks.count)
+    for block in blocks {
+      let persistedBlock = try await persistedBlock(block)
+      persisted.append(persistedBlock)
+    }
+    return persisted
+  }
+
+  private func persistedBlock(_ block: WuhuContentBlock) async throws -> WuhuContentBlock {
+    guard case let .image(blobURI, mimeType) = block, !blobURI.hasPrefix("blob://") else {
+      return block
+    }
+    guard let rawData = Data(base64Encoded: blobURI) else {
+      return block
+    }
+    let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: mimeType)
+    return .image(blobURI: uri, mimeType: mimeType)
   }
 }
 

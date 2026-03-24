@@ -46,13 +46,14 @@ public protocol AgentBehavior: Sendable {
   /// Compute the durable diff between two versions of state.
   func diff(from oldState: State, to newState: State) -> PersistenceDiff?
 
-  /// Persist a previously computed diff to durable storage.
-  func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws
+  /// Persist a previously computed diff and return the durable state that
+  /// should replace the loop's live state before observation.
+  func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State
 
   // MARK: External Actions
 
-  /// Handle a command from outside the loop and return the next in-memory state.
-  func handle(_ action: ExternalAction, state: State) async throws -> State
+  /// Handle a command from outside the loop by mutating the in-memory state.
+  func handle(_ action: ExternalAction, state: inout State) throws
 
   // MARK: Drain
 
@@ -60,12 +61,12 @@ public protocol AgentBehavior: Sendable {
   ///
   /// Called at the **interrupt checkpoint** — after tool results are
   /// collected, before next inference.
-  func drainInterruptItems(state: State) async throws -> State
+  func drainInterruptItems(state: inout State)
 
   /// Atomically drain turn-boundary items into the in-memory state.
   ///
   /// Called at the **turn boundary** — the agent would otherwise go idle.
-  func drainTurnItems(state: State) async throws -> State
+  func drainTurnItems(state: inout State)
 
   // MARK: Inference
 
@@ -89,16 +90,16 @@ public protocol AgentBehavior: Sendable {
   /// Save the assistant's response into the in-memory state.
   func persistAssistantEntry(
     _ message: AssistantMessage,
-    state: State,
-  ) async throws -> State
+    state: inout State,
+  )
 
   // MARK: Tool Lifecycle
 
   /// Mark that a tool call is about to execute in the in-memory state.
   func toolWillExecute(
     _ call: ToolCall,
-    state: State,
-  ) async throws -> State
+    state: inout State,
+  )
 
   /// Execute a tool call. Runs outside the serialized path (parallel).
   func executeToolCall(_ call: ToolCall) async throws -> ToolResult
@@ -113,15 +114,15 @@ public protocol AgentBehavior: Sendable {
   func toolDidExecute(
     _ call: ToolCall,
     result: ToolResult,
-    state: State,
-  ) async throws -> State
+    state: inout State,
+  )
 
   /// Save an error result for a tool call into the in-memory state.
   func toolDidFail(
     _ call: ToolCall,
     error: any Error,
-    state: State,
-  ) async throws -> State
+    state: inout State,
+  )
 
   // MARK: Compaction
 
@@ -140,8 +141,8 @@ public protocol AgentBehavior: Sendable {
   /// in-memory state.
   func recoverStaleToolCall(
     id: String,
-    state: State,
-  ) async throws -> State
+    state: inout State,
+  )
 
   // MARK: Cold Start
 
