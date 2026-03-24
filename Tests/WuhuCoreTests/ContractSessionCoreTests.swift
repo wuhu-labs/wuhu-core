@@ -49,7 +49,7 @@ struct ContractSessionCoreTests {
     for mutation in mutations {
       behavior.apply(mutation, to: &next)
     }
-    _ = try await behavior.persist(from: state, to: next)
+    _ = try await behavior.persist(mutations, from: state, to: next)
     let reloaded = try await behavior.loadState()
     #expect(next.session.id == reloaded.session.id)
     #expect(next.session.provider == reloaded.session.provider)

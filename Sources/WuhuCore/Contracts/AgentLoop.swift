@@ -27,14 +27,12 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: State
 
   private(set) var state: B.State
-  private var persistedState: B.State
   private var inflight: [B.StreamAction]?
 
   // MARK: Serialization
 
   /// Task chain tail for ``serialized(_:)``. Do not touch directly.
   private var _tail: Task<Void, Never>?
-  private var _persistTail: Task<Void, Never>?
 
   // MARK: Lifecycle
 
@@ -44,7 +42,7 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: Observation
 
-  private var observers: [UUID: AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>.Continuation] = [:]
+  private var observers: [UUID: AsyncStream<AgentLoopEvent<B.Mutation, B.StreamAction>>.Continuation] = [:]
 
   // MARK: Tool Call Repetition
 
@@ -55,7 +53,6 @@ public actor AgentLoop<B: AgentBehavior> {
   public init(behavior: B) {
     self.behavior = behavior
     state = B.emptyState
-    persistedState = B.emptyState
   }
 
   // MARK: - Observation
@@ -66,7 +63,7 @@ public actor AgentLoop<B: AgentBehavior> {
   /// missed between the snapshot and the first stream event).
   public func observe() -> AgentLoopObservation<B> {
     let id = UUID()
-    let (stream, continuation) = AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>.makeStream()
+    let (stream, continuation) = AsyncStream<AgentLoopEvent<B.Mutation, B.StreamAction>>.makeStream()
     observers[id] = continuation
     continuation.onTermination = { [weak self] _ in
       Task { [weak self] in await self?.removeObserver(id) }
@@ -103,10 +100,6 @@ public actor AgentLoop<B: AgentBehavior> {
     state
   }
 
-  public func currentPersistedState() -> B.State {
-    persistedState
-  }
-
   // MARK: - Lifecycle
 
   /// Start the agent loop. Blocks until cancelled.
@@ -126,7 +119,6 @@ public actor AgentLoop<B: AgentBehavior> {
     signal = continuation
 
     state = try await behavior.loadState()
-    persistedState = state
     stateLoaded = true
 
     if behavior.hasWork(state: state) {
@@ -155,13 +147,11 @@ public actor AgentLoop<B: AgentBehavior> {
       _tail = Task {
         _ = await previous?.result
         do {
-          let oldState = self.state
           let mutations = try await work(self.state)
           for mutation in mutations {
             self.behavior.apply(mutation, to: &self.state)
           }
           self.emitMutations(mutations)
-          self.schedulePersistence(from: oldState, to: self.state)
           cont.resume(returning: mutations)
         } catch {
           cont.resume(throwing: error)
@@ -439,37 +429,15 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: - Emit
 
-  private func schedulePersistence(from oldState: B.State, to newState: B.State) {
-    let previous = _persistTail
-    _persistTail = Task { [weak self] in
-      _ = await previous?.result
-      do {
-        try await self?.flushPersistence(from: oldState, to: newState)
-      } catch {
-        let line = "[AgentLoop] persistence flush failed: \(String(describing: error))\n"
-        FileHandle.standardError.write(Data(line.utf8))
-      }
-    }
-  }
-
-  private func flushPersistence(from oldState: B.State, to newState: B.State) async throws {
-    let persisted = try await behavior.persist(from: oldState, to: newState)
-    persistedState = newState
-    for event in persisted {
-      emit(.persisted(event))
-    }
-  }
-
-  private func emit(_ event: AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>) {
+  private func emit(_ event: AgentLoopEvent<B.Mutation, B.StreamAction>) {
     for (_, continuation) in observers {
       continuation.yield(event)
     }
   }
 
   private func emitMutations(_ mutations: [B.Mutation]) {
-    for mutation in mutations {
-      emit(.mutated(mutation))
-    }
+    guard !mutations.isEmpty else { return }
+    emit(.mutated(mutations))
   }
 }
 

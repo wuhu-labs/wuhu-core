@@ -69,7 +69,6 @@ struct WuhuSessionLoopState: Sendable, Equatable {
 struct WuhuSessionBehavior: AgentBehavior {
   typealias State = WuhuSessionLoopState
   typealias Mutation = WuhuSessionMutation
-  typealias PersistedEvent = WuhuSessionPersistedEvent
   typealias StreamAction = WuhuSessionStreamAction
   typealias ExternalAction = WuhuSessionExternalAction
   typealias ToolResult = AgentToolResult
@@ -571,8 +570,180 @@ struct WuhuSessionBehavior: AgentBehavior {
     ]
   }
 
-  func persist(from oldState: State, to newState: State) async throws -> [PersistedEvent] {
-    try await store.persistLoopStateTransition(sessionID: sessionID, from: oldState, to: newState)
+  func persist(
+    _ mutations: [Mutation],
+    from oldState: State,
+    to newState: State,
+  ) async throws -> [WuhuSessionPersistedEvent] {
+    guard !mutations.isEmpty else { return [] }
+
+    let appendedEntries = Array(newState.entries.dropFirst(oldState.entries.count))
+    let toolStatusUpdates = mutations.compactMap { mutation -> (id: String, status: ToolCallStatus)? in
+      guard case let .toolCallStatusUpdated(id, status) = mutation else { return nil }
+      return (id, status)
+    }
+
+    if let settings = pendingSelectionUpdate(from: mutations) {
+      guard let pending = settings.pendingModel else {
+        throw WuhuStoreError.sessionCorrupt("Missing pending model in pending-selection mutation batch")
+      }
+      let selection = WuhuSessionSettings(
+        provider: WuhuProvider(rawValue: pending.provider.rawValue) ?? .openai,
+        model: pending.id,
+        reasoningEffort: settings.pendingReasoningEffort,
+      )
+      let persisted = try await store.setPendingModelSelection(sessionID: sessionID, selection: selection)
+      return [.settingsUpdated(persisted)]
+    }
+
+    if appendedEntries.count == 1,
+       let selectionEntry = appendedEntries.first,
+       case let .sessionSettings(selection) = selectionEntry.payload
+    {
+      if oldState.settings.pendingModel != nil {
+        _ = try await store.applyPendingModelIfPossible(sessionID: sessionID, entryID: selectionEntry.id)
+      } else {
+        _ = try await store.applyModelSelection(sessionID: sessionID, selection: selection, entryID: selectionEntry.id)
+      }
+
+      var events: [WuhuSessionPersistedEvent] = [.transcriptAppended([selectionEntry])]
+      if oldState.settings != newState.settings {
+        events.append(.settingsUpdated(newState.settings))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if systemQueueUpdate(from: mutations) != nil, !appendedEntries.isEmpty {
+      let drained = try await store.drainInterruptCheckpoint(
+        sessionID: sessionID,
+        reservedEntryIDs: appendedEntries.map(\.id),
+      )
+
+      var events: [WuhuSessionPersistedEvent] = [.transcriptAppended(drained.entries)]
+      let systemEntries = Array(drained.systemUrgent.journal.dropFirst(oldState.systemUrgent.journal.count))
+      if !systemEntries.isEmpty {
+        events.append(.systemQueue(cursor: drained.systemUrgent.cursor, entries: systemEntries))
+      }
+      let steerEntries = Array(drained.steer.journal.dropFirst(oldState.steer.journal.count))
+      if !steerEntries.isEmpty {
+        events.append(.userQueue(lane: .steer, cursor: drained.steer.cursor, entries: steerEntries))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if userQueueUpdate(from: mutations, lane: .followUp) != nil, !appendedEntries.isEmpty {
+      let drained = try await store.drainTurnBoundary(
+        sessionID: sessionID,
+        reservedEntryIDs: appendedEntries.map(\.id),
+      )
+
+      var events: [WuhuSessionPersistedEvent] = [.transcriptAppended(drained.entries)]
+      let followUpEntries = Array(drained.followUp.journal.dropFirst(oldState.followUp.journal.count))
+      if !followUpEntries.isEmpty {
+        events.append(.userQueue(lane: .followUp, cursor: drained.followUp.cursor, entries: followUpEntries))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if let systemQueue = systemQueueUpdate(from: mutations) {
+      let appendedJournal = Array(systemQueue.journal.dropFirst(oldState.systemUrgent.journal.count))
+      if appendedJournal.count == 1,
+         let journal = appendedJournal.first,
+         case let .enqueued(item) = journal
+      {
+        _ = try await store.enqueueSystemInput(
+          sessionID: sessionID,
+          id: item.id,
+          input: item.input,
+          enqueuedAt: item.enqueuedAt,
+        )
+      } else {
+        throw WuhuStoreError.sessionCorrupt("Unsupported system queue mutation batch")
+      }
+
+      let delta = try await store.loadSystemQueueJournal(sessionID: sessionID, since: oldState.systemUrgent.cursor)
+      var events: [WuhuSessionPersistedEvent] = []
+      if !delta.entries.isEmpty {
+        events.append(.systemQueue(cursor: delta.cursor, entries: delta.entries))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if let update = userQueueMutation(from: mutations, oldState: oldState) {
+      switch update.entry {
+      case let .enqueued(_, item):
+        _ = try await store.enqueueUserMessage(
+          sessionID: sessionID,
+          id: item.id,
+          message: item.message,
+          lane: update.lane,
+        )
+      case let .canceled(_, id, _):
+        try await store.cancelUserMessage(sessionID: sessionID, id: id, lane: update.lane)
+      case .materialized:
+        throw WuhuStoreError.sessionCorrupt("Unexpected materialized user queue mutation without transcript entries")
+      }
+
+      let delta = try await store.loadUserQueueJournal(
+        sessionID: sessionID,
+        lane: update.lane,
+        since: update.oldCursor,
+      )
+      var events: [WuhuSessionPersistedEvent] = []
+      if !delta.entries.isEmpty {
+        events.append(.userQueue(lane: update.lane, cursor: delta.cursor, entries: delta.entries))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if appendedEntries.count == 1, let entry = appendedEntries.first {
+      _ = try await store.appendEntryWithSession(
+        sessionID: sessionID,
+        payload: entry.payload,
+        createdAt: entry.createdAt,
+        entryID: entry.id,
+      )
+      for update in toolStatusUpdates {
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: update.id, status: update.status)
+      }
+
+      var events: [WuhuSessionPersistedEvent] = [.transcriptAppended([entry])]
+      if oldState.settings != newState.settings {
+        events.append(.settingsUpdated(newState.settings))
+      }
+      if oldState.status != newState.status {
+        events.append(.statusUpdated(newState.status))
+      }
+      return events
+    }
+
+    if !toolStatusUpdates.isEmpty {
+      for update in toolStatusUpdates {
+        _ = try await store.setToolCallStatus(sessionID: sessionID, id: update.id, status: update.status)
+      }
+
+      if oldState.status != newState.status {
+        return [.statusUpdated(newState.status)]
+      }
+      return []
+    }
+
+    throw WuhuStoreError.sessionCorrupt("Unsupported mutation batch for persistence")
   }
 
   func hasWork(state: State) -> Bool {
@@ -781,6 +952,45 @@ struct WuhuSessionBehavior: AgentBehavior {
       throw WuhuStoreError.sessionCorrupt("Failed to reserve entry id")
     }
     return id
+  }
+
+  private func pendingSelectionUpdate(from mutations: [Mutation]) -> SessionSettingsSnapshot? {
+    guard mutations.count == 1 else { return nil }
+    guard case let .settingsUpdated(settings) = mutations[0] else { return nil }
+    return settings.pendingModel != nil ? settings : nil
+  }
+
+  private func systemQueueUpdate(from mutations: [Mutation]) -> SystemUrgentQueueBackfill? {
+    for mutation in mutations {
+      if case let .systemQueueUpdated(backfill) = mutation {
+        return backfill
+      }
+    }
+    return nil
+  }
+
+  private func userQueueUpdate(from mutations: [Mutation], lane: UserQueueLane) -> UserQueueBackfill? {
+    for mutation in mutations {
+      if case let .userQueueUpdated(foundLane, backfill) = mutation, foundLane == lane {
+        return backfill
+      }
+    }
+    return nil
+  }
+
+  private func userQueueMutation(
+    from mutations: [Mutation],
+    oldState: State,
+  ) -> (lane: UserQueueLane, oldCursor: QueueCursor, entry: UserQueueJournalEntry)? {
+    for mutation in mutations {
+      guard case let .userQueueUpdated(lane, backfill) = mutation else { continue }
+      let journal = backfill.journal.last
+      let oldCursor = lane == .steer ? oldState.steer.cursor : oldState.followUp.cursor
+      if let journal {
+        return (lane: lane, oldCursor: oldCursor, entry: journal)
+      }
+    }
+    return nil
   }
 }
 

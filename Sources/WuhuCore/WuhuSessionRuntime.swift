@@ -19,12 +19,16 @@ actor WuhuSessionRuntime {
 
   private var startTask: Task<Void, Never>?
   private var observeTask: Task<Void, Never>?
+  private var persistTask: Task<Void, Never>?
 
   private var streaming: Bool = false
   private var inflightText: String = ""
   private var observedState: WuhuSessionLoopState = .empty
+  private var persistenceState: WuhuSessionLoopState = .empty
   private var observationReady: Bool = false
   private var idlePublished: Bool = false
+  private var scheduledPersistenceRevision: Int64 = 0
+  private var flushedPersistenceRevision: Int64 = 0
 
   init(
     sessionID: SessionID,
@@ -158,20 +162,27 @@ actor WuhuSessionRuntime {
   func stop() async {
     let start = startTask
     let observe = observeTask
+    let persist = persistTask
 
     start?.cancel()
     observe?.cancel()
+    persist?.cancel()
 
     _ = await start?.result
     _ = await observe?.result
+    _ = await persist?.result
 
     startTask = nil
     observeTask = nil
+    persistTask = nil
     observationReady = false
     streaming = false
     inflightText = ""
     observedState = .empty
+    persistenceState = .empty
     idlePublished = false
+    scheduledPersistenceRevision = 0
+    flushedPersistenceRevision = 0
 
     publishedSystemCursor = .init(rawValue: "0")
     publishedSteerCursor = .init(rawValue: "0")
@@ -182,6 +193,7 @@ actor WuhuSessionRuntime {
 
   private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
     observedState = observation.state
+    persistenceState = observation.state
     streaming = observation.inflight != nil
 
     // Seed inflight text from the loop's accumulated stream actions.
@@ -203,15 +215,82 @@ actor WuhuSessionRuntime {
     observationReady = true
   }
 
-  private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionMutation, WuhuSessionPersistedEvent, WuhuSessionStreamAction>) async {
+  private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionMutation, WuhuSessionStreamAction>) async {
     switch event {
-    case let .mutated(mutation):
-      behavior.apply(mutation, to: &observedState)
+    case let .mutated(mutations):
+      for mutation in mutations {
+        behavior.apply(mutation, to: &observedState)
+      }
       if !isIdle() {
         idlePublished = false
       }
+      schedulePersistence(for: mutations)
 
-    case let .persisted(event):
+    case .streamBegan:
+      streaming = true
+      inflightText = ""
+      idlePublished = false
+      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamBegan)
+
+    case let .streamDelta(delta):
+      switch delta {
+      case let .assistantTextDelta(text):
+        inflightText += text
+        await eventHub.publish(sessionID: sessionID.rawValue, event: .assistantTextDelta(text))
+        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamDelta(text))
+      }
+
+    case .streamEnded:
+      streaming = false
+      inflightText = ""
+      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
+    }
+  }
+
+  private func publishIdleIfNeeded() async {
+    guard isIdle(), !idlePublished else { return }
+    guard flushedPersistenceRevision == scheduledPersistenceRevision else { return }
+    idlePublished = true
+    await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
+    if let onIdle {
+      Task { await onIdle(sessionID.rawValue) }
+    }
+    Task { [weak self] in
+      try? await self?.applyPendingModelIfPossible()
+    }
+  }
+
+  private func schedulePersistence(for mutations: [WuhuSessionMutation]) {
+    guard !mutations.isEmpty else { return }
+
+    let oldState = persistenceState
+    var newState = persistenceState
+    for mutation in mutations {
+      behavior.apply(mutation, to: &newState)
+    }
+    persistenceState = newState
+
+    scheduledPersistenceRevision += 1
+    let revision = scheduledPersistenceRevision
+    let previous = persistTask
+
+    persistTask = Task { [weak self] in
+      _ = await previous?.result
+      guard let self else { return }
+      do {
+        let events = try await self.behavior.persist(mutations, from: oldState, to: newState)
+        await self.didPersist(revision: revision, events: events)
+      } catch {
+        let line = "[WuhuSessionRuntime] persistence flush failed for session '\(self.sessionID.rawValue)': \(String(describing: error))\n"
+        FileHandle.standardError.write(Data(line.utf8))
+      }
+    }
+  }
+
+  private func didPersist(revision: Int64, events: [WuhuSessionPersistedEvent]) async {
+    flushedPersistenceRevision = revision
+
+    for event in events {
       switch event {
       case let .transcriptAppended(entries):
         for entry in entries {
@@ -245,40 +324,8 @@ actor WuhuSessionRuntime {
       case let .statusUpdated(status):
         await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(status))
       }
-      await publishIdleIfNeeded()
-
-    case .streamBegan:
-      streaming = true
-      inflightText = ""
-      idlePublished = false
-      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamBegan)
-
-    case let .streamDelta(delta):
-      switch delta {
-      case let .assistantTextDelta(text):
-        inflightText += text
-        await eventHub.publish(sessionID: sessionID.rawValue, event: .assistantTextDelta(text))
-        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamDelta(text))
-      }
-
-    case .streamEnded:
-      streaming = false
-      inflightText = ""
-      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
     }
-  }
 
-  private func publishIdleIfNeeded() async {
-    guard isIdle(), !idlePublished else { return }
-    let persistedState = await loop.currentPersistedState()
-    guard persistedState == observedState else { return }
-    idlePublished = true
-    await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
-    if let onIdle {
-      Task { await onIdle(sessionID.rawValue) }
-    }
-    Task { [weak self] in
-      try? await self?.applyPendingModelIfPossible()
-    }
+    await publishIdleIfNeeded()
   }
 }

@@ -39,10 +39,6 @@ public protocol AgentBehavior: Sendable {
   /// then emitted immediately to observers of the live actor state.
   associatedtype Mutation: Sendable
 
-  /// Describes a durable change that was successfully flushed by the
-  /// persistence tail.
-  associatedtype PersistedEvent: Sendable
-
   /// Describes an ephemeral streaming update (inference text delta, etc.).
   /// Not persisted, not applied to committed state.
   associatedtype StreamAction: Sendable
@@ -177,10 +173,6 @@ public protocol AgentBehavior: Sendable {
     state: State,
   ) async throws -> [Mutation]
 
-  /// Persist the delta between two snapshots and describe what durable paths
-  /// became externally observable as a result.
-  func persist(from oldState: State, to newState: State) async throws -> [PersistedEvent]
-
   // MARK: Cold Start
 
   /// Whether the loaded state has pending work.
@@ -242,12 +234,9 @@ public struct AgentStreamSink<Action: Sendable>: Sendable {
 /// Committed actions advance the persisted state. Stream events are
 /// ephemeral — they are not persisted and do not advance the stable
 /// version.
-public enum AgentLoopEvent<Mutation: Sendable, PersistedEvent: Sendable, StreamAction: Sendable>: Sendable {
-  /// An in-memory mutation was applied to the actor-owned state.
-  case mutated(Mutation)
-
-  /// A durable change was flushed by the persistence tail.
-  case persisted(PersistedEvent)
+public enum AgentLoopEvent<Mutation: Sendable, StreamAction: Sendable>: Sendable {
+  /// One serialized mutation batch was applied to the actor-owned state.
+  case mutated([Mutation])
 
   /// Inference streaming has begun.
   case streamBegan
@@ -274,12 +263,12 @@ public struct AgentLoopObservation<B: AgentBehavior>: Sendable {
   public var inflight: [B.StreamAction]?
 
   /// Live event stream from the point of observation.
-  public var events: AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>
+  public var events: AsyncStream<AgentLoopEvent<B.Mutation, B.StreamAction>>
 
   public init(
     state: B.State,
     inflight: [B.StreamAction]?,
-    events: AsyncStream<AgentLoopEvent<B.Mutation, B.PersistedEvent, B.StreamAction>>,
+    events: AsyncStream<AgentLoopEvent<B.Mutation, B.StreamAction>>,
   ) {
     self.state = state
     self.inflight = inflight
