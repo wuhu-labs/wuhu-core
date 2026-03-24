@@ -14,7 +14,13 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: State
 
-  private(set) var state: B.State
+  private(set) var state: B.State {
+    didSet {
+      guard state != oldValue else { return }
+      signal?.yield(())
+    }
+  }
+
   private var publishedState: B.State
   private var inflight: [B.StreamAction]?
 
@@ -23,18 +29,9 @@ public actor AgentLoop<B: AgentBehavior> {
   private var started = false
   private var signal: AsyncStream<Void>.Continuation?
 
-  // MARK: Transition Ordering
-
-  private var transitionTail: Task<Void, Never>?
-
   // MARK: Observation
 
   private var observers: [UUID: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.Continuation] = [:]
-
-  // MARK: Flush Barrier
-
-  private var flushInProgress = false
-  private var flushWaiters: [CheckedContinuation<Void, any Error>] = []
 
   // MARK: Tool Call Repetition
 
@@ -72,10 +69,9 @@ public actor AgentLoop<B: AgentBehavior> {
   /// The behavior updates the live in-memory state first. The loop persists the
   /// diff to durable storage and only then publishes the new state.
   public func send(_ action: B.ExternalAction) async throws {
-    try await transition { [behavior] state in
+    try mutate { [behavior] state in
       try behavior.handle(action, state: &state)
     }
-    signal?.yield(())
   }
 
   // MARK: - Lifecycle
@@ -101,106 +97,32 @@ public actor AgentLoop<B: AgentBehavior> {
     }
 
     for await _ in stream {
+      try await flushIfNeeded()
       try await runUntilIdle()
+      try await flushIfNeeded()
     }
   }
 
   // MARK: - State Transitions
 
   @discardableResult
-  private func transition(
+  private func mutate(
     _ work: @escaping @Sendable (inout B.State) throws -> Void,
-  ) async throws -> Bool {
-    let previous = transitionTail
-    return try await withCheckedThrowingContinuation { continuation in
-      transitionTail = Task {
-        _ = await previous?.result
-        do {
-          var nextState = self.state
-          try work(&nextState)
-          guard nextState != self.state else {
-            continuation.resume(returning: false)
-            return
-          }
-          self.state = nextState
-          try await self.flush()
-          continuation.resume(returning: true)
-        } catch {
-          continuation.resume(throwing: error)
-        }
-      }
-    }
+  ) throws -> Bool {
+    var nextState = state
+    try work(&nextState)
+    guard nextState != state else { return false }
+    state = nextState
+    return true
   }
 
-  @discardableResult
-  private func transitionAsync(
-    _ work: @escaping @Sendable (B.State) async throws -> B.State,
-  ) async throws -> Bool {
-    let previous = transitionTail
-    return try await withCheckedThrowingContinuation { continuation in
-      transitionTail = Task {
-        _ = await previous?.result
-        do {
-          let nextState = try await work(self.state)
-          guard nextState != self.state else {
-            continuation.resume(returning: false)
-            return
-          }
-          self.state = nextState
-          try await self.flush()
-          continuation.resume(returning: true)
-        } catch {
-          continuation.resume(throwing: error)
-        }
-      }
-    }
-  }
-
-  private func flush() async throws {
-    if flushInProgress {
-      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-        flushWaiters.append(continuation)
-      }
-      return
-    }
-
-    flushInProgress = true
-    defer { flushInProgress = false }
-
-    do {
-      while state != publishedState {
-        let oldState = publishedState
-        let newState = state
-        if let diff = behavior.diff(from: oldState, to: newState) {
-          let durableState = try await behavior.persist(diff, from: oldState, to: newState)
-          state = durableState
-          publishedState = durableState
-          emit(.stateUpdated(durableState))
-        } else {
-          publishedState = newState
-          emit(.stateUpdated(newState))
-        }
-      }
-      resumeFlushWaiters()
-    } catch {
-      failFlushWaiters(error)
-      throw error
-    }
-  }
-
-  private func resumeFlushWaiters() {
-    let waiters = flushWaiters
-    flushWaiters = []
-    for waiter in waiters {
-      waiter.resume(returning: ())
-    }
-  }
-
-  private func failFlushWaiters(_ error: any Error) {
-    let waiters = flushWaiters
-    flushWaiters = []
-    for waiter in waiters {
-      waiter.resume(throwing: error)
+  private func flushIfNeeded() async throws {
+    while let diff = behavior.diff(from: publishedState, to: state) {
+      let oldState = publishedState
+      let newState = state
+      let durableState = try await behavior.persist(diff, from: oldState, to: newState)
+      publishedState = durableState
+      emit(.stateUpdated(durableState))
     }
   }
 
@@ -209,13 +131,16 @@ public actor AgentLoop<B: AgentBehavior> {
   /// Run the loop until idle: recover → (drain → infer → tools → compact)*
   private func runUntilIdle() async throws {
     var hasToolResults = try await recoverStaleToolCalls()
+    if hasToolResults {
+      try await flushIfNeeded()
+    }
 
     if !hasToolResults, behavior.needsInference(state: state) {
       hasToolResults = true
     }
 
     while !Task.isCancelled {
-      let drainedInterrupts = try await transition { [behavior] state in
+      let drainedInterrupts = try mutate { [behavior] state in
         behavior.drainInterruptItems(state: &state)
       }
 
@@ -224,20 +149,27 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       if !drainedInterrupts, !hasToolResults {
-        let drainedTurnItems = try await transition { [behavior] state in
+        let drainedTurnItems = try mutate { [behavior] state in
           behavior.drainTurnItems(state: &state)
         }
         if !drainedTurnItems { break }
       }
 
+      try await flushIfNeeded()
+
       hasToolResults = false
 
-      let context = behavior.buildContext(state: state)
+      let inferenceBaseState = state
+      let context = behavior.buildContext(state: inferenceBaseState)
       let message = try await performInferenceWithRetry(context: context)
+      if state != inferenceBaseState {
+        try await flushIfNeeded()
+      }
 
-      try await transition { [behavior] state in
+      try mutate { [behavior] state in
         behavior.persistAssistantEntry(message, state: &state)
       }
+      try await flushIfNeeded()
 
       let toolCalls = message.content.compactMap { block -> ToolCall? in
         if case let .toolCall(call) = block { return call }
@@ -246,13 +178,19 @@ public actor AgentLoop<B: AgentBehavior> {
 
       if !toolCalls.isEmpty {
         try await executeToolCalls(toolCalls)
+        try await flushIfNeeded()
         hasToolResults = true
       }
 
       if behavior.shouldCompact(state: state) {
-        try await transitionAsync { [behavior] state in
-          try await behavior.performCompaction(state: state)
+        let baseState = state
+        let compactedState = try await behavior.performCompaction(state: baseState)
+        if state == baseState {
+          state = compactedState
+        } else if behavior.shouldCompact(state: state) {
+          signal?.yield(())
         }
+        try await flushIfNeeded()
       }
     }
   }
@@ -338,7 +276,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private func recoverStaleToolCalls() async throws -> Bool {
     let staleIDs = behavior.staleToolCallIDs(in: state)
     for id in staleIDs {
-      try await transition { [behavior] state in
+      try mutate { [behavior] state in
         behavior.recoverStaleToolCall(id: id, state: &state)
       }
     }
@@ -361,14 +299,14 @@ public actor AgentLoop<B: AgentBehavior> {
     }
 
     for call in calls {
-      try await transition { [behavior] state in
+      try mutate { [behavior] state in
         behavior.toolWillExecute(call, state: &state)
       }
     }
 
     for call in blocked {
       let error = ToolCallRepetitionError.blocked
-      try await transition { [behavior] state in
+      try mutate { [behavior] state in
         behavior.toolDidFail(call, error: error, state: &state)
       }
     }
@@ -394,6 +332,10 @@ public actor AgentLoop<B: AgentBehavior> {
         return outputs
       }
 
+    if state != publishedState {
+      try await flushIfNeeded()
+    }
+
     for (call, result) in results {
       switch result {
       case let .success(toolResult):
@@ -409,7 +351,7 @@ public actor AgentLoop<B: AgentBehavior> {
         } else {
           toolResult
         }
-        try await transition { [behavior] state in
+        try mutate { [behavior] state in
           behavior.toolDidExecute(call, result: finalResult, state: &state)
         }
       case let .failure(error):
@@ -420,7 +362,7 @@ public actor AgentLoop<B: AgentBehavior> {
           argsHash: argsHash,
           resultHash: errorHash,
         )
-        try await transition { [behavior] state in
+        try mutate { [behavior] state in
           behavior.toolDidFail(call, error: error, state: &state)
         }
       }

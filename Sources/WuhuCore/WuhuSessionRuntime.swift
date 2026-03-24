@@ -19,6 +19,7 @@ actor WuhuSessionRuntime {
   private var streaming = false
   private var inflightText = ""
   private var observedState: WuhuSessionLoopState = .empty
+  private var hasAcceptedInMemoryWork = false
 
   init(
     sessionID: SessionID,
@@ -88,7 +89,7 @@ actor WuhuSessionRuntime {
   }
 
   func isIdle() -> Bool {
-    !streaming && !behavior.hasWork(state: observedState)
+    isIdle(state: observedState)
   }
 
   func currentInflightText() -> String? {
@@ -107,6 +108,7 @@ actor WuhuSessionRuntime {
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
     try await loop.send(.enqueueUser(id: id, message: message, lane: lane))
+    hasAcceptedInMemoryWork = true
     return id
   }
 
@@ -114,6 +116,7 @@ actor WuhuSessionRuntime {
     await ensureStarted()
     guard let loop else { throw CancellationError() }
     try await loop.send(.cancelUser(id: id, lane: lane))
+    hasAcceptedInMemoryWork = true
   }
 
   func enqueueSystem(input: SystemUrgentInput, enqueuedAt: Date = Date()) async throws {
@@ -121,6 +124,7 @@ actor WuhuSessionRuntime {
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
     try await loop.send(.enqueueSystem(id: id, input: input, enqueuedAt: enqueuedAt))
+    hasAcceptedInMemoryWork = true
   }
 
   func setModelSelection(_ selection: WuhuSessionSettings) async throws -> Bool {
@@ -129,8 +133,7 @@ actor WuhuSessionRuntime {
 
     if !streaming, !behavior.hasWork(state: observedState) {
       try await loop.send(.applyModelSelection(selection))
-      let updated = try await store.getSession(id: sessionID.rawValue)
-      return updated.model == selection.model && updated.provider == selection.provider
+      return true
     }
 
     try await loop.send(.setPendingModelSelection(selection))
@@ -160,6 +163,7 @@ actor WuhuSessionRuntime {
     streaming = false
     inflightText = ""
     observedState = .empty
+    hasAcceptedInMemoryWork = false
   }
 
   private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
@@ -180,15 +184,16 @@ actor WuhuSessionRuntime {
   private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionLoopState, WuhuSessionStreamAction>) async {
     switch event {
     case let .stateUpdated(nextState):
-      let wasIdle = isIdle()
+      let wasIdle = isIdle(state: observedState)
       let oldState = observedState
       observedState = nextState
+      hasAcceptedInMemoryWork = false
 
       if let diff = behavior.diff(from: oldState, to: nextState) {
         await publish(diff: diff, nextState: nextState)
       }
 
-      let nowIdle = isIdle()
+      let nowIdle = isIdle(state: nextState)
       if nowIdle, !wasIdle {
         await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
         if let onIdle {
@@ -213,11 +218,11 @@ actor WuhuSessionRuntime {
       }
 
     case .streamEnded:
-      let wasIdle = isIdle()
+      let wasIdle = isIdle(state: observedState)
       streaming = false
       inflightText = ""
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
-      let nowIdle = isIdle()
+      let nowIdle = isIdle(state: observedState)
       if nowIdle, !wasIdle {
         await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
         if let onIdle {
@@ -225,6 +230,10 @@ actor WuhuSessionRuntime {
         }
       }
     }
+  }
+
+  private func isIdle(state: WuhuSessionLoopState) -> Bool {
+    !streaming && !hasAcceptedInMemoryWork && !behavior.hasWork(state: state)
   }
 
   private func publish(diff: WuhuSessionPersistenceDiff, nextState: WuhuSessionLoopState) async {

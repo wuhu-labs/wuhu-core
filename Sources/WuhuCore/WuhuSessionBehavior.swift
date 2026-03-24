@@ -778,7 +778,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     payload: WuhuEntryPayload,
     to state: inout State,
   ) -> WuhuSessionEntry {
-    let id = nextTemporaryEntryID(in: state)
+    let id = nextEntryID(in: state)
     let entry = WuhuSessionEntry(
       id: id,
       sessionID: state.session.id,
@@ -792,9 +792,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     return entry
   }
 
-  private func nextTemporaryEntryID(in state: State) -> Int64 {
-    let minEntryID = state.entries.map(\.id).min() ?? state.session.tailEntryID
-    return min(minEntryID - 1, -1)
+  private func nextEntryID(in state: State) -> Int64 {
+    max(state.session.tailEntryID, state.entries.last?.id ?? state.session.tailEntryID) + 1
   }
 
   private func materializedPayload(for item: UserQueuePendingItem) -> WuhuEntryPayload {
