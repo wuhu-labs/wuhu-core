@@ -1,6 +1,6 @@
-import Foundation
 import Fetch
 import FetchSSE
+import Foundation
 import WuhuAI
 import WuhuAPI
 import WuhuCoreClient
@@ -31,7 +31,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(request), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(request), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuMountTemplate.self, from: data)
   }
@@ -48,7 +48,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "PATCH")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(request), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(request), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuMountTemplate.self, from: data)
   }
@@ -99,7 +99,7 @@ public struct WuhuClient: Sendable {
     let url = baseURL.appending(path: "v1").appending(path: "sessions")
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
-    req.setBody(try WuhuJSON.encoder.encode(request), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(request), contentType: "application/json")
 
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuSession.self, from: data)
@@ -113,7 +113,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "PATCH")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuRenameSessionRequest(title: title)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuRenameSessionRequest(title: title)), contentType: "application/json")
 
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuRenameSessionResponse.self, from: data)
@@ -133,7 +133,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuSetSessionModelRequest(
+    try req.setBody(WuhuJSON.encoder.encode(WuhuSetSessionModelRequest(
       provider: provider,
       model: model,
       reasoningEffort: reasoningEffort,
@@ -206,7 +206,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: components?.url ?? url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(message), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(message), contentType: "application/json")
 
     let data = try await responseData(for: req)
     let qid = try WuhuJSON.decoder.decode(QueueItemID.self, from: data)
@@ -316,7 +316,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuStopSessionRequest(user: user)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuStopSessionRequest(user: user)), contentType: "application/json")
 
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuStopSessionResponse.self, from: data)
@@ -360,7 +360,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuCreateUserRequest(username: username, kind: kind)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuCreateUserRequest(username: username, kind: kind)), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuUser.self, from: data)
   }
@@ -392,7 +392,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuCreateChannelRequest(name: name, topic: topic, kind: kind)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuCreateChannelRequest(name: name, topic: topic, kind: kind)), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuChannel.self, from: data)
   }
@@ -409,7 +409,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "PATCH")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuUpdateChannelRequest(name: name, topic: topic)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuUpdateChannelRequest(name: name, topic: topic)), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuChannel.self, from: data)
   }
@@ -434,7 +434,7 @@ public struct WuhuClient: Sendable {
     var req = Request(url: url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(WuhuAddChannelMemberRequest(userID: userID, role: role)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuAddChannelMemberRequest(userID: userID, role: role)), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuChannelMember.self, from: data)
   }
@@ -469,7 +469,7 @@ public struct WuhuClient: Sendable {
     if let username {
       req.setHeader(username, for: "X-Wuhu-User")
     }
-    req.setBody(try WuhuJSON.encoder.encode(WuhuPostMessageRequest(content: content, threadID: threadID)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(WuhuPostMessageRequest(content: content, threadID: threadID)), contentType: "application/json")
     let data = try await responseData(for: req)
     return try WuhuJSON.decoder.decode(WuhuChannelMessage.self, from: data)
   }

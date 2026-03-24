@@ -80,7 +80,7 @@ struct WuhuClientTests {
           ],
           inProcessExecution: .init(activePromptCount: 0),
         )
-        return jsonResponse(try WuhuJSON.encoder.encode(baseline))
+        return try jsonResponse(WuhuJSON.encoder.encode(baseline))
 
       case 2:
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/enqueue?lane=followUp")
@@ -91,7 +91,7 @@ struct WuhuClientTests {
         #expect(decoded.author == .unknown)
         #expect(decoded.content == .text("hello"))
 
-        return jsonResponse(try WuhuJSON.encoder.encode(QueueItemID(rawValue: "q1")))
+        return try jsonResponse(WuhuJSON.encoder.encode(QueueItemID(rawValue: "q1")))
 
       default:
         #expect(request.url.absoluteString == "http://127.0.0.1:5530/v1/sessions/s1/follow?sinceCursor=1&stopAfterIdle=1")
@@ -145,7 +145,7 @@ struct WuhuClientTests {
         selection: .init(provider: .openai, model: "gpt-5.2-codex", reasoningEffort: .high),
         applied: true,
       )
-      return jsonResponse(try WuhuJSON.encoder.encode(response))
+      return try jsonResponse(WuhuJSON.encoder.encode(response))
     }
 
     let client = try WuhuClient(baseURL: #require(URL(string: "http://127.0.0.1:5530")), fetch: http.client)
@@ -191,7 +191,7 @@ private struct MockFetchClient {
   var handler: @Sendable (Request) async throws -> Response
 
   var client: FetchClient {
-    FetchClient(fetch: self.handler)
+    FetchClient(fetch: handler)
   }
 }
 
@@ -201,7 +201,7 @@ private func jsonResponse(_ data: Data, status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(data))
+    body: .chunk(Array(data)),
   )
 }
 
@@ -212,7 +212,7 @@ private func sseResponse(_ events: [SSEEvent], status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(payload.utf8))
+    body: .chunk(Array(payload.utf8)),
   )
 }
 

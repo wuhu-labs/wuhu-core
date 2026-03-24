@@ -32,7 +32,7 @@ public struct LoggingHTTPTransport: Sendable {
   }
 
   public var client: FetchClient {
-    FetchClient(fetch: self.callAsFunction)
+    FetchClient(fetch: callAsFunction)
   }
 
   public func callAsFunction(_ request: Request) async throws -> Response {

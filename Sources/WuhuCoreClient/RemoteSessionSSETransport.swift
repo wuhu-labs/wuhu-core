@@ -1,6 +1,6 @@
-import Foundation
 import Fetch
 import FetchSSE
+import Foundation
 
 /// Transport-level connection lifecycle for SSE subscriptions.
 ///
@@ -83,7 +83,7 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     var req = Request(url: components?.url ?? url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(message), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(message), contentType: "application/json")
 
     let response = try await fetch(req)
     try response.validateStatus()
@@ -105,7 +105,7 @@ public actor RemoteSessionSSETransport: SessionCommanding, SessionSubscribing {
     var req = Request(url: components?.url ?? url, method: "POST")
     req.setHeader("application/json", for: "Content-Type")
     req.setHeader("application/json", for: "Accept")
-    req.setBody(try WuhuJSON.encoder.encode(CancelBody(id: id)), contentType: "application/json")
+    try req.setBody(WuhuJSON.encoder.encode(CancelBody(id: id)), contentType: "application/json")
 
     let response = try await fetch(req)
     try response.validateStatus()

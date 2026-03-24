@@ -15,7 +15,7 @@ struct LoggingHTTPTransportTests {
         #expect(request.method.rawValue == "POST")
         #expect(headerValues(request.headers, named: "Authorization") == ["Bearer secret-token"])
 
-        let payload = try JSONSerialization.jsonObject(with: try #require(try await bodyData(request))) as? [String: String]
+        let payload = try JSONSerialization.jsonObject(with: #require(try await bodyData(request))) as? [String: String]
         #expect(payload?["prompt"] == "hi")
 
         let responseBody = try JSONEncoder().encode(["status": "ok"])
@@ -24,19 +24,19 @@ struct LoggingHTTPTransportTests {
       baseDir: baseDir,
     )
 
-    var request = Request(
-      url: try #require(URL(string: "https://example.com/v1/chat")),
+    var request = try Request(
+      url: #require(URL(string: "https://example.com/v1/chat")),
       method: "POST",
       headers: [
         "Authorization": ["Bearer secret-token"],
         "Content-Type": ["application/json"],
       ],
-      body: try JSONEncoder().encode(["prompt": "hi"]),
+      body: JSONEncoder().encode(["prompt": "hi"]),
     )
     request.addHeader("text/plain", for: "Accept")
 
     let response = try await transport(request)
-    let payload = try JSONSerialization.jsonObject(with: try await response.data()) as? [String: String]
+    let payload = try await JSONSerialization.jsonObject(with: response.data()) as? [String: String]
 
     #expect(response.status.code == 201)
     #expect(payload?["status"] == "ok")
@@ -69,7 +69,7 @@ struct LoggingHTTPTransportTests {
       baseDir: baseDir,
     )
 
-    let response = try await transport(Request(url: try #require(URL(string: "https://example.com/stream")), method: "GET"))
+    let response = try await transport(Request(url: #require(URL(string: "https://example.com/stream")), method: "GET"))
 
     var received: [SSEEvent] = []
     for try await event in response.sse() {
@@ -126,7 +126,7 @@ struct LoggingHTTPTransportTests {
     )
 
     var response: Response? = try await transport(
-      Request(url: try #require(URL(string: "https://example.com/cancel")), method: "GET"),
+      Request(url: #require(URL(string: "https://example.com/cancel")), method: "GET"),
     )
     let activeResponse = try #require(response)
 
@@ -136,8 +136,7 @@ struct LoggingHTTPTransportTests {
           #expect(String(decoding: chunk, as: UTF8.self).contains("data: first"))
           await firstEvent.markSeen()
         }
-      } catch is CancellationError {
-      }
+      } catch is CancellationError {}
     }
 
     try await waitUntil {
@@ -166,7 +165,7 @@ private struct MockFetchClient {
   var handler: @Sendable (Request) async throws -> Response
 
   var client: FetchClient {
-    FetchClient(fetch: self.handler)
+    FetchClient(fetch: handler)
   }
 }
 
@@ -200,7 +199,7 @@ private func jsonResponse(_ data: Data, status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(data))
+    body: .chunk(Array(data)),
   )
 }
 
@@ -211,7 +210,7 @@ private func sseResponse(_ events: [SSEEvent], status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(payload.utf8))
+    body: .chunk(Array(payload.utf8)),
   )
 }
 

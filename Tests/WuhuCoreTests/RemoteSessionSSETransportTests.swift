@@ -164,12 +164,12 @@ struct RemoteSessionSSETransportTests {
 
       let decoded = try WuhuJSON.decoder.decode(
         QueuedUserMessage.self,
-        from: try #require(try await bodyData(request)),
+        from: #require(try await bodyData(request)),
       )
       #expect(decoded.author == .unknown)
       #expect(decoded.content == .text("hello"))
 
-      return jsonResponse(try WuhuJSON.encoder.encode(expectedID))
+      return try jsonResponse(WuhuJSON.encoder.encode(expectedID))
     }
 
     let transport = RemoteSessionSSETransport(baseURL: baseURL, fetch: http.client)
@@ -192,7 +192,7 @@ struct RemoteSessionSSETransportTests {
       struct Body: Decodable { var id: QueueItemID }
       let decoded = try WuhuJSON.decoder.decode(
         Body.self,
-        from: try #require(try await bodyData(request)),
+        from: #require(try await bodyData(request)),
       )
       #expect(decoded.id == .init(rawValue: "q1"))
 
@@ -212,7 +212,7 @@ private struct MockFetchClient {
   var handler: @Sendable (Request) async throws -> Response
 
   var client: FetchClient {
-    FetchClient(fetch: self.handler)
+    FetchClient(fetch: handler)
   }
 }
 
@@ -222,7 +222,7 @@ private func jsonResponse(_ data: Data, status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(data))
+    body: .chunk(Array(data)),
   )
 }
 
@@ -233,7 +233,7 @@ private func sseResponse(_ events: [SSEEvent], status: Int = 200) -> Response {
   return Response(
     status: Status(code: status),
     headers: headers,
-    body: .chunk(Array(payload.utf8))
+    body: .chunk(Array(payload.utf8)),
   )
 }
 

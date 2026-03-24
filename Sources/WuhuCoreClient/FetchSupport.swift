@@ -1,7 +1,7 @@
 #if canImport(FoundationEssentials)
-import FoundationEssentials
+  import FoundationEssentials
 #else
-import Foundation
+  import Foundation
 #endif
 
 import AsyncHTTPClient
@@ -34,7 +34,7 @@ public extension Request {
     url: URL,
     method: String = "GET",
     headers: [String: [String]] = [:],
-    body: Data? = nil
+    body: Data? = nil,
   ) {
     var requestHeaders = Headers()
     for (name, values) in headers {
@@ -48,20 +48,20 @@ public extension Request {
       url: url,
       method: Method(rawValue: method) ?? .get,
       headers: requestHeaders,
-      body: body.map { .bytes(Array($0)) }
+      body: body.map { .bytes(Array($0)) },
     )
   }
 
   mutating func setHeader(_ value: String, for name: String) {
     guard let fieldName = HTTPField.Name(name) else { return }
-    self.headers[fieldName] = value
+    headers[fieldName] = value
   }
 
   mutating func addHeader(_ value: String, for name: String) {
-    self.setHeader(value, for: name)
+    setHeader(value, for: name)
   }
 
   mutating func setBody(_ data: Data, contentType: String? = nil) {
-    self.body = .bytes(Array(data), contentType: contentType)
+    body = .bytes(Array(data), contentType: contentType)
   }
 }
