@@ -21,7 +21,6 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: Lifecycle
 
   private var started = false
-  private var stateLoaded = false
   private var signal: AsyncStream<Void>.Continuation?
 
   // MARK: Transition Ordering
@@ -43,10 +42,10 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: Init
 
-  public init(behavior: B) {
+  public init(behavior: B, initialState: B.State) {
     self.behavior = behavior
-    state = B.emptyState
-    publishedState = B.emptyState
+    state = initialState
+    publishedState = initialState
   }
 
   // MARK: - Observation
@@ -66,12 +65,6 @@ public actor AgentLoop<B: AgentBehavior> {
     observers.removeValue(forKey: id)
   }
 
-  public func waitUntilLoaded() async {
-    while !stateLoaded {
-      await Task.yield()
-    }
-  }
-
   // MARK: - External Actions
 
   /// Send a domain-specific command into the loop.
@@ -79,7 +72,6 @@ public actor AgentLoop<B: AgentBehavior> {
   /// The behavior updates the live in-memory state first. The loop persists the
   /// diff to durable storage and only then publishes the new state.
   public func send(_ action: B.ExternalAction) async throws {
-    await waitUntilLoaded()
     try await transition { [behavior] state in
       try await behavior.handle(action, state: state)
     }
@@ -96,7 +88,6 @@ public actor AgentLoop<B: AgentBehavior> {
     started = true
     defer {
       started = false
-      stateLoaded = false
       signal = nil
     }
 
@@ -104,10 +95,6 @@ public actor AgentLoop<B: AgentBehavior> {
       bufferingPolicy: .bufferingNewest(1),
     )
     signal = continuation
-
-    state = try await behavior.loadState()
-    publishedState = state
-    stateLoaded = true
 
     if behavior.hasWork(state: state) {
       signal?.yield(())

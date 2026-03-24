@@ -40,14 +40,6 @@ public protocol AgentBehavior: Sendable {
   /// identical tool results (see ``ToolCallRepetitionTracker``).
   associatedtype ToolResult: Sendable & Hashable
 
-  // MARK: State Management
-
-  /// Placeholder state used before ``loadState()`` runs.
-  ///
-  /// The loop initializes synchronously, but real state is loaded async at
-  /// startup. This value should be cheap and deterministic.
-  static var emptyState: State { get }
-
   /// Load full state from the database. Called once on startup.
   func loadState() async throws -> State
 
