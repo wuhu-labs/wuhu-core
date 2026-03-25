@@ -17,6 +17,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private(set) var state: B.State {
     didSet {
       guard state != oldValue else { return }
+      hasPendingFlushSignal = true
       flushSignal?.yield(())
     }
   }
@@ -29,6 +30,8 @@ public actor AgentLoop<B: AgentBehavior> {
   private var started = false
   private var workSignal: AsyncStream<Void>.Continuation?
   private var flushSignal: AsyncStream<Void>.Continuation?
+  private var hasPendingWorkSignal = false
+  private var hasPendingFlushSignal = false
 
   // MARK: Observation
 
@@ -80,6 +83,7 @@ public actor AgentLoop<B: AgentBehavior> {
     let oldState = state
     behavior.handle(action, state: &state)
     guard state != oldState else { return }
+    hasPendingWorkSignal = true
     workSignal?.yield(())
   }
 
@@ -108,8 +112,11 @@ public actor AgentLoop<B: AgentBehavior> {
     workSignal = workContinuation
     flushSignal = flushContinuation
 
-    if behavior.hasWork(state: state) || behavior.needsInference(state: state) {
-      workSignal?.yield(())
+    if hasPendingWorkSignal || behavior.hasWork(state: state) || behavior.needsInference(state: state) {
+      workContinuation.yield(())
+    }
+    if hasPendingFlushSignal {
+      flushContinuation.yield(())
     }
 
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -117,6 +124,7 @@ public actor AgentLoop<B: AgentBehavior> {
         guard let self else { return }
         for await _ in workStream {
           try Task.checkCancellation()
+          await consumePendingWorkSignal()
           try await runUntilIdle()
         }
       }
@@ -125,6 +133,7 @@ public actor AgentLoop<B: AgentBehavior> {
         guard let self else { return }
         for await _ in flushStream {
           try Task.checkCancellation()
+          await consumePendingFlushSignal()
           try await flushIfNeeded()
         }
       }
@@ -132,8 +141,6 @@ public actor AgentLoop<B: AgentBehavior> {
       do {
         while try await group.next() != nil {}
       } catch {
-        workContinuation.finish()
-        flushContinuation.finish()
         group.cancelAll()
         while let _ = try? await group.next() {}
         publishedState = try await behavior.loadState()
@@ -197,6 +204,7 @@ public actor AgentLoop<B: AgentBehavior> {
         if state == baseState {
           state = compactedState
         } else if behavior.shouldCompact(state: state) {
+          hasPendingWorkSignal = true
           workSignal?.yield(())
         }
       }
@@ -369,6 +377,14 @@ public actor AgentLoop<B: AgentBehavior> {
     for (_, continuation) in observers {
       continuation.yield(event)
     }
+  }
+
+  private func consumePendingWorkSignal() {
+    hasPendingWorkSignal = false
+  }
+
+  private func consumePendingFlushSignal() {
+    hasPendingFlushSignal = false
   }
 }
 

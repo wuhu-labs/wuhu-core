@@ -10,6 +10,9 @@ enum WuhuSessionExternalAction: Sendable, Hashable {
   case enqueueUser(id: QueueItemID, message: QueuedUserMessage, lane: UserQueueLane)
   case cancelUser(id: QueueItemID, lane: UserQueueLane)
   case enqueueSystem(id: QueueItemID, input: SystemUrgentInput, enqueuedAt: Date)
+  case setCustomTitle(String?)
+  case setArchived(Bool)
+  case setCwd(String?)
 
   case setPendingModelSelection(WuhuSessionSettings)
   case applyModelSelection(WuhuSessionSettings)
@@ -27,6 +30,7 @@ struct WuhuSessionPersistenceDiff: Sendable {
   var steerJournalEntries: [UserQueueJournalEntry]
   var followUpJournalEntries: [UserQueueJournalEntry]
   var toolCallStatusChanges: [WuhuSessionToolCallStatusChange]
+  var sessionMetadataChanged: Bool
   var settingsChanged: Bool
   var statusChanged: Bool
 }
@@ -103,6 +107,10 @@ struct WuhuSessionBehavior: AgentBehavior {
       return .init(id: id, status: newValue)
     }
 
+    let sessionMetadataChanged =
+      oldState.session.customTitle != newState.session.customTitle
+        || oldState.session.isArchived != newState.session.isArchived
+        || oldState.session.cwd != newState.session.cwd
     let settingsChanged = oldState.settings != newState.settings
     let statusChanged = oldState.status != newState.status
 
@@ -111,6 +119,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       || !steerJournalEntries.isEmpty
       || !followUpJournalEntries.isEmpty
       || !toolCallStatusChanges.isEmpty
+      || sessionMetadataChanged
       || settingsChanged
       || statusChanged
     else { return nil }
@@ -121,6 +130,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       steerJournalEntries: steerJournalEntries,
       followUpJournalEntries: followUpJournalEntries,
       toolCallStatusChanges: toolCallStatusChanges,
+      sessionMetadataChanged: sessionMetadataChanged,
       settingsChanged: settingsChanged,
       statusChanged: statusChanged,
     )
@@ -147,6 +157,15 @@ struct WuhuSessionBehavior: AgentBehavior {
       _ = try await store.setToolCallStatus(sessionID: sessionID, id: change.id, status: change.status)
     }
 
+    if diff.sessionMetadataChanged {
+      _ = try await store.setSessionMetadata(
+        sessionID: sessionID.rawValue,
+        customTitle: newState.session.customTitle,
+        isArchived: newState.session.isArchived,
+        cwd: newState.session.cwd,
+      )
+    }
+
     if diff.statusChanged {
       try await store.setSessionExecutionStatus(sessionID: sessionID, status: newState.status.status)
     }
@@ -171,6 +190,21 @@ struct WuhuSessionBehavior: AgentBehavior {
       let item = SystemUrgentPendingItem(id: id, enqueuedAt: enqueuedAt, input: input)
       state.systemUrgent = enqueueSystem(item: item, into: state)
       state.status = .init(status: .running)
+
+    case let .setCustomTitle(title):
+      guard state.session.customTitle != title else { return }
+      state.session.customTitle = title
+      state.session.updatedAt = Date()
+
+    case let .setArchived(isArchived):
+      guard state.session.isArchived != isArchived else { return }
+      state.session.isArchived = isArchived
+      state.session.updatedAt = Date()
+
+    case let .setCwd(cwd):
+      guard state.session.cwd != cwd else { return }
+      state.session.cwd = cwd
+      state.session.updatedAt = Date()
 
     case let .setPendingModelSelection(selection):
       state.settings = setPendingModelSelection(selection, from: state.settings)

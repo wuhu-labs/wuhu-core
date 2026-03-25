@@ -568,7 +568,7 @@ extension WuhuService {
 
       // Update cwd if this is the primary mount
       if isPrimary {
-        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
+        _ = try await setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
       }
 
       // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
