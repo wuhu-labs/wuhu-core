@@ -556,6 +556,25 @@ extension SQLiteSessionStore {
     }
   }
 
+  func setSessionMetadata(
+    sessionID: String,
+    customTitle: String?,
+    isArchived: Bool,
+    cwd: String?,
+  ) async throws -> WuhuSession {
+    try await dbQueue.write { db in
+      guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+        throw WuhuStoreError.sessionNotFound(sessionID)
+      }
+      row.customTitle = customTitle
+      row.isArchived = isArchived
+      row.cwd = cwd
+      row.updatedAt = Date()
+      try row.update(db)
+      return try row.toModel()
+    }
+  }
+
   // MARK: - Rename
 
   public func renameSession(id: String, title: String) async throws -> WuhuSession {

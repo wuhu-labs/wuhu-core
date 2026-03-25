@@ -107,6 +107,40 @@ struct ServiceIntegrationTests {
     #expect(texts.contains("I can help with that!"))
   }
 
+  @Test func sessionMetadataEditsRouteThroughRuntime() async throws {
+    let mock = MockStreamFn(text: "unused")
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession(cwd: nil)
+
+    let renamed = try await harness.service.renameSession(sessionID: session.id, title: "  Breakfast Chat  ")
+    #expect(renamed.customTitle == "Breakfast Chat")
+
+    let archived = try await harness.service.archiveSession(sessionID: session.id)
+    #expect(archived.isArchived == true)
+
+    let cwdUpdated = try await harness.service.setSessionCwd(sessionID: session.id, cwd: "/tmp/workspace")
+    #expect(cwdUpdated.cwd == "/tmp/workspace")
+
+    var persisted: WuhuSession?
+    for _ in 0 ..< 50 {
+      let current = try await harness.store.getSession(id: session.id)
+      if current.customTitle == "Breakfast Chat",
+         current.isArchived == true,
+         current.cwd == "/tmp/workspace"
+      {
+        persisted = current
+        break
+      }
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    let final = try #require(persisted)
+    #expect(final.customTitle == "Breakfast Chat")
+    #expect(final.isArchived == true)
+    #expect(final.cwd == "/tmp/workspace")
+  }
+
   // MARK: - Resume after restart
 
   @Test func resumeAfterRestart() async throws {

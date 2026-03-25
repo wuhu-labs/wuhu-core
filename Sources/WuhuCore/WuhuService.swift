@@ -144,15 +144,24 @@ public actor WuhuService {
   }
 
   public func renameSession(sessionID: String, title: String) async throws -> WuhuSession {
-    try await store.renameSession(id: sessionID, title: title)
+    _ = try await store.getSession(id: sessionID)
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    return try await runtime(for: sessionID).setCustomTitle(trimmed.isEmpty ? nil : trimmed)
   }
 
   public func archiveSession(sessionID: String) async throws -> WuhuSession {
-    try await store.archiveSession(id: sessionID)
+    _ = try await store.getSession(id: sessionID)
+    return try await runtime(for: sessionID).setArchived(true)
   }
 
   public func unarchiveSession(sessionID: String) async throws -> WuhuSession {
-    try await store.unarchiveSession(id: sessionID)
+    _ = try await store.getSession(id: sessionID)
+    return try await runtime(for: sessionID).setArchived(false)
+  }
+
+  func setSessionCwd(sessionID: String, cwd: String?) async throws -> WuhuSession {
+    _ = try await store.getSession(id: sessionID)
+    return try await runtime(for: sessionID).setCwd(cwd)
   }
 
   public func setSessionModel(sessionID: String, request: WuhuSetSessionModelRequest) async throws -> WuhuSetSessionModelResponse {

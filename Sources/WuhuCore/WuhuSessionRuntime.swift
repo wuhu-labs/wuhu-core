@@ -127,6 +127,27 @@ actor WuhuSessionRuntime {
     hasAcceptedInMemoryWork = true
   }
 
+  func setCustomTitle(_ title: String?) async throws -> WuhuSession {
+    await ensureStarted()
+    guard let loop else { throw CancellationError() }
+    await loop.send(.setCustomTitle(title))
+    return try await currentSession()
+  }
+
+  func setArchived(_ isArchived: Bool) async throws -> WuhuSession {
+    await ensureStarted()
+    guard let loop else { throw CancellationError() }
+    await loop.send(.setArchived(isArchived))
+    return try await currentSession()
+  }
+
+  func setCwd(_ cwd: String?) async throws -> WuhuSession {
+    await ensureStarted()
+    guard let loop else { throw CancellationError() }
+    await loop.send(.setCwd(cwd))
+    return try await currentSession()
+  }
+
   func setModelSelection(_ selection: WuhuSessionSettings) async throws -> Bool {
     await ensureStarted()
     guard let loop else { throw CancellationError() }
@@ -164,6 +185,16 @@ actor WuhuSessionRuntime {
     inflightText = ""
     observedState = .empty
     hasAcceptedInMemoryWork = false
+  }
+
+  private func currentSession() async throws -> WuhuSession {
+    if let loop {
+      return await loop.currentStateSnapshot().state.session
+    }
+    if observedState.session.id == sessionID.rawValue {
+      return observedState.session
+    }
+    throw CancellationError()
   }
 
   private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
