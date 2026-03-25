@@ -151,6 +151,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 
   static func new(
+    id: Int64? = nil,
     sessionID: String,
     parentEntryID: Int64?,
     payload: WuhuEntryPayload,
@@ -158,7 +159,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   ) throws -> EntryRow {
     let encoded = try WuhuJSON.encoder.encode(payload)
     return .init(
-      id: nil,
+      id: id,
       sessionID: sessionID,
       parentEntryID: parentEntryID,
       type: payload.typeString,

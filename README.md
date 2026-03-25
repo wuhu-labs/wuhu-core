@@ -38,12 +38,6 @@ swift build
 swift test
 ```
 
-Formatting:
-
-```bash
-swift package --allow-writing-to-package-directory swiftformat
-```
-
 ## Dependencies
 
 - [wuhu-ai](https://github.com/wuhu-labs/wuhu-ai) — PiAI unified LLM client

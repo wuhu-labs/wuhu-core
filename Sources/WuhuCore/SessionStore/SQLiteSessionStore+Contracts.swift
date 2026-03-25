@@ -106,17 +106,25 @@ extension SQLiteSessionStore {
     return try await loadSettingsSnapshot(sessionID: sessionID)
   }
 
-  func applyModelSelection(sessionID: SessionID, selection: WuhuSessionSettings) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot) {
+  func applyModelSelection(
+    sessionID: SessionID,
+    selection: WuhuSessionSettings,
+    entryID: Int64? = nil,
+  ) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot) {
     let (session, entry) = try await appendEntryWithSession(
       sessionID: sessionID,
       payload: .sessionSettings(selection),
       createdAt: Date(),
+      entryID: entryID,
     )
     let settings = try await loadSettingsSnapshot(sessionID: sessionID)
     return (session, entry, settings)
   }
 
-  func applyPendingModelIfPossible(sessionID: SessionID) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot)? {
+  func applyPendingModelIfPossible(
+    sessionID: SessionID,
+    entryID: Int64? = nil,
+  ) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot)? {
     let result: (WuhuSession, WuhuSessionEntry)? = try await dbQueue.write { db in
       guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
         throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
@@ -130,7 +138,13 @@ extension SQLiteSessionStore {
       let provider = WuhuProvider(rawValue: p) ?? .openai
       let selection = WuhuSessionSettings(provider: provider, model: m, reasoningEffort: row.pendingReasoningEffort.flatMap(ReasoningEffort.init(rawValue:)))
 
-      let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &row, payload: .sessionSettings(selection), createdAt: Date())
+      let entryRow = try Self.appendEntryWithSession(
+        db: db,
+        sessionRow: &row,
+        payload: .sessionSettings(selection),
+        createdAt: Date(),
+        entryID: entryID,
+      )
       return try (row.toModel(), entryRow.toModel())
     }
 
@@ -138,8 +152,14 @@ extension SQLiteSessionStore {
     return try await (result.0, result.1, loadSettingsSnapshot(sessionID: sessionID))
   }
 
-  func enqueueUserMessage(sessionID: SessionID, id: QueueItemID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
-    let now = Date()
+  func enqueueUserMessage(
+    sessionID: SessionID,
+    id: QueueItemID,
+    message: QueuedUserMessage,
+    lane: UserQueueLane,
+    enqueuedAt: Date? = nil,
+  ) async throws -> QueueItemID {
+    let now = enqueuedAt ?? Date()
     try await dbQueue.write { db in
       let data = try WuhuJSON.encoder.encode(message)
       try db.execute(
@@ -213,7 +233,7 @@ extension SQLiteSessionStore {
     return id
   }
 
-  func drainInterruptCheckpoint(sessionID: SessionID) async throws -> DrainResult {
+  func drainInterruptCheckpoint(sessionID: SessionID, reservedEntryIDs: [Int64]? = nil) async throws -> DrainResult {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
         throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
@@ -258,10 +278,12 @@ extension SQLiteSessionStore {
         )
       }
 
+      precondition(reservedEntryIDs == nil || reservedEntryIDs?.count == candidates.count)
+
       var appended: [WuhuSessionEntry] = []
       appended.reserveCapacity(candidates.count)
 
-      for c in candidates {
+      for (index, c) in candidates.enumerated() {
         let entryPayload: WuhuEntryPayload
         let createdAt = c.enqueuedAt
 
@@ -297,7 +319,13 @@ extension SQLiteSessionStore {
           )
         }
 
-        let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &sessionRow, payload: entryPayload, createdAt: createdAt)
+        let entryRow = try Self.appendEntryWithSession(
+          db: db,
+          sessionRow: &sessionRow,
+          payload: entryPayload,
+          createdAt: createdAt,
+          entryID: reservedEntryIDs?[index],
+        )
         appended.append(entryRow.toModel())
 
         let transcriptEntryID = TranscriptEntryID(rawValue: "\(entryRow.id ?? -1)")
@@ -341,7 +369,7 @@ extension SQLiteSessionStore {
     }
   }
 
-  func drainTurnBoundary(sessionID: SessionID) async throws -> DrainResult {
+  func drainTurnBoundary(sessionID: SessionID, reservedEntryIDs: [Int64]? = nil) async throws -> DrainResult {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
         throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
@@ -364,10 +392,12 @@ extension SQLiteSessionStore {
         )
       }
 
+      precondition(reservedEntryIDs == nil || reservedEntryIDs?.count == followRows.count)
+
       var appended: [WuhuSessionEntry] = []
       appended.reserveCapacity(followRows.count)
 
-      for r in followRows {
+      for (index, r) in followRows.enumerated() {
         let message = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: r.payload)
 
         let user = WuhuUserMessage(
@@ -377,7 +407,13 @@ extension SQLiteSessionStore {
         )
 
         let entryPayload: WuhuEntryPayload = .message(.user(user))
-        let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &sessionRow, payload: entryPayload, createdAt: r.enqueuedAt)
+        let entryRow = try Self.appendEntryWithSession(
+          db: db,
+          sessionRow: &sessionRow,
+          payload: entryPayload,
+          createdAt: r.enqueuedAt,
+          entryID: reservedEntryIDs?[index],
+        )
         appended.append(entryRow.toModel())
 
         try db.execute(
@@ -499,12 +535,23 @@ extension SQLiteSessionStore {
     return .init(id: id, status: status)
   }
 
-  func appendEntryWithSession(sessionID: SessionID, payload: WuhuEntryPayload, createdAt: Date) async throws -> (WuhuSession, WuhuSessionEntry) {
+  func appendEntryWithSession(
+    sessionID: SessionID,
+    payload: WuhuEntryPayload,
+    createdAt: Date,
+    entryID: Int64? = nil,
+  ) async throws -> (WuhuSession, WuhuSessionEntry) {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
         throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
       }
-      let entryRow = try Self.appendEntryWithSession(db: db, sessionRow: &sessionRow, payload: payload, createdAt: createdAt)
+      let entryRow = try Self.appendEntryWithSession(
+        db: db,
+        sessionRow: &sessionRow,
+        payload: payload,
+        createdAt: createdAt,
+        entryID: entryID,
+      )
       return try (sessionRow.toModel(), entryRow.toModel())
     }
   }
@@ -708,10 +755,17 @@ extension SQLiteSessionStore {
     return (cursor: .init(rawValue: "\(effectiveMax)"), entries: entries)
   }
 
-  private static func appendEntryWithSession(db: Database, sessionRow: inout SessionRow, payload: WuhuEntryPayload, createdAt: Date) throws -> EntryRow {
+  private static func appendEntryWithSession(
+    db: Database,
+    sessionRow: inout SessionRow,
+    payload: WuhuEntryPayload,
+    createdAt: Date,
+    entryID: Int64? = nil,
+  ) throws -> EntryRow {
     let tailID = sessionRow.tailEntryID
 
     var row = try EntryRow.new(
+      id: entryID,
       sessionID: sessionRow.id,
       parentEntryID: tailID,
       payload: payload,

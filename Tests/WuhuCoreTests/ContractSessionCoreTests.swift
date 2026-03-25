@@ -42,34 +42,18 @@ struct ContractSessionCoreTests {
   private func applyAndAssertInvariant(
     _ behavior: WuhuSessionBehavior,
     _ state: WuhuSessionLoopState,
-    _ fn: @Sendable (WuhuSessionLoopState) async throws -> [WuhuSessionCommittedAction],
+    _ fn: (inout WuhuSessionLoopState) async throws -> Void,
   ) async throws -> WuhuSessionLoopState {
     var next = state
-    let actions = try await fn(state)
-    for action in actions {
-      behavior.apply(action, to: &next)
+    try await fn(&next)
+    let durable = if let diff = behavior.diff(from: state, to: next) {
+      try await behavior.persist(diff, from: state, to: next)
+    } else {
+      next
     }
     let reloaded = try await behavior.loadState()
-    if next != reloaded {
-      #expect(next.entries.map(\.id) == reloaded.entries.map(\.id))
-      if next.entries.count == reloaded.entries.count {
-        for (a, b) in zip(next.entries, reloaded.entries) where a != b {
-          #expect(a.id == b.id)
-          #expect(a.parentEntryID == b.parentEntryID)
-          #expect(a.createdAt == b.createdAt)
-          #expect(a.payload == b.payload)
-          break
-        }
-      }
-      #expect(next.toolCallStatus == reloaded.toolCallStatus)
-      #expect(next.settings == reloaded.settings)
-      #expect(next.status == reloaded.status)
-      #expect(next.systemUrgent == reloaded.systemUrgent)
-      #expect(next.steer == reloaded.steer)
-      #expect(next.followUp == reloaded.followUp)
-    }
-    #expect(next == reloaded)
-    return next
+    #expect(durable == reloaded)
+    return reloaded
   }
 
   @Test func ioInvariant_handleEnqueueAndDrainAndPersistAssistant() async throws {
@@ -83,12 +67,12 @@ struct ContractSessionCoreTests {
     let qid = QueueItemID(rawValue: "q1")
     let message = QueuedUserMessage(author: Author.unknown, content: MessageContent.text("hello"))
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.handle(WuhuSessionExternalAction.enqueueUser(id: qid, message: message, lane: .followUp), state: state)
+      try behavior.handle(WuhuSessionExternalAction.enqueueUser(id: qid, message: message, lane: .followUp), state: &state)
     }
 
     // Materialize follow-up at turn boundary
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainTurnItems(state: state)
+      behavior.drainTurnItems(state: &state)
     }
     #expect(state.entries.contains { entry in
       guard case let .message(m) = entry.payload else { return false }
@@ -99,7 +83,7 @@ struct ContractSessionCoreTests {
     // Persist assistant response (no tool calls) should bring status back to idle.
     let assistant = AssistantMessage(provider: .openai, model: "mock", content: [.text("ok")], stopReason: .stop)
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.persistAssistantEntry(assistant, state: state)
+      behavior.persistAssistantEntry(assistant, state: &state)
     }
     #expect(state.status.status == .idle)
   }
@@ -121,23 +105,23 @@ struct ContractSessionCoreTests {
     let qid = QueueItemID(rawValue: "q2")
     state = try await applyAndAssertInvariant(behavior, state) { state in
       let message = QueuedUserMessage(author: Author.unknown, content: MessageContent.text("run tool"))
-      return try await behavior.handle(WuhuSessionExternalAction.enqueueUser(id: qid, message: message, lane: .followUp), state: state)
+      try behavior.handle(WuhuSessionExternalAction.enqueueUser(id: qid, message: message, lane: .followUp), state: &state)
     }
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainTurnItems(state: state)
+      behavior.drainTurnItems(state: &state)
     }
 
     // Persist assistant with tool call.
     let call = ToolCall(id: "t1", name: "echo", arguments: .object([:]))
     let assistantWithTool = AssistantMessage(provider: .openai, model: "mock", content: [.toolCall(call)], stopReason: .toolUse)
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.persistAssistantEntry(assistantWithTool, state: state)
+      behavior.persistAssistantEntry(assistantWithTool, state: &state)
     }
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.pending)
 
     // Mark started.
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.toolWillExecute(call, state: state)
+      behavior.toolWillExecute(call, state: &state)
     }
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.started)
 
@@ -146,7 +130,7 @@ struct ContractSessionCoreTests {
     #expect(stale == ["t1"])
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.recoverStaleToolCall(id: "t1", state: state)
+      behavior.recoverStaleToolCall(id: "t1", state: &state)
     }
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.errored)
     #expect(state.entries.contains { entry in
@@ -173,15 +157,15 @@ struct ContractSessionCoreTests {
 
     // Steer input enqueued later via behavior handle.
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.handle(WuhuSessionExternalAction.enqueueUser(
+      try behavior.handle(WuhuSessionExternalAction.enqueueUser(
         id: .init(rawValue: "steer1"),
         message: QueuedUserMessage(author: Author.unknown, content: MessageContent.text("{\"type\":\"steer\"}")),
         lane: .steer,
-      ), state: state)
+      ), state: &state)
     }
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainInterruptItems(state: state)
+      behavior.drainInterruptItems(state: &state)
     }
 
     let appended = state.entries.filter { $0.parentEntryID != nil }
@@ -229,7 +213,7 @@ struct ContractSessionCoreTests {
     state = try await behavior.loadState()
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.performCompaction(state: state)
+      state = try await behavior.performCompaction(state: state)
     }
 
     #expect(state.entries.contains { entry in
@@ -254,15 +238,15 @@ struct ContractSessionCoreTests {
     ])
     let message = QueuedUserMessage(author: Author.unknown, content: richContent)
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.handle(
+      try behavior.handle(
         WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-rich-1"), message: message, lane: .followUp),
-        state: state,
+        state: &state,
       )
     }
 
     // Materialize at turn boundary
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainTurnItems(state: state)
+      behavior.drainTurnItems(state: &state)
     }
 
     // Verify the materialized entry preserves both text and image
@@ -293,14 +277,14 @@ struct ContractSessionCoreTests {
     ])
     let message = QueuedUserMessage(author: Author.unknown, content: richContent)
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.handle(
+      try behavior.handle(
         WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-img-only"), message: message, lane: .followUp),
-        state: state,
+        state: &state,
       )
     }
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainTurnItems(state: state)
+      behavior.drainTurnItems(state: &state)
     }
 
     let userMsg = try #require(state.entries.compactMap { entry -> WuhuUserMessage? in
@@ -325,14 +309,14 @@ struct ContractSessionCoreTests {
     ])
     let message = QueuedUserMessage(author: Author.unknown, content: richContent)
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.handle(
+      try behavior.handle(
         WuhuSessionExternalAction.enqueueUser(id: .init(rawValue: "q-steer-rich"), message: message, lane: .steer),
-        state: state,
+        state: &state,
       )
     }
 
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      try await behavior.drainInterruptItems(state: state)
+      behavior.drainInterruptItems(state: &state)
     }
 
     let userMsg = try #require(state.entries.compactMap { entry -> WuhuUserMessage? in
