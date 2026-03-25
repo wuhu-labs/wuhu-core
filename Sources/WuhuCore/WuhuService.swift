@@ -144,29 +144,23 @@ public actor WuhuService {
   }
 
   public func renameSession(sessionID: String, title: String) async throws -> WuhuSession {
-    _ = try await store.getSession(id: sessionID)
     let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
     return try await runtime(for: sessionID).setCustomTitle(trimmed.isEmpty ? nil : trimmed)
   }
 
   public func archiveSession(sessionID: String) async throws -> WuhuSession {
-    _ = try await store.getSession(id: sessionID)
-    return try await runtime(for: sessionID).setArchived(true)
+    try await runtime(for: sessionID).setArchived(true)
   }
 
   public func unarchiveSession(sessionID: String) async throws -> WuhuSession {
-    _ = try await store.getSession(id: sessionID)
-    return try await runtime(for: sessionID).setArchived(false)
+    try await runtime(for: sessionID).setArchived(false)
   }
 
   func setSessionCwd(sessionID: String, cwd: String?) async throws -> WuhuSession {
-    _ = try await store.getSession(id: sessionID)
-    return try await runtime(for: sessionID).setCwd(cwd)
+    try await runtime(for: sessionID).setCwd(cwd)
   }
 
   public func setSessionModel(sessionID: String, request: WuhuSetSessionModelRequest) async throws -> WuhuSetSessionModelResponse {
-    _ = try await store.getSession(id: sessionID)
-
     let effectiveModel: String = {
       let trimmed = (request.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       if !trimmed.isEmpty { return trimmed }
@@ -724,24 +718,21 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
 
     let runtime = runtime(for: sessionID.rawValue)
     await runtime.setTools(resolvedTools)
-    await runtime.ensureStarted()
+    try await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }
 
   public func cancel(sessionID: SessionID, id: QueueItemID, lane: UserQueueLane) async throws {
-    _ = try await store.getSession(id: sessionID.rawValue)
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.ensureStarted()
+    try await runtime.ensureStarted()
     try await runtime.cancel(id: id, lane: lane)
   }
 
   public func subscribe(sessionID: SessionID, since request: SessionSubscriptionRequest) async throws -> SessionSubscription {
-    _ = try await store.getSession(id: sessionID.rawValue)
-
     let live = await subscriptionHub.subscribe(sessionID: sessionID.rawValue)
 
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.ensureStarted()
+    try await runtime.ensureStarted()
 
     var initial = try await loadInitialState(sessionID: sessionID, request: request)
 

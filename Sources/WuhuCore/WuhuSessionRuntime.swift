@@ -39,47 +39,35 @@ actor WuhuSessionRuntime {
     behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore, streamFn: streamFn)
   }
 
-  func ensureStarted() async {
+  func ensureStarted() async throws {
     if startTask != nil, loop != nil { return }
 
-    while !Task.isCancelled {
-      do {
-        let initialState = try await behavior.loadState()
-        let loop = AgentLoop(behavior: behavior, initialState: initialState)
-        self.loop = loop
+    let initialState = try await behavior.loadState()
+    let loop = AgentLoop(behavior: behavior, initialState: initialState)
+    self.loop = loop
 
-        let observation = await loop.observe()
-        await setInitialObservationState(observation)
+    let observation = await loop.observe()
+    await setInitialObservationState(observation)
 
-        observeTask = Task { [weak self] in
-          guard let self else { return }
-          for await event in observation.events {
-            await handleLoopEvent(event)
-          }
+    observeTask = Task { [weak self] in
+      guard let self else { return }
+      for await event in observation.events {
+        await handleLoopEvent(event)
+      }
+    }
+
+    startTask = Task { [loop, sessionID = sessionID.rawValue] in
+      while !Task.isCancelled {
+        do {
+          try await loop.start()
+          return
+        } catch is CancellationError {
+          return
+        } catch {
+          let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n"
+          FileHandle.standardError.write(Data(line.utf8))
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
-
-        startTask = Task { [loop, sessionID = sessionID.rawValue] in
-          while !Task.isCancelled {
-            do {
-              try await loop.start()
-              return
-            } catch is CancellationError {
-              return
-            } catch {
-              let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n"
-              FileHandle.standardError.write(Data(line.utf8))
-              try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-          }
-        }
-
-        return
-      } catch is CancellationError {
-        return
-      } catch {
-        let line = "[WuhuSessionRuntime] startup failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
-        FileHandle.standardError.write(Data(line.utf8))
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
       }
     }
   }
@@ -104,7 +92,7 @@ actor WuhuSessionRuntime {
   }
 
   func enqueue(message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
-    await ensureStarted()
+    try await ensureStarted()
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
     await loop.send(.enqueueUser(id: id, message: message, lane: lane))
@@ -113,14 +101,14 @@ actor WuhuSessionRuntime {
   }
 
   func cancel(id: QueueItemID, lane: UserQueueLane) async throws {
-    await ensureStarted()
+    try await ensureStarted()
     guard let loop else { throw CancellationError() }
     await loop.send(.cancelUser(id: id, lane: lane))
     hasAcceptedInMemoryWork = true
   }
 
   func enqueueSystem(input: SystemUrgentInput, enqueuedAt: Date = Date()) async throws {
-    await ensureStarted()
+    try await ensureStarted()
     let id = QueueItemID(rawValue: UUID().uuidString.lowercased())
     guard let loop else { throw CancellationError() }
     await loop.send(.enqueueSystem(id: id, input: input, enqueuedAt: enqueuedAt))
@@ -128,28 +116,28 @@ actor WuhuSessionRuntime {
   }
 
   func setCustomTitle(_ title: String?) async throws -> WuhuSession {
-    await ensureStarted()
+    try await ensureStarted()
     guard let loop else { throw CancellationError() }
     await loop.send(.setCustomTitle(title))
     return try await currentSession()
   }
 
   func setArchived(_ isArchived: Bool) async throws -> WuhuSession {
-    await ensureStarted()
+    try await ensureStarted()
     guard let loop else { throw CancellationError() }
     await loop.send(.setArchived(isArchived))
     return try await currentSession()
   }
 
   func setCwd(_ cwd: String?) async throws -> WuhuSession {
-    await ensureStarted()
+    try await ensureStarted()
     guard let loop else { throw CancellationError() }
     await loop.send(.setCwd(cwd))
     return try await currentSession()
   }
 
   func setModelSelection(_ selection: WuhuSessionSettings) async throws -> Bool {
-    await ensureStarted()
+    try await ensureStarted()
     guard let loop else { throw CancellationError() }
 
     if !streaming, !behavior.hasWork(state: observedState) {
@@ -162,7 +150,7 @@ actor WuhuSessionRuntime {
   }
 
   func applyPendingModelIfPossible() async throws {
-    await ensureStarted()
+    try await ensureStarted()
     if streaming || behavior.hasWork(state: observedState) { return }
     guard let loop else { throw CancellationError() }
     await loop.send(.applyPendingModelIfPossible)
