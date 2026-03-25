@@ -393,7 +393,7 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  private static func linearize(
+  static func linearize(
     entries: [WuhuSessionEntry],
     sessionID: String,
     headEntryID: Int64,
