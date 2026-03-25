@@ -34,39 +34,6 @@ struct MountTemplateRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 }
 
-struct MountRow: Codable, FetchableRecord, MutablePersistableRecord {
-  static let databaseTableName = "mounts"
-
-  var id: String
-  var sessionID: String
-  var name: String
-  var path: String
-  var mountTemplateID: String?
-  var isPrimary: Bool
-  var runnerID: String
-  var createdAt: Date
-
-  func toModel() -> WuhuMount {
-    let runner: RunnerID = if runnerID == "local" {
-      .local
-    } else if runnerID.hasPrefix("remote:") {
-      .remote(name: String(runnerID.dropFirst("remote:".count)))
-    } else {
-      .local
-    }
-    return .init(
-      id: id,
-      sessionID: sessionID,
-      name: name,
-      path: path,
-      mountTemplateID: mountTemplateID,
-      isPrimary: isPrimary,
-      runnerID: runner,
-      createdAt: createdAt,
-    )
-  }
-}
-
 struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "sessions"
 

@@ -57,39 +57,7 @@ struct MigrationTests {
     )
     #expect(chatSession.cwd == nil)
 
-    // Mounts CRUD
-    let mount = try await store.createMount(
-      sessionID: session.id,
-      name: "primary",
-      path: "/workspace",
-      mountTemplateID: mt.id,
-      isPrimary: true,
-    )
-    #expect(mount.sessionID == session.id)
-    #expect(mount.name == "primary")
-    #expect(mount.path == "/workspace")
-    #expect(mount.mountTemplateID == mt.id)
-    #expect(mount.isPrimary == true)
-
-    let mounts = try await store.listMounts(sessionID: session.id)
-    #expect(mounts.count == 1)
-    #expect(mounts.first?.id == mount.id)
-
-    let primary = try await store.getPrimaryMount(sessionID: session.id)
-    #expect(primary?.id == mount.id)
-
-    // Secondary mount
-    let secondary = try await store.createMount(
-      sessionID: session.id,
-      name: "secondary",
-      path: "/extra",
-      isPrimary: false,
-    )
-    #expect(secondary.isPrimary == false)
-    #expect(secondary.mountTemplateID == nil)
-
-    let allMounts = try await store.listMounts(sessionID: session.id)
-    #expect(allMounts.count == 2)
+    #expect(mt.id.isEmpty == false)
   }
 
   @Test func sessionCwdCanBeUpdated() async throws {
@@ -196,14 +164,7 @@ struct MigrationTests {
     ))
     #expect(mt.name == "new-template")
 
-    let mount = try await store.createMount(
-      sessionID: "sess-001",
-      name: "primary",
-      path: "/Users/test/project",
-      mountTemplateID: mt.id,
-      isPrimary: true,
-    )
-    #expect(mount.sessionID == "sess-001")
+    #expect(mt.id.isEmpty == false)
 
     // Verify new sessions can still be created
     let newSession = try await store.createSession(

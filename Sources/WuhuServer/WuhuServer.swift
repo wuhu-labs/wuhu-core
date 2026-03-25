@@ -441,7 +441,6 @@ public struct WuhuServer: Sendable {
         throw HTTPError(.badRequest, message: err.description)
       }
 
-      // Create mount record if we have a cwd
       if let cwd {
         let mountName: String
         let mountTemplateID: String?
@@ -456,14 +455,15 @@ public struct WuhuServer: Sendable {
           mountTemplateID = nil
         }
 
-        let mount = try await store.createMount(
+        mountToEmit = WuhuMount(
+          id: UUID().uuidString.lowercased(),
           sessionID: sessionID,
           name: mountName,
           path: cwd,
           mountTemplateID: mountTemplateID,
           isPrimary: true,
+          createdAt: Date(),
         )
-        mountToEmit = mount
       }
 
       // Emit mount-level context entries
@@ -473,12 +473,6 @@ public struct WuhuServer: Sendable {
 
       let finalSession = try await service.getSession(id: sessionID)
       return try context.responseEncoder.encode(finalSession, from: request, context: context)
-    }
-
-    router.get("v1/sessions/:id/mounts") { request, context async throws -> Response in
-      let id = try context.parameters.require("id")
-      let mounts = try await store.listMounts(sessionID: id)
-      return try context.responseEncoder.encode(mounts, from: request, context: context)
     }
 
     router.patch("v1/sessions/:id") { request, context async throws -> Response in
