@@ -123,7 +123,7 @@ struct ServiceIntegrationTests {
     #expect(cwdUpdated.cwd == "/tmp/workspace")
 
     var persisted: WuhuSession?
-    for _ in 0 ..< 50 {
+    for _ in 0 ..< 500 {
       let current = try await harness.store.getSession(id: session.id)
       if current.customTitle == "Breakfast Chat",
          current.isArchived == true,

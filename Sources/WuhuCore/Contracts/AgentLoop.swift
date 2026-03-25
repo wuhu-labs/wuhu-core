@@ -17,7 +17,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private(set) var state: B.State {
     didSet {
       guard state != oldValue else { return }
-      flushSignal?.yield(())
+      flushSignal.yield(())
     }
   }
 
@@ -27,8 +27,10 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: Lifecycle
 
   private var started = false
-  private var workSignal: AsyncStream<Void>.Continuation?
-  private var flushSignal: AsyncStream<Void>.Continuation?
+  private let workStream: AsyncStream<Void>
+  private let workSignal: AsyncStream<Void>.Continuation
+  private let flushStream: AsyncStream<Void>
+  private let flushSignal: AsyncStream<Void>.Continuation
 
   // MARK: Observation
 
@@ -41,6 +43,16 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: Init
 
   public init(behavior: B, initialState: B.State) {
+    let (workStream, workSignal) = AsyncStream<Void>.makeStream(
+      bufferingPolicy: .bufferingNewest(1),
+    )
+    let (flushStream, flushSignal) = AsyncStream<Void>.makeStream(
+      bufferingPolicy: .bufferingNewest(1),
+    )
+    self.workStream = workStream
+    self.workSignal = workSignal
+    self.flushStream = flushStream
+    self.flushSignal = flushSignal
     self.behavior = behavior
     state = initialState
     publishedState = initialState
@@ -80,7 +92,7 @@ public actor AgentLoop<B: AgentBehavior> {
     let oldState = state
     behavior.handle(action, state: &state)
     guard state != oldState else { return }
-    workSignal?.yield(())
+    workSignal.yield(())
   }
 
   // MARK: - Lifecycle
@@ -93,23 +105,10 @@ public actor AgentLoop<B: AgentBehavior> {
     started = true
     defer {
       started = false
-      workSignal?.finish()
-      flushSignal?.finish()
-      workSignal = nil
-      flushSignal = nil
     }
 
-    let (workStream, workContinuation) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-    let (flushStream, flushContinuation) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-    workSignal = workContinuation
-    flushSignal = flushContinuation
-
     if behavior.hasWork(state: state) || behavior.needsInference(state: state) {
-      workSignal?.yield(())
+      workSignal.yield(())
     }
 
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -132,8 +131,6 @@ public actor AgentLoop<B: AgentBehavior> {
       do {
         while try await group.next() != nil {}
       } catch {
-        workContinuation.finish()
-        flushContinuation.finish()
         group.cancelAll()
         while let _ = try? await group.next() {}
         publishedState = try await behavior.loadState()
@@ -197,7 +194,7 @@ public actor AgentLoop<B: AgentBehavior> {
         if state == baseState {
           state = compactedState
         } else if behavior.shouldCompact(state: state) {
-          workSignal?.yield(())
+          workSignal.yield(())
         }
       }
     }
