@@ -326,7 +326,7 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
     let session = try await store.getSession(id: sessionID.rawValue)
-    let tools = await runtimeConfig.tools()
+    let tools = await runtimeConfig.tools(for: stateForToolCatalog(session: session))
 
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let provider = session.provider.piProvider
@@ -383,8 +383,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     state.status = .init(status: .running)
   }
 
-  func executeToolCall(_ call: ToolCall) async throws -> ToolResult {
-    let tools = await runtimeConfig.tools()
+  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult {
+    let tools = await runtimeConfig.tools(for: state)
     guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
       throw WuhuAIError.unsupported("Unknown tool: \(call.name)")
     }
@@ -1074,6 +1074,25 @@ struct WuhuSessionBehavior: AgentBehavior {
     case .mountContext, .agentsContext, .skillsContext, .llmRetry, .llmGiveUp:
       break
     }
+  }
+
+  private func stateForToolCatalog(session: WuhuSession) -> State {
+    .init(
+      session: session,
+      mounts: .init(),
+      toolCallStatus: [:],
+      entries: [],
+      settings: .init(
+        effectiveModel: .init(
+          provider: ProviderID(rawValue: session.provider.rawValue),
+          id: session.model,
+        ),
+      ),
+      status: .init(status: .idle),
+      systemUrgent: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+      steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+      followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+    )
   }
 }
 

@@ -687,24 +687,29 @@ enum WuhuContextRenderer {
 extension WuhuService: SessionCommanding, SessionSubscribing {
   public func enqueue(sessionID: SessionID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
     await ensureAsyncBashRouter()
-    let session = try await store.getSession(id: sessionID.rawValue)
-
     let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
     let runtime = runtime(for: sid)
-    let mountResolver: MountResolver = { [weak runtime] mountName in
-      guard let runtime else { throw CancellationError() }
-      return try await runtime.resolveMount(named: mountName)
-    }
-    let baseTools = WuhuTools.codingAgentTools(
-      cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
-      mountResolver: mountResolver,
-      asyncBash: asyncBash,
-      braveSearchAPIKey: braveSearchAPIKey,
-    )
-    let resolvedTools = agentToolset(session: session, baseTools: baseTools)
+    await runtime.setToolProvider { [weak self] state in
+      guard let self else { return [] }
 
-    await runtime.setTools(resolvedTools)
+      let mountResolver: MountResolver = { [runnerRegistry = self.runnerRegistry] mountName in
+        try await Self.resolveMount(named: mountName, in: state, runnerRegistry: runnerRegistry)
+      }
+
+      let baseTools = WuhuTools.codingAgentTools(
+        cwdProvider: { state.session.cwd },
+        mountResolver: mountResolver,
+        asyncBash: asyncBash,
+        braveSearchAPIKey: braveSearchAPIKey,
+      )
+
+      return await agentToolset(
+        currentSessionID: state.session.id,
+        hasPrimaryMount: state.mounts.primaryMount != nil,
+        baseTools: baseTools,
+      )
+    }
     try await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }
@@ -817,5 +822,40 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       steer: steer,
       followUp: followUp,
     )
+  }
+}
+
+private extension WuhuService {
+  static func resolveMount(
+    named rawName: String?,
+    in state: WuhuSessionLoopState,
+    runnerRegistry: RunnerRegistry,
+  ) async throws -> ResolvedMount {
+    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let mountName, !mountName.isEmpty {
+      guard let mount = state.mounts.mount(named: mountName) else {
+        throw MountResolutionError.mountNotFound(name: mountName)
+      }
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    if let mount = state.mounts.primaryMount {
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    guard let cwd = state.session.cwd else {
+      throw MountResolutionError.noCwd
+    }
+    guard let runner = await runnerRegistry.get(.local) else {
+      throw MountResolutionError.runnerUnavailable(runnerID: .local)
+    }
+    return ResolvedMount(runner: runner, cwd: cwd)
   }
 }

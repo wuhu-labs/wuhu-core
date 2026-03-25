@@ -146,7 +146,7 @@ private struct FailureCleanupBehavior: AgentBehavior {
     state _: inout FailureCleanupState,
   ) {}
 
-  func executeToolCall(_: ToolCall) async throws -> String {
+  func executeToolCall(_: ToolCall, state _: FailureCleanupState) async throws -> String {
     ""
   }
 

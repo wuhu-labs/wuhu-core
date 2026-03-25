@@ -33,7 +33,7 @@ public protocol AgentBehavior: Sendable {
   associatedtype ExternalAction: Sendable
 
   /// The result of executing a tool. Opaque to the loop — it just
-  /// passes the value from ``executeToolCall(_:)`` to
+  /// passes the value from ``executeToolCall(_:state:)`` to
   /// ``toolDidExecute(_:result:state:)``.
   ///
   /// `Hashable` is required so the loop can detect consecutive
@@ -104,7 +104,7 @@ public protocol AgentBehavior: Sendable {
   )
 
   /// Execute a tool call. Runs outside the serialized path (parallel).
-  func executeToolCall(_ call: ToolCall) async throws -> ToolResult
+  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult
 
   /// Append supplementary text to a tool result.
   ///

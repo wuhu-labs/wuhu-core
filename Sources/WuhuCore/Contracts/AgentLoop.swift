@@ -324,7 +324,7 @@ public actor AgentLoop<B: AgentBehavior> {
     for call in allowed {
       let result: Result<B.ToolResult, any Error>
       do {
-        let toolResult = try await behavior.executeToolCall(call)
+        let toolResult = try await behavior.executeToolCall(call, state: state)
         result = .success(toolResult)
       } catch {
         result = .failure(error)

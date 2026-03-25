@@ -33,7 +33,7 @@ struct ContractSessionCoreTests {
     tools: [AnyAgentTool] = [],
   ) async -> (behavior: WuhuSessionBehavior, config: WuhuSessionRuntimeConfig) {
     let config = WuhuSessionRuntimeConfig()
-    await config.setTools(tools)
+    await config.setToolProvider { _ in tools }
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let behavior = WuhuSessionBehavior(sessionID: .init(rawValue: sessionID), store: store, runtimeConfig: config, blobStore: blobStore, streamFn: streamFn)
     return (behavior, config)

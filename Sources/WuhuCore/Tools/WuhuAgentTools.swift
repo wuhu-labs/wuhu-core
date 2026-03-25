@@ -21,15 +21,16 @@ enum WuhuAgentToolNames {
 
 extension WuhuService {
   func agentToolset(
-    session: WuhuSession,
+    currentSessionID: String,
+    hasPrimaryMount: Bool,
     baseTools: [AnyAgentTool],
   ) -> [AnyAgentTool] {
     var tools = baseTools
-    tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
+    tools.append(contentsOf: agentManagementTools(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount))
     return tools
   }
 
-  private func agentManagementTools(currentSessionID: String) -> [AnyAgentTool] {
+  private func agentManagementTools(currentSessionID: String, hasPrimaryMount: Bool) -> [AnyAgentTool] {
     [
       createSessionTool(currentSessionID: currentSessionID),
       listChildSessionsTool(currentSessionID: currentSessionID),
@@ -39,7 +40,7 @@ extension WuhuService {
       sessionFollowUpTool(),
       mountTemplateListTool(),
       mountTemplateGetTool(),
-      mountTool(currentSessionID: currentSessionID),
+      mountTool(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount),
       listRunnersTool(),
     ]
   }
@@ -455,7 +456,7 @@ extension WuhuService {
     }
   }
 
-  private func mountTool(currentSessionID: String) -> AnyAgentTool {
+  private func mountTool(currentSessionID: String, hasPrimaryMount: Bool) -> AnyAgentTool {
     struct Params: Sendable {
       var path: String?
       var name: String?
@@ -496,7 +497,6 @@ extension WuhuService {
     return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mount) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
-      let runtime = await runtime(for: currentSessionID)
       let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawRunner = (params.runner ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -551,12 +551,10 @@ extension WuhuService {
       }
 
       // Determine primary: explicit > first-mount-is-primary
-      let isPrimary: Bool
-      if let explicit = params.primary {
-        isPrimary = explicit
+      let isPrimary: Bool = if let explicit = params.primary {
+        explicit
       } else {
-        let hasPrimaryMount = try await runtime.hasPrimaryMount()
-        isPrimary = !hasPrimaryMount
+        !hasPrimaryMount
       }
 
       let mount = WuhuMount(

@@ -75,54 +75,8 @@ actor WuhuSessionRuntime {
     }
   }
 
-  func setTools(_ tools: [AnyAgentTool]) async {
-    await runtimeConfig.setTools(tools)
-  }
-
-  func resolveMount(named rawName: String?) async throws -> ResolvedMount {
-    try await ensureStarted()
-
-    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let snapshot = if let loop {
-      await loop.currentStateSnapshot().state
-    } else {
-      observedState
-    }
-
-    if let mountName, !mountName.isEmpty {
-      guard let mount = snapshot.mounts.mount(named: mountName) else {
-        throw MountResolutionError.mountNotFound(name: mountName)
-      }
-      guard let runner = await runnerRegistry.get(mount.runnerID) else {
-        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-      }
-      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-    }
-
-    if let mount = snapshot.mounts.primaryMount {
-      guard let runner = await runnerRegistry.get(mount.runnerID) else {
-        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-      }
-      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-    }
-
-    guard let cwd = snapshot.session.cwd else {
-      throw MountResolutionError.noCwd
-    }
-    guard let runner = await runnerRegistry.get(.local) else {
-      throw MountResolutionError.runnerUnavailable(runnerID: .local)
-    }
-    return ResolvedMount(runner: runner, cwd: cwd)
-  }
-
-  func hasPrimaryMount() async throws -> Bool {
-    try await ensureStarted()
-    let snapshot = if let loop {
-      await loop.currentStateSnapshot().state
-    } else {
-      observedState
-    }
-    return snapshot.mounts.primaryMount != nil
+  func setToolProvider(_ provider: @escaping WuhuSessionToolProvider) async {
+    await runtimeConfig.setToolProvider(provider)
   }
 
   func isIdle() -> Bool {
