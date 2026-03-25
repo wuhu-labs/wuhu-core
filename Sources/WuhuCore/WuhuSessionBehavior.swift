@@ -319,13 +319,9 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func buildContext(state: State) -> Context {
     let header = (try? WuhuPromptPreparation.extractHeader(from: state.entries, sessionID: sessionID.rawValue))
-    var systemPrompt = header?.systemPrompt ?? ""
-    if let cwd = state.session.cwd {
-      systemPrompt += "\n\nWorking directory: \(cwd)\nAll relative paths are resolved from this directory."
-    }
     let messages = WuhuPromptPreparation.extractContextMessages(from: state.entries)
     let hydrated = hydrateImageBlobs(in: messages)
-    return Context(systemPrompt: systemPrompt, messages: hydrated, tools: [])
+    return Context(systemPrompt: header?.systemPrompt ?? "", messages: hydrated, tools: [])
   }
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
