@@ -5,6 +5,7 @@ import WuhuAPI
 actor WuhuSessionRuntime {
   private let sessionID: SessionID
   private let store: SQLiteSessionStore
+  private let runnerRegistry: RunnerRegistry
   private let eventHub: WuhuLiveEventHub
   private let subscriptionHub: WuhuSessionSubscriptionHub
   private let runtimeConfig: WuhuSessionRuntimeConfig
@@ -24,6 +25,7 @@ actor WuhuSessionRuntime {
   init(
     sessionID: SessionID,
     store: SQLiteSessionStore,
+    runnerRegistry: RunnerRegistry,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
@@ -32,6 +34,7 @@ actor WuhuSessionRuntime {
   ) {
     self.sessionID = sessionID
     self.store = store
+    self.runnerRegistry = runnerRegistry
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
@@ -74,6 +77,52 @@ actor WuhuSessionRuntime {
 
   func setTools(_ tools: [AnyAgentTool]) async {
     await runtimeConfig.setTools(tools)
+  }
+
+  func resolveMount(named rawName: String?) async throws -> ResolvedMount {
+    try await ensureStarted()
+
+    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let snapshot = if let loop {
+      await loop.currentStateSnapshot().state
+    } else {
+      observedState
+    }
+
+    if let mountName, !mountName.isEmpty {
+      guard let mount = snapshot.mounts.mount(named: mountName) else {
+        throw MountResolutionError.mountNotFound(name: mountName)
+      }
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    if let mount = snapshot.mounts.primaryMount {
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    guard let cwd = snapshot.session.cwd else {
+      throw MountResolutionError.noCwd
+    }
+    guard let runner = await runnerRegistry.get(.local) else {
+      throw MountResolutionError.runnerUnavailable(runnerID: .local)
+    }
+    return ResolvedMount(runner: runner, cwd: cwd)
+  }
+
+  func hasPrimaryMount() async throws -> Bool {
+    try await ensureStarted()
+    let snapshot = if let loop {
+      await loop.currentStateSnapshot().state
+    } else {
+      observedState
+    }
+    return snapshot.mounts.primaryMount != nil
   }
 
   func isIdle() -> Bool {

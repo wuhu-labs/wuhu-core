@@ -496,6 +496,7 @@ extension WuhuService {
     return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.mount) { [weak self] _, args in
       guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
       let params = try Params.parse(toolName: tool.name, args: args)
+      let runtime = await runtime(for: currentSessionID)
       let rawPath = (params.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawTemplateID = (params.mountTemplateID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       let rawRunner = (params.runner ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -550,11 +551,12 @@ extension WuhuService {
       }
 
       // Determine primary: explicit > first-mount-is-primary
-      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
-      let isPrimary: Bool = if let explicit = params.primary {
-        explicit
+      let isPrimary: Bool
+      if let explicit = params.primary {
+        isPrimary = explicit
       } else {
-        existingMounts.isEmpty
+        let hasPrimaryMount = try await runtime.hasPrimaryMount()
+        isPrimary = !hasPrimaryMount
       }
 
       let mount = try await store.createMount(
@@ -571,8 +573,7 @@ extension WuhuService {
         _ = try await setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
       }
 
-      // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
-      try await emitMountContext(sessionID: currentSessionID, mount: mount, runner: runner)
+      let mountContextPayloads = await mountContextPayloads(mount: mount, runner: runner)
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
@@ -580,8 +581,10 @@ extension WuhuService {
           "mountID": .string(mount.id),
           "name": .string(effectiveName),
           "path": .string(mountPath),
+          "mountTemplateID": mountTemplateID.map { .string($0) } ?? .null,
           "isPrimary": .bool(mount.isPrimary),
           "runner": .string(runnerID.wireValue),
+          "mountContextPayloads": (try? WuhuJSON.encoder.encodeToJSONValue(mountContextPayloads)) ?? .array([]),
         ]),
       )
     }
