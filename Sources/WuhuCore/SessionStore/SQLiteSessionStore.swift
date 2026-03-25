@@ -5,7 +5,6 @@ import WuhuAPI
 
 public actor SQLiteSessionStore: SessionStore {
   let dbQueue: DatabaseQueue
-  private var nextReservedEntryID: Int64?
 
   /// Create a session store backed by its own database file.
   /// Prefer ``init(database:)`` when sharing a database with other stores.
@@ -17,18 +16,6 @@ public actor SQLiteSessionStore: SessionStore {
   /// Create a session store sharing a ``WuhuDatabase``.
   public init(database: WuhuDatabase) {
     dbQueue = database.dbQueue
-  }
-
-  func reserveEntryIDs(count: Int) async throws -> [Int64] {
-    precondition(count >= 0, "reserveEntryIDs(count:) requires a non-negative count")
-    guard count > 0 else { return [] }
-
-    let maxID = try await dbQueue.read { db in
-      try Int64.fetchOne(db, sql: "SELECT MAX(id) FROM session_entries") ?? 0
-    }
-    let start = max(maxID + 1, nextReservedEntryID ?? 1)
-    nextReservedEntryID = start + Int64(count)
-    return (0 ..< count).map { start + Int64($0) }
   }
 
   // MARK: - Mount Templates
@@ -393,7 +380,7 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  private static func linearize(
+  static func linearize(
     entries: [WuhuSessionEntry],
     sessionID: String,
     headEntryID: Int64,

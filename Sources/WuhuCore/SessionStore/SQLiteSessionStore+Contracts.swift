@@ -17,39 +17,57 @@ extension SQLiteSessionStore {
     var followUp: UserQueueBackfill
   }
 
-  struct DrainResult: Sendable {
-    var didDrain: Bool
-    var session: WuhuSession
-    var entries: [WuhuSessionEntry]
-    var systemUrgent: SystemUrgentQueueBackfill
-    var steer: UserQueueBackfill
-    var followUp: UserQueueBackfill
-  }
-
   struct ToolCallStatusUpdate: Sendable, Hashable {
     var id: String
     var status: ToolCallStatus
   }
 
+  struct SessionMetadataUpdate: Sendable {
+    var customTitle: String?
+    var isArchived: Bool
+    var cwd: String?
+  }
+
+  struct SystemQueueEnqueueOperation: Sendable {
+    var item: SystemUrgentPendingItem
+    var insertPending: Bool
+  }
+
+  struct UserQueueOperation: Sendable {
+    enum Kind: Sendable {
+      case enqueue(item: UserQueuePendingItem, insertPending: Bool)
+      case cancel(id: QueueItemID, deletePending: Bool, createdAt: Date)
+    }
+
+    var lane: UserQueueLane
+    var kind: Kind
+  }
+
+  struct TranscriptAppendOperation: Sendable {
+    enum Source: Sendable {
+      case systemMaterialization(id: QueueItemID, deletePending: Bool, journalCreatedAt: Date)
+      case userMaterialization(lane: UserQueueLane, id: QueueItemID, deletePending: Bool, journalCreatedAt: Date)
+    }
+
+    var createdAt: Date
+    var payload: WuhuEntryPayload
+    var source: Source?
+  }
+
+  struct LoopPersistencePatch: Sendable {
+    var pendingModelSelection: WuhuSessionSettings?
+    var systemQueueEnqueues: [SystemQueueEnqueueOperation]
+    var userQueueOperations: [UserQueueOperation]
+    var transcriptAppends: [TranscriptAppendOperation]
+    var toolCallStatusChanges: [ToolCallStatusUpdate]
+    var sessionMetadata: SessionMetadataUpdate?
+    var executionStatus: SessionExecutionStatus?
+  }
+
   func loadLoopStateParts(sessionID: SessionID) async throws -> LoopStateParts {
-    let session = try await getSession(id: sessionID.rawValue)
-    let entries = try await getEntries(sessionID: sessionID.rawValue)
-    let toolCallStatus = try await loadToolCallStatus(sessionID: sessionID)
-    let settings = try await loadSettingsSnapshot(sessionID: sessionID)
-    let status = try await loadStatusSnapshot(sessionID: sessionID)
-    let systemUrgent = try await loadSystemQueueBackfill(sessionID: sessionID)
-    let steer = try await loadUserQueueBackfill(sessionID: sessionID, lane: .steer)
-    let followUp = try await loadUserQueueBackfill(sessionID: sessionID, lane: .followUp)
-    return .init(
-      session: session,
-      entries: entries,
-      toolCallStatus: toolCallStatus,
-      settings: settings,
-      status: status,
-      systemUrgent: systemUrgent,
-      steer: steer,
-      followUp: followUp,
-    )
+    try await dbQueue.read { db in
+      try Self.loadLoopStateParts(db: db, sessionID: sessionID)
+    }
   }
 
   func loadSettingsSnapshot(sessionID: SessionID) async throws -> SessionSettingsSnapshot {
@@ -92,358 +110,54 @@ extension SQLiteSessionStore {
     }
   }
 
-  func setPendingModelSelection(sessionID: SessionID, selection: WuhuSessionSettings) async throws -> SessionSettingsSnapshot {
-    try await dbQueue.write { db in
-      guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
-      }
-      row.pendingProvider = selection.provider.rawValue
-      row.pendingModel = selection.model
-      row.pendingReasoningEffort = selection.reasoningEffort?.rawValue
-      row.updatedAt = Date()
-      try row.update(db)
-    }
-    return try await loadSettingsSnapshot(sessionID: sessionID)
-  }
-
-  func applyModelSelection(
+  func persistLoopStatePatch(
     sessionID: SessionID,
-    selection: WuhuSessionSettings,
-    entryID: Int64? = nil,
-  ) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot) {
-    let (session, entry) = try await appendEntryWithSession(
-      sessionID: sessionID,
-      payload: .sessionSettings(selection),
-      createdAt: Date(),
-      entryID: entryID,
-    )
-    let settings = try await loadSettingsSnapshot(sessionID: sessionID)
-    return (session, entry, settings)
-  }
-
-  func applyPendingModelIfPossible(
-    sessionID: SessionID,
-    entryID: Int64? = nil,
-  ) async throws -> (session: WuhuSession, entry: WuhuSessionEntry, settings: SessionSettingsSnapshot)? {
-    let result: (WuhuSession, WuhuSessionEntry)? = try await dbQueue.write { db in
-      guard var row = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
-      }
-      guard let p = row.pendingProvider, let m = row.pendingModel else { return nil }
-
-      // Only apply when no other work is pending.
-      guard row.executionStatus == SessionExecutionStatus.idle.rawValue else { return nil }
-      guard try Self.pendingWorkCount(db: db, sessionID: sessionID.rawValue) == 0 else { return nil }
-
-      let provider = WuhuProvider(rawValue: p) ?? .openai
-      let selection = WuhuSessionSettings(provider: provider, model: m, reasoningEffort: row.pendingReasoningEffort.flatMap(ReasoningEffort.init(rawValue:)))
-
-      let entryRow = try Self.appendEntryWithSession(
-        db: db,
-        sessionRow: &row,
-        payload: .sessionSettings(selection),
-        createdAt: Date(),
-        entryID: entryID,
-      )
-      return try (row.toModel(), entryRow.toModel())
-    }
-
-    guard let result else { return nil }
-    return try await (result.0, result.1, loadSettingsSnapshot(sessionID: sessionID))
-  }
-
-  func enqueueUserMessage(
-    sessionID: SessionID,
-    id: QueueItemID,
-    message: QueuedUserMessage,
-    lane: UserQueueLane,
-    enqueuedAt: Date? = nil,
-  ) async throws -> QueueItemID {
-    let now = enqueuedAt ?? Date()
-    try await dbQueue.write { db in
-      let data = try WuhuJSON.encoder.encode(message)
-      try db.execute(
-        sql: """
-        INSERT INTO user_queue_pending (id, sessionID, lane, enqueuedAt, payload)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        arguments: [id.rawValue, sessionID.rawValue, lane.rawValue, now, data],
-      )
-
-      let pendingItem = UserQueuePendingItem(id: id, enqueuedAt: now, message: message)
-      let journal = UserQueueJournalEntry.enqueued(lane: lane, item: pendingItem)
-      let journalData = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: """
-        INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt)
-        VALUES (?, ?, ?, ?)
-        """,
-        arguments: [sessionID.rawValue, lane.rawValue, journalData, now],
-      )
-
-      try Self.updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
-      try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
-    }
-    return id
-  }
-
-  func cancelUserMessage(sessionID: SessionID, id: QueueItemID, lane: UserQueueLane) async throws {
-    let now = Date()
-    try await dbQueue.write { db in
-      try db.execute(
-        sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ? AND id = ?",
-        arguments: [sessionID.rawValue, lane.rawValue, id.rawValue],
-      )
-      if db.changesCount == 0 {
-        throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
-      }
-
-      let journal = UserQueueJournalEntry.canceled(lane: lane, id: id, at: now)
-      let data = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
-        arguments: [sessionID.rawValue, lane.rawValue, data, now],
-      )
-
-      try Self.updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
-      try Self.maybeSetIdleIfNoPendingWork(db: db, sessionID: sessionID.rawValue)
-    }
-  }
-
-  func enqueueSystemInput(sessionID: SessionID, id: QueueItemID, input: SystemUrgentInput, enqueuedAt: Date) async throws -> QueueItemID {
-    let now = enqueuedAt
-    try await dbQueue.write { db in
-      let data = try WuhuJSON.encoder.encode(input)
-      try db.execute(
-        sql: "INSERT INTO system_queue_pending (id, sessionID, enqueuedAt, payload) VALUES (?, ?, ?, ?)",
-        arguments: [id.rawValue, sessionID.rawValue, now, data],
-      )
-
-      let pendingItem = SystemUrgentPendingItem(id: id, enqueuedAt: now, input: input)
-      let journal = SystemUrgentQueueJournalEntry.enqueued(item: pendingItem)
-      let journalData = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: "INSERT INTO system_queue_journal (sessionID, payload, createdAt) VALUES (?, ?, ?)",
-        arguments: [sessionID.rawValue, journalData, now],
-      )
-
-      try Self.updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
-      try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
-    }
-    return id
-  }
-
-  func drainInterruptCheckpoint(sessionID: SessionID, reservedEntryIDs: [Int64]? = nil) async throws -> DrainResult {
+    patch: LoopPersistencePatch,
+  ) async throws -> LoopStateParts {
     try await dbQueue.write { db in
       guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
         throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
       }
 
-      let systemRows = try SystemQueuePendingRow
-        .filter(Column("sessionID") == sessionID.rawValue)
-        .fetchAll(db)
-      let steerRows = try UserQueuePendingRow
-        .filter(Column("sessionID") == sessionID.rawValue && Column("lane") == UserQueueLane.steer.rawValue)
-        .fetchAll(db)
-
-      struct Candidate {
-        var enqueuedAt: Date
-        var kind: String
-        var id: String
-        var payload: Data
+      if let pendingSelection = patch.pendingModelSelection {
+        try Self.setPendingModelSelection(db: db, sessionRow: &sessionRow, selection: pendingSelection)
       }
 
-      var candidates: [Candidate] = []
-      candidates.reserveCapacity(systemRows.count + steerRows.count)
-      for r in systemRows {
-        candidates.append(.init(enqueuedAt: r.enqueuedAt, kind: "system", id: r.id, payload: r.payload))
-      }
-      for r in steerRows {
-        candidates.append(.init(enqueuedAt: r.enqueuedAt, kind: "steer", id: r.id, payload: r.payload))
-      }
-      candidates.sort { a, b in
-        if a.enqueuedAt != b.enqueuedAt { return a.enqueuedAt < b.enqueuedAt }
-        return a.id < b.id
+      for operation in patch.systemQueueEnqueues {
+        try Self.applySystemQueueEnqueueOperation(db: db, sessionID: sessionID, operation: operation)
       }
 
-      guard !candidates.isEmpty else {
-        let session = try sessionRow.toModel()
-        return try DrainResult(
-          didDrain: false,
-          session: session,
-          entries: [],
-          systemUrgent: Self.loadSystemQueueBackfill(db: db, sessionID: sessionID),
-          steer: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .steer),
-          followUp: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .followUp),
-        )
+      for operation in patch.userQueueOperations {
+        try Self.applyUserQueueOperation(db: db, sessionID: sessionID, operation: operation)
       }
 
-      precondition(reservedEntryIDs == nil || reservedEntryIDs?.count == candidates.count)
-
-      var appended: [WuhuSessionEntry] = []
-      appended.reserveCapacity(candidates.count)
-
-      for (index, c) in candidates.enumerated() {
-        let entryPayload: WuhuEntryPayload
-        let createdAt = c.enqueuedAt
-
-        if c.kind == "system" {
-          let input = try WuhuJSON.decoder.decode(SystemUrgentInput.self, from: c.payload)
-          let custom = WuhuCustomMessage(
-            customType: "wuhu_system_input_v1",
-            content: input.content.toContentBlocks(),
-            details: .object([
-              "source": .string(systemSourceString(input.source)),
-            ]),
-            display: true,
-            timestamp: createdAt,
-          )
-          entryPayload = .message(.customMessage(custom))
-
-          try db.execute(
-            sql: "DELETE FROM system_queue_pending WHERE sessionID = ? AND id = ?",
-            arguments: [sessionID.rawValue, c.id],
-          )
-        } else {
-          let message = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: c.payload)
-          let user = WuhuUserMessage(
-            user: userString(message.author),
-            content: message.content.toContentBlocks(),
-            timestamp: createdAt,
-          )
-          entryPayload = .message(.user(user))
-
-          try db.execute(
-            sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ? AND id = ?",
-            arguments: [sessionID.rawValue, UserQueueLane.steer.rawValue, c.id],
-          )
-        }
-
-        let entryRow = try Self.appendEntryWithSession(
+      for operation in patch.transcriptAppends {
+        try Self.appendTranscriptOperation(
           db: db,
+          sessionID: sessionID,
           sessionRow: &sessionRow,
-          payload: entryPayload,
-          createdAt: createdAt,
-          entryID: reservedEntryIDs?[index],
-        )
-        appended.append(entryRow.toModel())
-
-        let transcriptEntryID = TranscriptEntryID(rawValue: "\(entryRow.id ?? -1)")
-        let now = Date()
-
-        if c.kind == "system" {
-          let journal = SystemUrgentQueueJournalEntry.materialized(
-            id: QueueItemID(rawValue: c.id),
-            transcriptEntryID: transcriptEntryID,
-            at: now,
-          )
-          let data = try WuhuJSON.encoder.encode(journal)
-          try db.execute(
-            sql: "INSERT INTO system_queue_journal (sessionID, payload, createdAt) VALUES (?, ?, ?)",
-            arguments: [sessionID.rawValue, data, now],
-          )
-        } else {
-          let journal = UserQueueJournalEntry.materialized(
-            lane: .steer,
-            id: QueueItemID(rawValue: c.id),
-            transcriptEntryID: transcriptEntryID,
-            at: now,
-          )
-          let data = try WuhuJSON.encoder.encode(journal)
-          try db.execute(
-            sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
-            arguments: [sessionID.rawValue, UserQueueLane.steer.rawValue, data, now],
-          )
-        }
-      }
-
-      let session = try sessionRow.toModel()
-      return try DrainResult(
-        didDrain: true,
-        session: session,
-        entries: appended,
-        systemUrgent: Self.loadSystemQueueBackfill(db: db, sessionID: sessionID),
-        steer: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .steer),
-        followUp: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .followUp),
-      )
-    }
-  }
-
-  func drainTurnBoundary(sessionID: SessionID, reservedEntryIDs: [Int64]? = nil) async throws -> DrainResult {
-    try await dbQueue.write { db in
-      guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
-        throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
-      }
-
-      let followRows = try UserQueuePendingRow
-        .filter(Column("sessionID") == sessionID.rawValue && Column("lane") == UserQueueLane.followUp.rawValue)
-        .order(Column("enqueuedAt").asc)
-        .fetchAll(db)
-
-      guard !followRows.isEmpty else {
-        let session = try sessionRow.toModel()
-        return try DrainResult(
-          didDrain: false,
-          session: session,
-          entries: [],
-          systemUrgent: Self.loadSystemQueueBackfill(db: db, sessionID: sessionID),
-          steer: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .steer),
-          followUp: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .followUp),
+          operation: operation,
         )
       }
 
-      precondition(reservedEntryIDs == nil || reservedEntryIDs?.count == followRows.count)
-
-      var appended: [WuhuSessionEntry] = []
-      appended.reserveCapacity(followRows.count)
-
-      for (index, r) in followRows.enumerated() {
-        let message = try WuhuJSON.decoder.decode(QueuedUserMessage.self, from: r.payload)
-
-        let user = WuhuUserMessage(
-          user: userString(message.author),
-          content: message.content.toContentBlocks(),
-          timestamp: r.enqueuedAt,
-        )
-
-        let entryPayload: WuhuEntryPayload = .message(.user(user))
-        let entryRow = try Self.appendEntryWithSession(
+      for change in patch.toolCallStatusChanges {
+        try Self.setToolCallStatus(
           db: db,
-          sessionRow: &sessionRow,
-          payload: entryPayload,
-          createdAt: r.enqueuedAt,
-          entryID: reservedEntryIDs?[index],
-        )
-        appended.append(entryRow.toModel())
-
-        try db.execute(
-          sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ? AND id = ?",
-          arguments: [sessionID.rawValue, UserQueueLane.followUp.rawValue, r.id],
-        )
-
-        let transcriptEntryID = TranscriptEntryID(rawValue: "\(entryRow.id ?? -1)")
-        let journal = UserQueueJournalEntry.materialized(
-          lane: .followUp,
-          id: QueueItemID(rawValue: r.id),
-          transcriptEntryID: transcriptEntryID,
-          at: Date(),
-        )
-        let data = try WuhuJSON.encoder.encode(journal)
-        try db.execute(
-          sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
-          arguments: [sessionID.rawValue, UserQueueLane.followUp.rawValue, data, Date()],
+          sessionID: sessionID.rawValue,
+          id: change.id,
+          status: change.status,
         )
       }
 
-      let session = try sessionRow.toModel()
-      return try DrainResult(
-        didDrain: true,
-        session: session,
-        entries: appended,
-        systemUrgent: Self.loadSystemQueueBackfill(db: db, sessionID: sessionID),
-        steer: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .steer),
-        followUp: Self.loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .followUp),
-      )
+      if let metadata = patch.sessionMetadata {
+        try Self.setSessionMetadata(db: db, sessionRow: &sessionRow, update: metadata)
+      }
+
+      if let executionStatus = patch.executionStatus {
+        try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: executionStatus)
+      }
+
+      return try Self.loadLoopStateParts(db: db, sessionID: sessionID)
     }
   }
 
@@ -518,19 +232,8 @@ extension SQLiteSessionStore {
   }
 
   func setToolCallStatus(sessionID: SessionID, id: String, status: ToolCallStatus) async throws -> ToolCallStatusUpdate {
-    let now = Date()
     try await dbQueue.write { db in
-      try db.execute(
-        sql: """
-        INSERT INTO tool_call_status (sessionID, toolCallID, status, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(sessionID, toolCallID) DO UPDATE SET status = excluded.status, updatedAt = excluded.updatedAt
-        """,
-        arguments: [sessionID.rawValue, id, status.rawValue, now, now],
-      )
-      if status == .pending || status == .started {
-        try Self.setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
-      }
+      try Self.setToolCallStatus(db: db, sessionID: sessionID.rawValue, id: id, status: status)
     }
     return .init(id: id, status: status)
   }
@@ -563,15 +266,15 @@ extension SQLiteSessionStore {
     cwd: String?,
   ) async throws -> WuhuSession {
     try await dbQueue.write { db in
-      guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+      guard var sessionRow = try SessionRow.fetchOne(db, key: sessionID) else {
         throw WuhuStoreError.sessionNotFound(sessionID)
       }
-      row.customTitle = customTitle
-      row.isArchived = isArchived
-      row.cwd = cwd
-      row.updatedAt = Date()
-      try row.update(db)
-      return try row.toModel()
+      try Self.setSessionMetadata(
+        db: db,
+        sessionRow: &sessionRow,
+        update: .init(customTitle: customTitle, isArchived: isArchived, cwd: cwd),
+      )
+      return try sessionRow.toModel()
     }
   }
 
@@ -618,18 +321,284 @@ extension SQLiteSessionStore {
 
   // MARK: - Helpers (DB)
 
-  private static func updateSessionUpdatedAt(db: Database, sessionID: String) throws {
-    try db.execute(
-      sql: "UPDATE sessions SET updatedAt = ? WHERE id = ?",
-      arguments: [Date(), sessionID],
+  private static func loadLoopStateParts(db: Database, sessionID: SessionID) throws -> LoopStateParts {
+    guard let sessionRow = try SessionRow.fetchOne(db, key: sessionID.rawValue) else {
+      throw WuhuStoreError.sessionNotFound(sessionID.rawValue)
+    }
+
+    let session = try sessionRow.toModel()
+    let entryRows = try EntryRow
+      .filter(Column("sessionID") == sessionID.rawValue)
+      .fetchAll(db)
+    let entries = try Self.linearize(
+      entries: entryRows.map { $0.toModel() },
+      sessionID: sessionID.rawValue,
+      headEntryID: session.headEntryID,
+      tailEntryID: session.tailEntryID,
+    )
+
+    let toolCallRows = try ToolCallStatusRow
+      .filter(Column("sessionID") == sessionID.rawValue)
+      .fetchAll(db)
+    var toolCallStatus: [String: ToolCallStatus] = [:]
+    toolCallStatus.reserveCapacity(toolCallRows.count)
+    for row in toolCallRows {
+      toolCallStatus[row.toolCallID] = ToolCallStatus(rawValue: row.status) ?? .pending
+    }
+
+    let effectiveModel = ModelSpecifier(provider: ProviderID(rawValue: sessionRow.provider), id: sessionRow.model)
+    let pendingModel: ModelSpecifier? = {
+      guard let provider = sessionRow.pendingProvider, let model = sessionRow.pendingModel else { return nil }
+      return .init(provider: ProviderID(rawValue: provider), id: model)
+    }()
+    let settings = SessionSettingsSnapshot(
+      effectiveModel: effectiveModel,
+      pendingModel: pendingModel,
+      effectiveReasoningEffort: sessionRow.effectiveReasoningEffort.flatMap(ReasoningEffort.init(rawValue:)),
+      pendingReasoningEffort: sessionRow.pendingReasoningEffort.flatMap(ReasoningEffort.init(rawValue:)),
+    )
+    let status = SessionStatusSnapshot(
+      status: SessionExecutionStatus(rawValue: sessionRow.executionStatus) ?? .idle,
+    )
+
+    return try .init(
+      session: session,
+      entries: entries,
+      toolCallStatus: toolCallStatus,
+      settings: settings,
+      status: status,
+      systemUrgent: loadSystemQueueBackfill(db: db, sessionID: sessionID),
+      steer: loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .steer),
+      followUp: loadUserQueueBackfill(db: db, sessionID: sessionID, lane: .followUp),
     )
   }
 
-  private static func setExecutionStatus(db: Database, sessionID: String, status: SessionExecutionStatus) throws {
+  private static func setPendingModelSelection(
+    db: Database,
+    sessionRow: inout SessionRow,
+    selection: WuhuSessionSettings,
+  ) throws {
+    sessionRow.pendingProvider = selection.provider.rawValue
+    sessionRow.pendingModel = selection.model
+    sessionRow.pendingReasoningEffort = selection.reasoningEffort?.rawValue
+    sessionRow.updatedAt = Date()
+    try sessionRow.update(db)
+  }
+
+  private static func setToolCallStatus(
+    db: Database,
+    sessionID: String,
+    id: String,
+    status: ToolCallStatus,
+  ) throws {
+    let now = Date()
     try db.execute(
-      sql: "UPDATE sessions SET executionStatus = ?, updatedAt = ? WHERE id = ?",
-      arguments: [status.rawValue, Date(), sessionID],
+      sql: """
+      INSERT INTO tool_call_status (sessionID, toolCallID, status, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(sessionID, toolCallID) DO UPDATE SET status = excluded.status, updatedAt = excluded.updatedAt
+      """,
+      arguments: [sessionID, id, status.rawValue, now, now],
     )
+    if status == .pending || status == .started {
+      try setExecutionStatus(db: db, sessionID: sessionID, status: .running)
+    }
+  }
+
+  private static func setSessionMetadata(
+    db: Database,
+    sessionRow: inout SessionRow,
+    update: SessionMetadataUpdate,
+  ) throws {
+    sessionRow.customTitle = update.customTitle
+    sessionRow.isArchived = update.isArchived
+    sessionRow.cwd = update.cwd
+    sessionRow.updatedAt = Date()
+    try sessionRow.update(db)
+  }
+
+  private static func applySystemQueueEnqueueOperation(
+    db: Database,
+    sessionID: SessionID,
+    operation: SystemQueueEnqueueOperation,
+  ) throws {
+    if operation.insertPending {
+      var row = try SystemQueuePendingRow(
+        id: operation.item.id.rawValue,
+        sessionID: sessionID.rawValue,
+        enqueuedAt: operation.item.enqueuedAt,
+        payload: WuhuJSON.encoder.encode(operation.item.input),
+      )
+      try row.insert(db)
+    }
+
+    let journal = SystemUrgentQueueJournalEntry.enqueued(item: operation.item)
+    var journalRow = try SystemQueueJournalRow(
+      id: nil,
+      sessionID: sessionID.rawValue,
+      payload: WuhuJSON.encoder.encode(journal),
+      createdAt: operation.item.enqueuedAt,
+    )
+    try journalRow.insert(db)
+
+    try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
+    try setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
+  }
+
+  private static func applyUserQueueOperation(
+    db: Database,
+    sessionID: SessionID,
+    operation: UserQueueOperation,
+  ) throws {
+    switch operation.kind {
+    case let .enqueue(item, insertPending):
+      if insertPending {
+        var row = try UserQueuePendingRow(
+          id: item.id.rawValue,
+          sessionID: sessionID.rawValue,
+          lane: operation.lane.rawValue,
+          enqueuedAt: item.enqueuedAt,
+          payload: WuhuJSON.encoder.encode(item.message),
+        )
+        try row.insert(db)
+      }
+
+      let journal = UserQueueJournalEntry.enqueued(lane: operation.lane, item: item)
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: operation.lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: item.enqueuedAt,
+      )
+      try journalRow.insert(db)
+
+      try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
+      try setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
+
+    case let .cancel(id, deletePending, createdAt):
+      if deletePending {
+        guard let row = try UserQueuePendingRow
+          .filter(
+            Column("sessionID") == sessionID.rawValue &&
+              Column("lane") == operation.lane.rawValue &&
+              Column("id") == id.rawValue,
+          )
+          .fetchOne(db)
+        else {
+          throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
+        }
+        try row.delete(db)
+      }
+
+      let journal = UserQueueJournalEntry.canceled(lane: operation.lane, id: id, at: createdAt)
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: operation.lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: createdAt,
+      )
+      try journalRow.insert(db)
+
+      try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
+      try maybeSetIdleIfNoPendingWork(db: db, sessionID: sessionID.rawValue)
+    }
+  }
+
+  private static func appendTranscriptOperation(
+    db: Database,
+    sessionID: SessionID,
+    sessionRow: inout SessionRow,
+    operation: TranscriptAppendOperation,
+  ) throws {
+    let entryRow = try appendEntryWithSession(
+      db: db,
+      sessionRow: &sessionRow,
+      payload: operation.payload,
+      createdAt: operation.createdAt,
+      entryID: nil,
+    )
+
+    guard let entryID = entryRow.id else {
+      throw WuhuStoreError.sessionCorrupt("Failed to create entry id")
+    }
+
+    guard let source = operation.source else { return }
+    let transcriptEntryID = TranscriptEntryID(rawValue: "\(entryID)")
+
+    switch source {
+    case let .systemMaterialization(id, deletePending, journalCreatedAt):
+      if deletePending {
+        guard let row = try SystemQueuePendingRow
+          .filter(Column("sessionID") == sessionID.rawValue && Column("id") == id.rawValue)
+          .fetchOne(db)
+        else {
+          throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
+        }
+        try row.delete(db)
+      }
+
+      let journal = SystemUrgentQueueJournalEntry.materialized(
+        id: id,
+        transcriptEntryID: transcriptEntryID,
+        at: journalCreatedAt,
+      )
+      var journalRow = try SystemQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: journalCreatedAt,
+      )
+      try journalRow.insert(db)
+
+    case let .userMaterialization(lane, id, deletePending, journalCreatedAt):
+      if deletePending {
+        guard let row = try UserQueuePendingRow
+          .filter(
+            Column("sessionID") == sessionID.rawValue &&
+              Column("lane") == lane.rawValue &&
+              Column("id") == id.rawValue,
+          )
+          .fetchOne(db)
+        else {
+          throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
+        }
+        try row.delete(db)
+      }
+
+      let journal = UserQueueJournalEntry.materialized(
+        lane: lane,
+        id: id,
+        transcriptEntryID: transcriptEntryID,
+        at: journalCreatedAt,
+      )
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: journalCreatedAt,
+      )
+      try journalRow.insert(db)
+    }
+  }
+
+  private static func updateSessionUpdatedAt(db: Database, sessionID: String) throws {
+    guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+      throw WuhuStoreError.sessionNotFound(sessionID)
+    }
+    row.updatedAt = Date()
+    try row.update(db)
+  }
+
+  private static func setExecutionStatus(db: Database, sessionID: String, status: SessionExecutionStatus) throws {
+    guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+      throw WuhuStoreError.sessionNotFound(sessionID)
+    }
+    row.executionStatus = status.rawValue
+    row.updatedAt = Date()
+    try row.update(db)
   }
 
   private static func maybeSetIdleIfNoPendingWork(db: Database, sessionID: String) throws {
@@ -646,16 +615,18 @@ extension SQLiteSessionStore {
   }
 
   private static func pendingWorkCount(db: Database, sessionID: String) throws -> Int {
-    let systemCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM system_queue_pending WHERE sessionID = ?", arguments: [sessionID]) ?? 0
-    let userCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM user_queue_pending WHERE sessionID = ?", arguments: [sessionID]) ?? 0
-    let toolCount = try Int.fetchOne(
-      db,
-      sql: """
-      SELECT COUNT(*) FROM tool_call_status
-      WHERE sessionID = ? AND (status = ? OR status = ?)
-      """,
-      arguments: [sessionID, ToolCallStatus.pending.rawValue, ToolCallStatus.started.rawValue],
-    ) ?? 0
+    let systemCount = try SystemQueuePendingRow
+      .filter(Column("sessionID") == sessionID)
+      .fetchCount(db)
+    let userCount = try UserQueuePendingRow
+      .filter(Column("sessionID") == sessionID)
+      .fetchCount(db)
+    let toolCount = try ToolCallStatusRow
+      .filter(
+        Column("sessionID") == sessionID &&
+          (Column("status") == ToolCallStatus.pending.rawValue || Column("status") == ToolCallStatus.started.rawValue),
+      )
+      .fetchCount(db)
     return systemCount + userCount + toolCount
   }
 

@@ -147,13 +147,16 @@ struct ContractSessionCoreTests {
     var state = try await behavior.loadState()
 
     // System input at an earlier timestamp.
-    _ = try await store.enqueueSystemInput(
-      sessionID: .init(rawValue: session.id),
-      id: .init(rawValue: "sys1"),
-      input: .init(source: .asyncTaskNotification, content: .text("{\"type\":\"system\"}")),
-      enqueuedAt: Date(timeIntervalSince1970: 0),
-    )
-    state = try await behavior.loadState()
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      behavior.handle(
+        .enqueueSystem(
+          id: .init(rawValue: "sys1"),
+          input: .init(source: .asyncTaskNotification, content: .text("{\"type\":\"system\"}")),
+          enqueuedAt: Date(timeIntervalSince1970: 0),
+        ),
+        state: &state,
+      )
+    }
 
     // Steer input enqueued later via behavior handle.
     state = try await applyAndAssertInvariant(behavior, state) { state in
