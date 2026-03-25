@@ -137,36 +137,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State {
-    let materializedEntryIDs = materializedTranscriptEntryIDs(diff)
-    let standaloneEntries = diff.appendedEntries.filter { !materializedEntryIDs.contains($0.id) }
-    let persistedStandaloneEntries = try await persistStandaloneEntries(standaloneEntries)
-
-    let pendingModelSelection = pendingModelSelectionUpdate(
-      diff: diff,
-      oldState: oldState,
-      newState: newState,
-      standaloneEntries: standaloneEntries,
-    )
-    let sessionMetadata: SQLiteSessionStore.SessionMetadataUpdate? = if diff.sessionMetadataChanged {
-      SQLiteSessionStore.SessionMetadataUpdate(
-        customTitle: newState.session.customTitle,
-        isArchived: newState.session.isArchived,
-        cwd: newState.session.cwd,
-      )
-    } else {
-      nil
-    }
-
-    let patch = SQLiteSessionStore.LoopPersistencePatch(
-      pendingModelSelection: pendingModelSelection,
-      systemJournalEntries: diff.systemJournalEntries,
-      steerJournalEntries: diff.steerJournalEntries,
-      followUpJournalEntries: diff.followUpJournalEntries,
-      standaloneEntries: persistedStandaloneEntries,
-      toolCallStatusChanges: diff.toolCallStatusChanges.map { .init(id: $0.id, status: $0.status) },
-      sessionMetadata: sessionMetadata,
-      executionStatus: diff.statusChanged ? newState.status.status : nil,
-    )
+    let patch = try await buildLoopPersistencePatch(diff: diff, oldState: oldState, newState: newState)
     let durable = try await store.persistLoopStatePatch(sessionID: sessionID, patch: patch)
     return .init(
       session: durable.session,
@@ -640,50 +611,232 @@ struct WuhuSessionBehavior: AgentBehavior {
     )
   }
 
-  private func persistStandaloneEntries(_ entries: [WuhuSessionEntry]) async throws -> [WuhuSessionEntry] {
-    var persisted: [WuhuSessionEntry] = []
-    persisted.reserveCapacity(entries.count)
+  private func buildLoopPersistencePatch(
+    diff: PersistenceDiff,
+    oldState: State,
+    newState: State,
+  ) async throws -> SQLiteSessionStore.LoopPersistencePatch {
+    let materializedEntryIDs = try materializedTranscriptEntryIDs(diff)
+    let standaloneEntries = diff.appendedEntries.filter { !materializedEntryIDs.contains($0.id) }
+    let materializationSources = try materializationSources(diff: diff, oldState: oldState)
+    let transcriptAppends = try await persistedTranscriptAppendOperations(
+      diff.appendedEntries,
+      materializationSources: materializationSources,
+    )
 
+    let pendingModelSelection = pendingModelSelectionUpdate(
+      diff: diff,
+      oldState: oldState,
+      newState: newState,
+      standaloneEntries: standaloneEntries,
+    )
+    let sessionMetadata: SQLiteSessionStore.SessionMetadataUpdate? = if diff.sessionMetadataChanged {
+      SQLiteSessionStore.SessionMetadataUpdate(
+        customTitle: newState.session.customTitle,
+        isArchived: newState.session.isArchived,
+        cwd: newState.session.cwd,
+      )
+    } else {
+      nil
+    }
+
+    return .init(
+      pendingModelSelection: pendingModelSelection,
+      systemQueueEnqueues: systemQueueEnqueueOperations(diff: diff, newState: newState),
+      userQueueOperations: userQueueOperations(diff: diff, oldState: oldState, newState: newState),
+      transcriptAppends: transcriptAppends,
+      toolCallStatusChanges: diff.toolCallStatusChanges.map { .init(id: $0.id, status: $0.status) },
+      sessionMetadata: sessionMetadata,
+      executionStatus: diff.statusChanged ? newState.status.status : nil,
+    )
+  }
+
+  private func systemQueueEnqueueOperations(
+    diff: PersistenceDiff,
+    newState: State,
+  ) -> [SQLiteSessionStore.SystemQueueEnqueueOperation] {
+    let pendingIDs = Set(newState.systemUrgent.pending.map(\.id))
+    return diff.systemJournalEntries.compactMap { entry in
+      guard case let .enqueued(item) = entry else { return nil }
+      return .init(item: item, insertPending: pendingIDs.contains(item.id))
+    }
+  }
+
+  private func userQueueOperations(
+    diff: PersistenceDiff,
+    oldState: State,
+    newState: State,
+  ) -> [SQLiteSessionStore.UserQueueOperation] {
+    let oldSteerIDs = Set(oldState.steer.pending.map(\.id))
+    let oldFollowUpIDs = Set(oldState.followUp.pending.map(\.id))
+    let newSteerIDs = Set(newState.steer.pending.map(\.id))
+    let newFollowUpIDs = Set(newState.followUp.pending.map(\.id))
+
+    return queueOperations(
+      diff.steerJournalEntries,
+      lane: .steer,
+      oldPendingIDs: oldSteerIDs,
+      newPendingIDs: newSteerIDs,
+    ) + queueOperations(
+      diff.followUpJournalEntries,
+      lane: .followUp,
+      oldPendingIDs: oldFollowUpIDs,
+      newPendingIDs: newFollowUpIDs,
+    )
+  }
+
+  private func queueOperations(
+    _ entries: [UserQueueJournalEntry],
+    lane: UserQueueLane,
+    oldPendingIDs: Set<QueueItemID>,
+    newPendingIDs: Set<QueueItemID>,
+  ) -> [SQLiteSessionStore.UserQueueOperation] {
+    entries.compactMap { entry in
+      switch entry {
+      case let .enqueued(_, item):
+        .init(lane: lane, kind: .enqueue(item: item, insertPending: newPendingIDs.contains(item.id)))
+      case let .canceled(_, id, at):
+        .init(lane: lane, kind: .cancel(id: id, deletePending: oldPendingIDs.contains(id), createdAt: at))
+      case .materialized:
+        nil
+      }
+    }
+  }
+
+  private func persistedTranscriptAppendOperations(
+    _ entries: [WuhuSessionEntry],
+    materializationSources: [Int64: SQLiteSessionStore.TranscriptAppendOperation.Source],
+  ) async throws -> [SQLiteSessionStore.TranscriptAppendOperation] {
+    var operations: [SQLiteSessionStore.TranscriptAppendOperation] = []
+    operations.reserveCapacity(entries.count)
+
+    var remainingSources = materializationSources
     for entry in entries {
       let payload = try await persistedPayload(entry.payload)
-      persisted.append(
+      operations.append(
         .init(
-          id: entry.id,
-          sessionID: entry.sessionID,
-          parentEntryID: entry.parentEntryID,
           createdAt: entry.createdAt,
           payload: payload,
+          source: remainingSources.removeValue(forKey: entry.id),
         ),
       )
     }
 
-    return persisted
+    guard remainingSources.isEmpty else {
+      let ids = remainingSources.keys.sorted().map(String.init).joined(separator: ", ")
+      throw WuhuStoreError.sessionCorrupt("Missing transcript entries for materializations: \(ids)")
+    }
+
+    return operations
   }
 
-  private func materializedTranscriptEntryIDs(_ diff: PersistenceDiff) -> Set<Int64> {
+  private func materializationSources(
+    diff: PersistenceDiff,
+    oldState: State,
+  ) throws -> [Int64: SQLiteSessionStore.TranscriptAppendOperation.Source] {
+    var sources: [Int64: SQLiteSessionStore.TranscriptAppendOperation.Source] = [:]
+
+    let oldSystemIDs = Set(oldState.systemUrgent.pending.map(\.id))
+    let oldSteerIDs = Set(oldState.steer.pending.map(\.id))
+    let oldFollowUpIDs = Set(oldState.followUp.pending.map(\.id))
+
+    try addMaterializationSources(
+      from: diff.systemJournalEntries,
+      oldPendingIDs: oldSystemIDs,
+      into: &sources,
+    )
+    try addMaterializationSources(
+      from: diff.steerJournalEntries,
+      lane: .steer,
+      oldPendingIDs: oldSteerIDs,
+      into: &sources,
+    )
+    try addMaterializationSources(
+      from: diff.followUpJournalEntries,
+      lane: .followUp,
+      oldPendingIDs: oldFollowUpIDs,
+      into: &sources,
+    )
+
+    return sources
+  }
+
+  private func addMaterializationSources(
+    from entries: [SystemUrgentQueueJournalEntry],
+    oldPendingIDs: Set<QueueItemID>,
+    into sources: inout [Int64: SQLiteSessionStore.TranscriptAppendOperation.Source],
+  ) throws {
+    for entry in entries {
+      guard case let .materialized(id, transcriptEntryID, at) = entry else { continue }
+      guard let tempID = Int64(transcriptEntryID.rawValue) else {
+        throw WuhuStoreError.sessionCorrupt("Invalid transcript entry id: \(transcriptEntryID.rawValue)")
+      }
+      guard sources[tempID] == nil else {
+        throw WuhuStoreError.sessionCorrupt("Duplicate transcript materialization for entry id \(tempID)")
+      }
+      sources[tempID] = .systemMaterialization(
+        id: id,
+        deletePending: oldPendingIDs.contains(id),
+        journalCreatedAt: at,
+      )
+    }
+  }
+
+  private func addMaterializationSources(
+    from entries: [UserQueueJournalEntry],
+    lane: UserQueueLane,
+    oldPendingIDs: Set<QueueItemID>,
+    into sources: inout [Int64: SQLiteSessionStore.TranscriptAppendOperation.Source],
+  ) throws {
+    for entry in entries {
+      guard case let .materialized(_, id, transcriptEntryID, at) = entry else { continue }
+      guard let tempID = Int64(transcriptEntryID.rawValue) else {
+        throw WuhuStoreError.sessionCorrupt("Invalid transcript entry id: \(transcriptEntryID.rawValue)")
+      }
+      guard sources[tempID] == nil else {
+        throw WuhuStoreError.sessionCorrupt("Duplicate transcript materialization for entry id \(tempID)")
+      }
+      sources[tempID] = .userMaterialization(
+        lane: lane,
+        id: id,
+        deletePending: oldPendingIDs.contains(id),
+        journalCreatedAt: at,
+      )
+    }
+  }
+
+  private func materializedTranscriptEntryIDs(_ diff: PersistenceDiff) throws -> Set<Int64> {
     var ids: Set<Int64> = []
-    for entry in diff.systemJournalEntries {
-      if case let .materialized(_, transcriptEntryID, _) = entry,
-         let id = Int64(transcriptEntryID.rawValue)
-      {
-        ids.insert(id)
-      }
-    }
-    for entry in diff.steerJournalEntries {
-      if case let .materialized(_, _, transcriptEntryID, _) = entry,
-         let id = Int64(transcriptEntryID.rawValue)
-      {
-        ids.insert(id)
-      }
-    }
-    for entry in diff.followUpJournalEntries {
-      if case let .materialized(_, _, transcriptEntryID, _) = entry,
-         let id = Int64(transcriptEntryID.rawValue)
-      {
-        ids.insert(id)
-      }
-    }
+    try collectMaterializedTranscriptEntryIDs(from: diff.systemJournalEntries, into: &ids)
+    try collectMaterializedTranscriptEntryIDs(from: diff.steerJournalEntries, into: &ids)
+    try collectMaterializedTranscriptEntryIDs(from: diff.followUpJournalEntries, into: &ids)
     return ids
+  }
+
+  private func collectMaterializedTranscriptEntryIDs(
+    from entries: [SystemUrgentQueueJournalEntry],
+    into ids: inout Set<Int64>,
+  ) throws {
+    for entry in entries {
+      guard case let .materialized(_, transcriptEntryID, _) = entry else { continue }
+      guard let id = Int64(transcriptEntryID.rawValue) else {
+        throw WuhuStoreError.sessionCorrupt("Invalid transcript entry id: \(transcriptEntryID.rawValue)")
+      }
+      ids.insert(id)
+    }
+  }
+
+  private func collectMaterializedTranscriptEntryIDs(
+    from entries: [UserQueueJournalEntry],
+    into ids: inout Set<Int64>,
+  ) throws {
+    for entry in entries {
+      guard case let .materialized(_, _, transcriptEntryID, _) = entry else { continue }
+      guard let id = Int64(transcriptEntryID.rawValue) else {
+        throw WuhuStoreError.sessionCorrupt("Invalid transcript entry id: \(transcriptEntryID.rawValue)")
+      }
+      ids.insert(id)
+    }
   }
 
   private func isSessionSettingsEntry(_ entry: WuhuSessionEntry) -> Bool {
