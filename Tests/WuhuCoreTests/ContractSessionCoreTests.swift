@@ -39,6 +39,68 @@ struct ContractSessionCoreTests {
     return (behavior, config)
   }
 
+  private func makeStateAwareBehavior(
+    sessionID: String,
+    store: SQLiteSessionStore,
+    streamFn: @escaping StreamFn,
+  ) async -> (behavior: WuhuSessionBehavior, config: WuhuSessionRuntimeConfig, service: WuhuService) {
+    let config = WuhuSessionRuntimeConfig()
+    let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
+    let service = WuhuService(store: store, blobStore: blobStore)
+    let runnerRegistry = RunnerRegistry()
+
+    await config.setToolProvider { [service] state in
+      let mountResolver: MountResolver = { mountName in
+        let trimmed = mountName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let trimmed, !trimmed.isEmpty {
+          guard let mount = state.mounts.mount(named: trimmed) else {
+            throw MountResolutionError.mountNotFound(name: trimmed)
+          }
+          guard let runner = await runnerRegistry.get(mount.runnerID) else {
+            throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+          }
+          return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+        }
+
+        if let mount = state.mounts.primaryMount {
+          guard let runner = await runnerRegistry.get(mount.runnerID) else {
+            throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+          }
+          return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+        }
+
+        guard let cwd = state.session.cwd else {
+          throw MountResolutionError.noCwd
+        }
+        guard let runner = await runnerRegistry.get(.local) else {
+          throw MountResolutionError.runnerUnavailable(runnerID: .local)
+        }
+        return ResolvedMount(runner: runner, cwd: cwd)
+      }
+
+      let baseTools = WuhuTools.codingAgentTools(
+        cwdProvider: { state.session.cwd },
+        mountResolver: mountResolver,
+      )
+
+      return await service.agentToolset(
+        currentSessionID: state.session.id,
+        hasPrimaryMount: state.mounts.primaryMount != nil,
+        baseTools: baseTools,
+      )
+    }
+
+    let behavior = WuhuSessionBehavior(
+      sessionID: .init(rawValue: sessionID),
+      store: store,
+      runtimeConfig: config,
+      blobStore: blobStore,
+      streamFn: streamFn,
+    )
+    return (behavior, config, service)
+  }
+
   private func applyAndAssertInvariant(
     _ behavior: WuhuSessionBehavior,
     _ state: WuhuSessionLoopState,
@@ -54,6 +116,40 @@ struct ContractSessionCoreTests {
     let reloaded = try await behavior.loadState()
     #expect(durable == reloaded)
     return reloaded
+  }
+
+  private func runBehaviorTurn(
+    _ behavior: WuhuSessionBehavior,
+    startingFrom initialState: WuhuSessionLoopState,
+  ) async throws -> (state: WuhuSessionLoopState, assistant: AssistantMessage) {
+    let context = behavior.buildContext(state: initialState)
+    let assistant = try await behavior.infer(
+      context: context,
+      stream: .init(yield: { _ in }),
+    )
+
+    var state = try await applyAndAssertInvariant(behavior, initialState) { state in
+      behavior.persistAssistantEntry(assistant, state: &state)
+    }
+
+    let calls = assistant.content.compactMap { block -> ToolCall? in
+      if case let .toolCall(call) = block { return call }
+      return nil
+    }
+
+    for call in calls {
+      state = try await applyAndAssertInvariant(behavior, state) { state in
+        behavior.toolWillExecute(call, state: &state)
+      }
+
+      let result = try await behavior.executeToolCall(call, state: state)
+
+      state = try await applyAndAssertInvariant(behavior, state) { state in
+        behavior.toolDidExecute(call, result: result, state: &state)
+      }
+    }
+
+    return (state, assistant)
   }
 
   @Test func ioInvariant_handleEnqueueAndDrainAndPersistAssistant() async throws {
@@ -223,6 +319,91 @@ struct ContractSessionCoreTests {
       if case .compaction = entry.payload { return true }
       return false
     })
+  }
+
+  @Test func behaviorTurn_mountThenListUsesMountedPath() async throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(
+      "wuhu-behavior-turn-\(UUID().uuidString.lowercased())",
+      isDirectory: true,
+    )
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: root) }
+
+    try "hello".write(
+      to: root.appendingPathComponent("hello.txt"),
+      atomically: true,
+      encoding: .utf8,
+    )
+
+    let store = try makeStore()
+    let session = try await makeSession(store: store, systemPrompt: "You are helpful.")
+
+    let mock = MockStreamFn(responses: [
+      .toolCalls([
+        .init(
+          id: "tc-mount",
+          name: WuhuAgentToolNames.mount,
+          arguments: .object([
+            "path": .string(root.path),
+            "name": .string("workspace"),
+          ]),
+        ),
+        .init(
+          id: "tc-ls",
+          name: "ls",
+          arguments: .object([
+            "path": .string("."),
+          ]),
+        ),
+      ]),
+    ])
+
+    let (behavior, _, _) = await makeStateAwareBehavior(
+      sessionID: session.id,
+      store: store,
+      streamFn: mock.streamFn,
+    )
+
+    var state = try await behavior.loadState()
+
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      behavior.handle(
+        .enqueueUser(
+          id: .init(rawValue: "q-mount-list"),
+          message: .init(author: .unknown, content: .text("Mount /tmp and list what we have")),
+          lane: .followUp,
+        ),
+        state: &state,
+      )
+    }
+
+    state = try await applyAndAssertInvariant(behavior, state) { state in
+      behavior.drainTurnItems(state: &state)
+    }
+
+    let result = try await runBehaviorTurn(behavior, startingFrom: state)
+    state = result.state
+
+    let calls = result.assistant.content.compactMap { block -> ToolCall? in
+      if case let .toolCall(call) = block { return call }
+      return nil
+    }
+    #expect(calls.map(\.name) == [WuhuAgentToolNames.mount, "ls"])
+
+    #expect(state.mounts.primaryMount?.path == root.path)
+    #expect(state.session.cwd == root.path)
+
+    let toolResults = state.entries.compactMap { entry -> WuhuToolResultMessage? in
+      guard case let .message(.toolResult(result)) = entry.payload else { return nil }
+      return result
+    }
+    let lsResult = try #require(toolResults.last { $0.toolCallId == "tc-ls" })
+    let lsText = lsResult.content.compactMap { block -> String? in
+      if case let .text(text, _) = block { return text }
+      return nil
+    }.joined(separator: "\n")
+    #expect(lsText.contains("hello.txt"))
   }
 
   // MARK: - Rich content materialization
