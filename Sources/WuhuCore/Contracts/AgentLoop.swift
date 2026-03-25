@@ -143,8 +143,6 @@ public actor AgentLoop<B: AgentBehavior> {
       } catch {
         group.cancelAll()
         while let _ = try? await group.next() {}
-        publishedState = try await behavior.loadState()
-        try await flushIfNeeded()
         throw error
       }
     }
