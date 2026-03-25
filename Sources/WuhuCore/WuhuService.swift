@@ -237,19 +237,20 @@ public actor WuhuService {
   /// When `runner` is provided, files are read via the runner's FileIO ops (works for both local and remote).
   /// When `runner` is nil, files are read from the local filesystem.
   public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any Runner)?) async throws {
-    for payload in await mountContextPayloads(mount: mount, runner: runner) {
-      _ = try await store.appendEntry(sessionID: sessionID, payload: payload)
+    for entry in await mountEffectEntries(mount: mount, runner: runner) {
+      _ = try await store.appendEntry(sessionID: sessionID, payload: .knownCustom(entry))
     }
   }
 
-  func mountContextPayloads(mount: WuhuMount, runner: (any Runner)?) async -> [WuhuEntryPayload] {
-    var payloads: [WuhuEntryPayload] = [
-      .knownCustom(.mountContext(.init(
+  func mountEffectEntries(mount: WuhuMount, runner: (any Runner)?) async -> [WuhuKnownCustomEntry] {
+    var entries: [WuhuKnownCustomEntry] = [
+      .mountDeclared(mount),
+      .mountContext(.init(
         mountID: mount.id,
         name: mount.name,
         path: mount.path,
         text: "Mounted '\(mount.name)' at \(mount.path)",
-      ))),
+      )),
     ]
 
     let agentsFiles: [WuhuContextFile] = if let runner {
@@ -259,11 +260,11 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      payloads.append(.knownCustom(.agentsContext(.init(
+      entries.append(.agentsContext(.init(
         source: "mount",
         mountID: mount.id,
         text: rendered,
-      ))))
+      )))
     }
 
     let mountSkills: [WuhuSkill]
@@ -278,14 +279,14 @@ public actor WuhuService {
     }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
-      payloads.append(.knownCustom(.skillsContext(.init(
+      entries.append(.skillsContext(.init(
         source: "mount",
         mountID: mount.id,
         text: rendered,
-      ))))
+      )))
     }
 
-    return payloads
+    return entries
   }
 
   /// Emit workspace-level or profile-level context entries (AGENTS.md, skills).

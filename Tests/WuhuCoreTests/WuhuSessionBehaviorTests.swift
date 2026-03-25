@@ -5,30 +5,23 @@ import WuhuAPI
 @testable import WuhuCore
 
 struct WuhuSessionBehaviorTests {
-  @Test func mountStateLoadsFromTranscriptToolResults() async throws {
+  @Test func mountStateLoadsFromTypedCustomEntries() async throws {
     let mock = MockStreamFn(text: "unused")
     let harness = try TestHarness(mockLLM: mock)
     let session = try await harness.createSession(cwd: nil)
 
-    let toolResult = WuhuToolResultMessage(
-      toolCallId: "tc-mount",
-      toolName: WuhuAgentToolNames.mount,
-      content: [.text(text: "Mounted 'workspace' at /tmp/demo", signature: nil)],
-      details: .object([
-        "mountID": .string("mount-demo"),
-        "name": .string("workspace"),
-        "path": .string("/tmp/demo"),
-        "mountTemplateID": .null,
-        "isPrimary": .bool(true),
-        "runner": .string("local"),
-      ]),
-      isError: false,
-      timestamp: Date(),
+    let mount = WuhuMount(
+      id: "mount-demo",
+      sessionID: session.id,
+      name: "workspace",
+      path: "/tmp/demo",
+      isPrimary: true,
+      createdAt: Date(),
     )
 
     _ = try await harness.store.appendEntry(
       sessionID: session.id,
-      payload: .message(.toolResult(toolResult)),
+      payload: .knownCustom(.mountDeclared(mount)),
     )
 
     let behavior = WuhuSessionBehavior(
@@ -41,9 +34,11 @@ struct WuhuSessionBehaviorTests {
 
     let state = try await behavior.loadState()
     let primaryMount = try #require(state.mounts.primaryMount)
-    #expect(primaryMount.id == "mount-demo")
+    #expect(primaryMount.id == mount.id)
+    #expect(primaryMount.sessionID == mount.sessionID)
     #expect(primaryMount.name == "workspace")
     #expect(primaryMount.path == "/tmp/demo")
+    #expect(primaryMount.isPrimary == true)
     #expect(state.session.cwd == "/tmp/demo")
   }
 }

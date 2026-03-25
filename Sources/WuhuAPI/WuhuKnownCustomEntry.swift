@@ -30,6 +30,7 @@ public struct WuhuTextContextEntry: Sendable, Hashable, Codable {
 }
 
 public enum WuhuKnownCustomEntry: Sendable, Hashable {
+  case mountDeclared(WuhuMount)
   case mountContext(WuhuMountContextEntry)
   case agentsContext(WuhuTextContextEntry)
   case skillsContext(WuhuTextContextEntry)
@@ -38,6 +39,9 @@ public enum WuhuKnownCustomEntry: Sendable, Hashable {
 
   public init?(customType: String, data: JSONValue?) {
     switch customType {
+    case WuhuCustomMessageTypes.mountDeclared:
+      guard let data, let entry = decodeFromJSONValue(data, as: WuhuMount.self) else { return nil }
+      self = .mountDeclared(entry)
     case WuhuCustomMessageTypes.mountContext:
       guard let data, let entry = decodeFromJSONValue(data, as: WuhuMountContextEntry.self) else { return nil }
       self = .mountContext(entry)
@@ -60,6 +64,8 @@ public enum WuhuKnownCustomEntry: Sendable, Hashable {
 
   public var customType: String {
     switch self {
+    case .mountDeclared:
+      WuhuCustomMessageTypes.mountDeclared
     case .mountContext:
       WuhuCustomMessageTypes.mountContext
     case .agentsContext:
@@ -75,6 +81,8 @@ public enum WuhuKnownCustomEntry: Sendable, Hashable {
 
   public var data: JSONValue? {
     switch self {
+    case let .mountDeclared(mount):
+      try? WuhuJSON.encoder.encodeToJSONValue(mount)
     case let .mountContext(entry):
       try? WuhuJSON.encoder.encodeToJSONValue(entry)
     case let .agentsContext(entry):

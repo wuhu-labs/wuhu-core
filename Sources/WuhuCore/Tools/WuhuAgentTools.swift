@@ -559,33 +559,22 @@ extension WuhuService {
         isPrimary = !hasPrimaryMount
       }
 
-      let mount = try await store.createMount(
+      let mount = WuhuMount(
+        id: UUID().uuidString.lowercased(),
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
         mountTemplateID: mountTemplateID,
         isPrimary: isPrimary,
         runnerID: runnerID,
+        createdAt: Date(),
       )
 
-      // Update cwd if this is the primary mount
-      if isPrimary {
-        _ = try await setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
-      }
-
-      let mountContextPayloads = await mountContextPayloads(mount: mount, runner: runner)
+      let effects = await mountEffectEntries(mount: mount, runner: runner)
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
-        details: .object([
-          "mountID": .string(mount.id),
-          "name": .string(effectiveName),
-          "path": .string(mountPath),
-          "mountTemplateID": mountTemplateID.map { .string($0) } ?? .null,
-          "isPrimary": .bool(mount.isPrimary),
-          "runner": .string(runnerID.wireValue),
-          "mountContextPayloads": (try? WuhuJSON.encoder.encodeToJSONValue(mountContextPayloads)) ?? .array([]),
-        ]),
+        effects: effects,
       )
     }
   }
@@ -646,13 +635,14 @@ extension WuhuService {
       parentSessionID: parentSessionID,
     )
 
-    // Create mount record
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: childSessionID,
       name: mountTemplateIdentifier,
       path: resolved.workspacePath,
       mountTemplateID: resolved.templateID,
       isPrimary: true,
+      createdAt: Date(),
     )
 
     // Emit mount-level context

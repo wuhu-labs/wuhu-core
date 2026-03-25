@@ -57,6 +57,8 @@ enum WuhuPromptPreparation {
       // Convert typed context entries (AGENTS.md, skills, mount announcements) into user messages.
       if let customEntry = entry.payload.knownCustomEntry {
         let text: String? = switch customEntry {
+        case .mountDeclared:
+          nil
         case let .mountContext(entry):
           entry.text
         case let .agentsContext(entry):

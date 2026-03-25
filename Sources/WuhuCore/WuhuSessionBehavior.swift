@@ -84,12 +84,7 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func loadState() async throws -> State {
     let parts = try await store.loadLoopStateParts(sessionID: sessionID)
-    let persistedMounts = try await store.listMounts(sessionID: sessionID.rawValue)
-    var mounts = WuhuInterpretedMountState()
-    for mount in persistedMounts {
-      mounts.apply(mount)
-    }
-    let interpretedMounts = interpretToolState(entries: parts.entries, into: mounts)
+    let interpretedMounts = interpretToolState(entries: parts.entries)
     var session = parts.session
     if let primaryMount = interpretedMounts.primaryMount {
       session.cwd = primaryMount.path
@@ -152,12 +147,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State {
     let patch = try await buildLoopPersistencePatch(diff: diff, oldState: oldState, newState: newState)
     let durable = try await store.persistLoopStatePatch(sessionID: sessionID, patch: patch)
-    let persistedMounts = try await store.listMounts(sessionID: sessionID.rawValue)
-    var mounts = WuhuInterpretedMountState()
-    for mount in persistedMounts {
-      mounts.apply(mount)
-    }
-    let interpretedMounts = interpretToolState(entries: durable.entries, into: mounts)
+    let interpretedMounts = interpretToolState(entries: durable.entries)
     var session = durable.session
     if let primaryMount = interpretedMounts.primaryMount {
       session.cwd = primaryMount.path
@@ -427,8 +417,16 @@ struct WuhuSessionBehavior: AgentBehavior {
       payload: .message(.toolResult(toolResultMessage)),
       to: &state,
     )
-    appendToolSideEffectEntries(from: result, to: &state)
-    applyToolInterpretation(call: call, result: result, timestamp: now, state: &state)
+
+    for effect in result.effects {
+      _ = appendEntry(
+        createdAt: now,
+        payload: .knownCustom(effect),
+        to: &state,
+      )
+      applyKnownCustomEntry(effect, timestamp: now, state: &state)
+    }
+
     state.toolCallStatus[call.id] = .completed
     state.status = .init(status: statusForOperationalState(state))
   }
@@ -1047,38 +1045,21 @@ struct WuhuSessionBehavior: AgentBehavior {
     return .image(blobURI: uri, mimeType: mimeType)
   }
 
-  private func interpretToolState(
-    entries: [WuhuSessionEntry],
-    into mounts: WuhuInterpretedMountState,
-  ) -> WuhuInterpretedMountState {
-    var mounts = mounts
+  private func interpretToolState(entries: [WuhuSessionEntry]) -> WuhuInterpretedMountState {
+    var mounts = WuhuInterpretedMountState()
     for entry in entries {
-      guard case let .message(message) = entry.payload else { continue }
-      guard case let .toolResult(toolResult) = message else { continue }
-      applyToolInterpretation(
-        toolCallID: toolResult.toolCallId,
-        toolName: toolResult.toolName,
-        result: .init(content: toolResult.content.map { $0.toPi() }, details: toolResult.details),
-        timestamp: toolResult.timestamp,
-        state: &mounts,
-      )
+      guard let knownCustom = entry.payload.knownCustomEntry else { continue }
+      applyKnownCustomEntry(knownCustom, timestamp: entry.createdAt, state: &mounts)
     }
     return mounts
   }
 
-  private func applyToolInterpretation(
-    call: ToolCall,
-    result: ToolResult,
+  private func applyKnownCustomEntry(
+    _ effect: WuhuKnownCustomEntry,
     timestamp: Date,
     state: inout State,
   ) {
-    applyToolInterpretation(
-      toolCallID: call.id,
-      toolName: call.name,
-      result: result,
-      timestamp: timestamp,
-      state: &state.mounts,
-    )
+    applyKnownCustomEntry(effect, timestamp: timestamp, state: &state.mounts)
 
     if let primaryMount = state.mounts.primaryMount {
       state.session.cwd = primaryMount.path
@@ -1086,67 +1067,16 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  private func applyToolInterpretation(
-    toolCallID _: String,
-    toolName: String,
-    result: ToolResult,
-    timestamp: Date,
+  private func applyKnownCustomEntry(
+    _ effect: WuhuKnownCustomEntry,
+    timestamp _: Date,
     state: inout WuhuInterpretedMountState,
   ) {
-    guard toolName == WuhuAgentToolNames.mount else { return }
-    guard let mount = interpretedMount(from: result, timestamp: timestamp) else { return }
-    state.apply(mount)
-  }
-
-  private func interpretedMount(from result: ToolResult, timestamp: Date) -> WuhuMount? {
-    guard case let .object(details) = result.details else { return nil }
-    guard case let .string(mountID)? = details["mountID"],
-          case let .string(name)? = details["name"],
-          case let .string(path)? = details["path"],
-          case let .string(runnerWire)? = details["runner"]
-    else { return nil }
-
-    let mountTemplateID: String? = if case let .string(value)? = details["mountTemplateID"] {
-      value
-    } else {
-      nil
-    }
-
-    let isPrimary: Bool = if case let .bool(value)? = details["isPrimary"] {
-      value
-    } else {
-      false
-    }
-
-    let runnerID: RunnerID = if runnerWire == "local" {
-      .local
-    } else if runnerWire.hasPrefix("remote:") {
-      .remote(name: String(runnerWire.dropFirst("remote:".count)))
-    } else {
-      .remote(name: runnerWire)
-    }
-
-    return .init(
-      id: mountID,
-      sessionID: sessionID.rawValue,
-      name: name,
-      path: path,
-      mountTemplateID: mountTemplateID,
-      isPrimary: isPrimary,
-      runnerID: runnerID,
-      createdAt: timestamp,
-    )
-  }
-
-  private func appendToolSideEffectEntries(from result: ToolResult, to state: inout State) {
-    guard case let .object(details) = result.details else { return }
-    guard let payloadsValue = details["mountContextPayloads"] else { return }
-    guard let payloadData = try? WuhuJSON.encoder.encode(payloadsValue),
-          let payloads = try? WuhuJSON.decoder.decode([WuhuEntryPayload].self, from: payloadData)
-    else { return }
-
-    for payload in payloads {
-      _ = appendEntry(createdAt: Date(), payload: payload, to: &state)
+    switch effect {
+    case let .mountDeclared(mount):
+      state.apply(mount)
+    case .mountContext, .agentsContext, .skillsContext, .llmRetry, .llmGiveUp:
+      break
     }
   }
 }
