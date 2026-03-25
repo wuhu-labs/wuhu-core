@@ -190,7 +190,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 }
 
-struct ToolCallStatusRow: Codable, FetchableRecord, TableRecord {
+struct ToolCallStatusRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "tool_call_status"
   var sessionID: String
   var toolCallID: String
@@ -199,7 +199,7 @@ struct ToolCallStatusRow: Codable, FetchableRecord, TableRecord {
   var updatedAt: Date
 }
 
-struct UserQueuePendingRow: Codable, FetchableRecord, TableRecord {
+struct UserQueuePendingRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "user_queue_pending"
   var id: String
   var sessionID: String
@@ -208,16 +208,20 @@ struct UserQueuePendingRow: Codable, FetchableRecord, TableRecord {
   var payload: Data
 }
 
-struct UserQueueJournalRow: Codable, FetchableRecord, TableRecord {
+struct UserQueueJournalRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "user_queue_journal"
-  var id: Int64
+  var id: Int64?
   var sessionID: String
   var lane: String
   var payload: Data
   var createdAt: Date
+
+  mutating func didInsert(_ inserted: InsertionSuccess) {
+    id = inserted.rowID
+  }
 }
 
-struct SystemQueuePendingRow: Codable, FetchableRecord, TableRecord {
+struct SystemQueuePendingRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "system_queue_pending"
   var id: String
   var sessionID: String
@@ -225,12 +229,16 @@ struct SystemQueuePendingRow: Codable, FetchableRecord, TableRecord {
   var payload: Data
 }
 
-struct SystemQueueJournalRow: Codable, FetchableRecord, TableRecord {
+struct SystemQueueJournalRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "system_queue_journal"
-  var id: Int64
+  var id: Int64?
   var sessionID: String
   var payload: Data
   var createdAt: Date
+
+  mutating func didInsert(_ inserted: InsertionSuccess) {
+    id = inserted.rowID
+  }
 }
 
 // MARK: - Free functions

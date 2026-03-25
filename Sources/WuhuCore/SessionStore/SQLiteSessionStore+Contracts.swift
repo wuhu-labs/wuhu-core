@@ -423,19 +423,23 @@ extension SQLiteSessionStore {
     operation: SystemQueueEnqueueOperation,
   ) throws {
     if operation.insertPending {
-      let data = try WuhuJSON.encoder.encode(operation.item.input)
-      try db.execute(
-        sql: "INSERT INTO system_queue_pending (id, sessionID, enqueuedAt, payload) VALUES (?, ?, ?, ?)",
-        arguments: [operation.item.id.rawValue, sessionID.rawValue, operation.item.enqueuedAt, data],
+      var row = try SystemQueuePendingRow(
+        id: operation.item.id.rawValue,
+        sessionID: sessionID.rawValue,
+        enqueuedAt: operation.item.enqueuedAt,
+        payload: WuhuJSON.encoder.encode(operation.item.input),
       )
+      try row.insert(db)
     }
 
     let journal = SystemUrgentQueueJournalEntry.enqueued(item: operation.item)
-    let journalData = try WuhuJSON.encoder.encode(journal)
-    try db.execute(
-      sql: "INSERT INTO system_queue_journal (sessionID, payload, createdAt) VALUES (?, ?, ?)",
-      arguments: [sessionID.rawValue, journalData, operation.item.enqueuedAt],
+    var journalRow = try SystemQueueJournalRow(
+      id: nil,
+      sessionID: sessionID.rawValue,
+      payload: WuhuJSON.encoder.encode(journal),
+      createdAt: operation.item.enqueuedAt,
     )
+    try journalRow.insert(db)
 
     try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
     try setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
@@ -449,46 +453,53 @@ extension SQLiteSessionStore {
     switch operation.kind {
     case let .enqueue(item, insertPending):
       if insertPending {
-        let data = try WuhuJSON.encoder.encode(item.message)
-        try db.execute(
-          sql: """
-          INSERT INTO user_queue_pending (id, sessionID, lane, enqueuedAt, payload)
-          VALUES (?, ?, ?, ?, ?)
-          """,
-          arguments: [item.id.rawValue, sessionID.rawValue, operation.lane.rawValue, item.enqueuedAt, data],
+        var row = try UserQueuePendingRow(
+          id: item.id.rawValue,
+          sessionID: sessionID.rawValue,
+          lane: operation.lane.rawValue,
+          enqueuedAt: item.enqueuedAt,
+          payload: WuhuJSON.encoder.encode(item.message),
         )
+        try row.insert(db)
       }
 
       let journal = UserQueueJournalEntry.enqueued(lane: operation.lane, item: item)
-      let journalData = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: """
-        INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt)
-        VALUES (?, ?, ?, ?)
-        """,
-        arguments: [sessionID.rawValue, operation.lane.rawValue, journalData, item.enqueuedAt],
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: operation.lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: item.enqueuedAt,
       )
+      try journalRow.insert(db)
 
       try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
       try setExecutionStatus(db: db, sessionID: sessionID.rawValue, status: .running)
 
     case let .cancel(id, deletePending, createdAt):
       if deletePending {
-        try db.execute(
-          sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ? AND id = ?",
-          arguments: [sessionID.rawValue, operation.lane.rawValue, id.rawValue],
-        )
-        if db.changesCount == 0 {
+        guard let row = try UserQueuePendingRow
+          .filter(
+            Column("sessionID") == sessionID.rawValue &&
+              Column("lane") == operation.lane.rawValue &&
+              Column("id") == id.rawValue,
+          )
+          .fetchOne(db)
+        else {
           throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
         }
+        try row.delete(db)
       }
 
       let journal = UserQueueJournalEntry.canceled(lane: operation.lane, id: id, at: createdAt)
-      let journalData = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
-        arguments: [sessionID.rawValue, operation.lane.rawValue, journalData, createdAt],
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: operation.lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: createdAt,
       )
+      try journalRow.insert(db)
 
       try updateSessionUpdatedAt(db: db, sessionID: sessionID.rawValue)
       try maybeSetIdleIfNoPendingWork(db: db, sessionID: sessionID.rawValue)
@@ -519,13 +530,13 @@ extension SQLiteSessionStore {
     switch source {
     case let .systemMaterialization(id, deletePending, journalCreatedAt):
       if deletePending {
-        try db.execute(
-          sql: "DELETE FROM system_queue_pending WHERE sessionID = ? AND id = ?",
-          arguments: [sessionID.rawValue, id.rawValue],
-        )
-        if db.changesCount == 0 {
+        guard let row = try SystemQueuePendingRow
+          .filter(Column("sessionID") == sessionID.rawValue && Column("id") == id.rawValue)
+          .fetchOne(db)
+        else {
           throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
         }
+        try row.delete(db)
       }
 
       let journal = SystemUrgentQueueJournalEntry.materialized(
@@ -533,21 +544,27 @@ extension SQLiteSessionStore {
         transcriptEntryID: transcriptEntryID,
         at: journalCreatedAt,
       )
-      let data = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: "INSERT INTO system_queue_journal (sessionID, payload, createdAt) VALUES (?, ?, ?)",
-        arguments: [sessionID.rawValue, data, journalCreatedAt],
+      var journalRow = try SystemQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: journalCreatedAt,
       )
+      try journalRow.insert(db)
 
     case let .userMaterialization(lane, id, deletePending, journalCreatedAt):
       if deletePending {
-        try db.execute(
-          sql: "DELETE FROM user_queue_pending WHERE sessionID = ? AND lane = ? AND id = ?",
-          arguments: [sessionID.rawValue, lane.rawValue, id.rawValue],
-        )
-        if db.changesCount == 0 {
+        guard let row = try UserQueuePendingRow
+          .filter(
+            Column("sessionID") == sessionID.rawValue &&
+              Column("lane") == lane.rawValue &&
+              Column("id") == id.rawValue,
+          )
+          .fetchOne(db)
+        else {
           throw WuhuStoreError.sessionCorrupt("Queue item not found: \(id.rawValue)")
         }
+        try row.delete(db)
       }
 
       let journal = UserQueueJournalEntry.materialized(
@@ -556,26 +573,32 @@ extension SQLiteSessionStore {
         transcriptEntryID: transcriptEntryID,
         at: journalCreatedAt,
       )
-      let data = try WuhuJSON.encoder.encode(journal)
-      try db.execute(
-        sql: "INSERT INTO user_queue_journal (sessionID, lane, payload, createdAt) VALUES (?, ?, ?, ?)",
-        arguments: [sessionID.rawValue, lane.rawValue, data, journalCreatedAt],
+      var journalRow = try UserQueueJournalRow(
+        id: nil,
+        sessionID: sessionID.rawValue,
+        lane: lane.rawValue,
+        payload: WuhuJSON.encoder.encode(journal),
+        createdAt: journalCreatedAt,
       )
+      try journalRow.insert(db)
     }
   }
 
   private static func updateSessionUpdatedAt(db: Database, sessionID: String) throws {
-    try db.execute(
-      sql: "UPDATE sessions SET updatedAt = ? WHERE id = ?",
-      arguments: [Date(), sessionID],
-    )
+    guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+      throw WuhuStoreError.sessionNotFound(sessionID)
+    }
+    row.updatedAt = Date()
+    try row.update(db)
   }
 
   private static func setExecutionStatus(db: Database, sessionID: String, status: SessionExecutionStatus) throws {
-    try db.execute(
-      sql: "UPDATE sessions SET executionStatus = ?, updatedAt = ? WHERE id = ?",
-      arguments: [status.rawValue, Date(), sessionID],
-    )
+    guard var row = try SessionRow.fetchOne(db, key: sessionID) else {
+      throw WuhuStoreError.sessionNotFound(sessionID)
+    }
+    row.executionStatus = status.rawValue
+    row.updatedAt = Date()
+    try row.update(db)
   }
 
   private static func maybeSetIdleIfNoPendingWork(db: Database, sessionID: String) throws {
@@ -592,16 +615,18 @@ extension SQLiteSessionStore {
   }
 
   private static func pendingWorkCount(db: Database, sessionID: String) throws -> Int {
-    let systemCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM system_queue_pending WHERE sessionID = ?", arguments: [sessionID]) ?? 0
-    let userCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM user_queue_pending WHERE sessionID = ?", arguments: [sessionID]) ?? 0
-    let toolCount = try Int.fetchOne(
-      db,
-      sql: """
-      SELECT COUNT(*) FROM tool_call_status
-      WHERE sessionID = ? AND (status = ? OR status = ?)
-      """,
-      arguments: [sessionID, ToolCallStatus.pending.rawValue, ToolCallStatus.started.rawValue],
-    ) ?? 0
+    let systemCount = try SystemQueuePendingRow
+      .filter(Column("sessionID") == sessionID)
+      .fetchCount(db)
+    let userCount = try UserQueuePendingRow
+      .filter(Column("sessionID") == sessionID)
+      .fetchCount(db)
+    let toolCount = try ToolCallStatusRow
+      .filter(
+        Column("sessionID") == sessionID &&
+          (Column("status") == ToolCallStatus.pending.rawValue || Column("status") == ToolCallStatus.started.rawValue),
+      )
+      .fetchCount(db)
     return systemCount + userCount + toolCount
   }
 
