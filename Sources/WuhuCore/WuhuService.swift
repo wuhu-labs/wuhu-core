@@ -244,15 +244,12 @@ public actor WuhuService {
 
   func mountContextPayloads(mount: WuhuMount, runner: (any Runner)?) async -> [WuhuEntryPayload] {
     var payloads: [WuhuEntryPayload] = [
-      .custom(
-        customType: WuhuCustomMessageTypes.mountContext,
-        data: .object([
-          "mountID": .string(mount.id),
-          "name": .string(mount.name),
-          "path": .string(mount.path),
-          "text": .string("Mounted '\(mount.name)' at \(mount.path)"),
-        ]),
-      ),
+      .knownCustom(.mountContext(.init(
+        mountID: mount.id,
+        name: mount.name,
+        path: mount.path,
+        text: "Mounted '\(mount.name)' at \(mount.path)",
+      ))),
     ]
 
     let agentsFiles: [WuhuContextFile] = if let runner {
@@ -262,14 +259,11 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      payloads.append(.custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      ))
+      payloads.append(.knownCustom(.agentsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      ))))
     }
 
     let mountSkills: [WuhuSkill]
@@ -284,14 +278,11 @@ public actor WuhuService {
     }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
-      payloads.append(.custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      ))
+      payloads.append(.knownCustom(.skillsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      ))))
     }
 
     return payloads
@@ -310,17 +301,11 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      var data: [String: JSONValue] = [
-        "source": .string(agentsSource),
-        "text": .string(rendered),
-      ]
-      if let profileName {
-        data["profileName"] = .string(profileName)
-      }
-      let agentsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object(data),
-      )
+      let agentsPayload = WuhuEntryPayload.knownCustom(.agentsContext(.init(
+        source: agentsSource,
+        profileName: profileName,
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
     }
 
@@ -339,13 +324,10 @@ public actor WuhuService {
     )
     if !skills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: skills)
-      let skillsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("workspace"),
-          "text": .string(rendered),
-        ]),
-      )
+      let skillsPayload = WuhuEntryPayload.knownCustom(.skillsContext(.init(
+        source: "workspace",
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
     }
   }
