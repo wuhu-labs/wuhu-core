@@ -37,12 +37,13 @@ struct SkillsIntegrationTests {
       cwd: root.path,
     )
 
-    // Create a mount and emit mount context (skills are now injected as custom entries)
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: sessionID,
       name: "test-mount",
       path: root.path,
       isPrimary: true,
+      createdAt: Date(),
     )
     try await service.emitMountContext(sessionID: sessionID, mount: mount)
 
@@ -165,12 +166,13 @@ struct SkillsIntegrationTests {
       cwd: mountRoot.path,
     )
 
-    // Create a mount and emit mount context (this emits mount-level skills)
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: sessionID,
       name: "test-mount",
       path: mountRoot.path,
       isPrimary: true,
+      createdAt: Date(),
     )
     try await service.emitMountContext(sessionID: sessionID, mount: mount)
 
@@ -240,12 +242,14 @@ struct SkillsIntegrationTests {
       cwd: "/remote-ws",
     )
 
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: sessionID,
       name: "remote-ws",
       path: "/remote-ws",
       isPrimary: true,
       runnerID: .remote(name: "test-remote"),
+      createdAt: Date(),
     )
 
     // Emit context via the runner
@@ -309,12 +313,14 @@ struct SkillsIntegrationTests {
       cwd: "/empty-ws",
     )
 
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: sessionID,
       name: "empty-ws",
       path: "/empty-ws",
       isPrimary: true,
       runnerID: .remote(name: "empty-runner"),
+      createdAt: Date(),
     )
 
     // Should not throw even though AGENTS.md and skills don't exist

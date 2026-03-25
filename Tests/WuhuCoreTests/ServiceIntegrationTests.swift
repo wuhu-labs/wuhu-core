@@ -107,6 +107,58 @@ struct ServiceIntegrationTests {
     #expect(texts.contains("I can help with that!"))
   }
 
+  @Test func mountToolAffectsLaterToolCallsInSameAssistantTurn() async throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(
+      "wuhu-mount-state-\(UUID().uuidString.lowercased())",
+      isDirectory: true,
+    )
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: root) }
+
+    let readme = root.appendingPathComponent("README.md")
+    try "# Hello Mount State".write(to: readme, atomically: true, encoding: .utf8)
+
+    let mock = MockStreamFn(responses: [
+      .toolCalls([
+        MockToolCall(
+          id: "tc-mount",
+          name: WuhuAgentToolNames.mount,
+          arguments: .object([
+            "path": .string(root.path),
+            "name": .string("workspace"),
+          ]),
+        ),
+        MockToolCall(
+          id: "tc-read",
+          name: "read",
+          arguments: .object([
+            "path": .string("README.md"),
+          ]),
+        ),
+      ]),
+      .text("Read after mount worked."),
+    ])
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession(cwd: nil)
+    try await harness.enqueueAndWaitForIdle("mount then read", sessionID: session.id)
+
+    let toolResults = try await harness.messages(sessionID: session.id).compactMap { message -> WuhuToolResultMessage? in
+      if case let .toolResult(result) = message { return result }
+      return nil
+    }
+
+    let readResult = try #require(toolResults.first { $0.toolCallId == "tc-read" })
+    let readText = readResult.content.compactMap { block -> String? in
+      if case let .text(text, _) = block { return text }
+      return nil
+    }.joined(separator: "\n")
+
+    #expect(readText.contains("Hello Mount State"))
+    #expect(toolResults.contains { $0.toolCallId == "tc-mount" })
+  }
+
   @Test func sessionMetadataEditsRouteThroughRuntime() async throws {
     let mock = MockStreamFn(text: "unused")
     let harness = try TestHarness(mockLLM: mock)

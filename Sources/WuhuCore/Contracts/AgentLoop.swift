@@ -319,28 +319,17 @@ public actor AgentLoop<B: AgentBehavior> {
       behavior.toolDidFail(call, error: error, state: &state)
     }
 
-    let results: [(ToolCall, Result<B.ToolResult, any Error>)] =
-      await withTaskGroup(
-        of: (ToolCall, Result<B.ToolResult, any Error>).self,
-      ) { [behavior] group in
-        for call in allowed {
-          group.addTask {
-            do {
-              let result = try await behavior.executeToolCall(call)
-              return (call, .success(result))
-            } catch {
-              return (call, .failure(error))
-            }
-          }
-        }
-        var outputs: [(ToolCall, Result<B.ToolResult, any Error>)] = []
-        for await output in group {
-          outputs.append(output)
-        }
-        return outputs
+    // Tool calls are executed in transcript order so stateful tools can affect
+    // later tools in the same assistant turn.
+    for call in allowed {
+      let result: Result<B.ToolResult, any Error>
+      do {
+        let toolResult = try await behavior.executeToolCall(call, state: state)
+        result = .success(toolResult)
+      } catch {
+        result = .failure(error)
       }
 
-    for (call, result) in results {
       switch result {
       case let .success(toolResult):
         let argsHash = call.arguments.hashValue

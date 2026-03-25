@@ -178,15 +178,15 @@ func commandPrefix(_ command: String, maxChars: Int) -> String {
 }
 
 func renderCustomEntryMetaLine(customType: String, data: JSONValue?) -> String? {
-  guard let data else { return nil }
+  guard let entry = WuhuKnownCustomEntry(customType: customType, data: data) else { return nil }
 
-  if customType == WuhuLLMCustomEntryTypes.retry, let evt = decodeFromJSONValue(data, as: WuhuLLMRetryEvent.self) {
+  if case let .llmRetry(evt) = entry {
     let purpose = evt.purpose.map { " \($0)" } ?? ""
     let err = commandPrefix(collapseWhitespace(evt.error), maxChars: 240)
     return "LLM retry\(purpose): \(evt.retryIndex)/\(evt.maxRetries) in \(String(format: "%.2f", evt.backoffSeconds))s (\(err))"
   }
 
-  if customType == WuhuLLMCustomEntryTypes.giveUp, let evt = decodeFromJSONValue(data, as: WuhuLLMGiveUpEvent.self) {
+  if case let .llmGiveUp(evt) = entry {
     let purpose = evt.purpose.map { " \($0)" } ?? ""
     let err = commandPrefix(collapseWhitespace(evt.error), maxChars: 240)
     return "LLM failed\(purpose) after \(evt.maxRetries) retries (\(err))"

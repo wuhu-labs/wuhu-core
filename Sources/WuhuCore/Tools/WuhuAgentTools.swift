@@ -21,15 +21,16 @@ enum WuhuAgentToolNames {
 
 extension WuhuService {
   func agentToolset(
-    session: WuhuSession,
+    currentSessionID: String,
+    hasPrimaryMount: Bool,
     baseTools: [AnyAgentTool],
   ) -> [AnyAgentTool] {
     var tools = baseTools
-    tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
+    tools.append(contentsOf: agentManagementTools(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount))
     return tools
   }
 
-  private func agentManagementTools(currentSessionID: String) -> [AnyAgentTool] {
+  private func agentManagementTools(currentSessionID: String, hasPrimaryMount: Bool) -> [AnyAgentTool] {
     [
       createSessionTool(currentSessionID: currentSessionID),
       listChildSessionsTool(currentSessionID: currentSessionID),
@@ -39,7 +40,7 @@ extension WuhuService {
       sessionFollowUpTool(),
       mountTemplateListTool(),
       mountTemplateGetTool(),
-      mountTool(currentSessionID: currentSessionID),
+      mountTool(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount),
       listRunnersTool(),
     ]
   }
@@ -455,7 +456,7 @@ extension WuhuService {
     }
   }
 
-  private func mountTool(currentSessionID: String) -> AnyAgentTool {
+  private func mountTool(currentSessionID: String, hasPrimaryMount: Bool) -> AnyAgentTool {
     struct Params: Sendable {
       var path: String?
       var name: String?
@@ -550,39 +551,28 @@ extension WuhuService {
       }
 
       // Determine primary: explicit > first-mount-is-primary
-      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
       let isPrimary: Bool = if let explicit = params.primary {
         explicit
       } else {
-        existingMounts.isEmpty
+        !hasPrimaryMount
       }
 
-      let mount = try await store.createMount(
+      let mount = WuhuMount(
+        id: UUID().uuidString.lowercased(),
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
         mountTemplateID: mountTemplateID,
         isPrimary: isPrimary,
         runnerID: runnerID,
+        createdAt: Date(),
       )
 
-      // Update cwd if this is the primary mount
-      if isPrimary {
-        _ = try await setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
-      }
-
-      // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
-      try await emitMountContext(sessionID: currentSessionID, mount: mount, runner: runner)
+      let effects = await mountEffectEntries(mount: mount, runner: runner)
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
-        details: .object([
-          "mountID": .string(mount.id),
-          "name": .string(effectiveName),
-          "path": .string(mountPath),
-          "isPrimary": .bool(mount.isPrimary),
-          "runner": .string(runnerID.wireValue),
-        ]),
+        effects: effects,
       )
     }
   }
@@ -643,13 +633,14 @@ extension WuhuService {
       parentSessionID: parentSessionID,
     )
 
-    // Create mount record
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: childSessionID,
       name: mountTemplateIdentifier,
       path: resolved.workspacePath,
       mountTemplateID: resolved.templateID,
       isPrimary: true,
+      createdAt: Date(),
     )
 
     // Emit mount-level context

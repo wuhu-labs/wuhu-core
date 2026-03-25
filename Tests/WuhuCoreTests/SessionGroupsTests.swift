@@ -166,11 +166,8 @@ private func makeProfileWorkspace(
 
 private func agentsContextText(from entries: [WuhuSessionEntry]) -> String? {
   for entry in entries {
-    guard case let .custom(customType, data) = entry.payload else { continue }
-    guard customType == WuhuCustomMessageTypes.agentsContext else { continue }
-    guard case let .object(object)? = data else { continue }
-    guard case let .string(text)? = object["text"] else { continue }
-    return text
+    guard case let .agentsContext(context)? = entry.payload.knownCustomEntry else { continue }
+    return context.text
   }
   return nil
 }

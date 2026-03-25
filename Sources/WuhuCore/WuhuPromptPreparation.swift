@@ -54,25 +54,31 @@ enum WuhuPromptPreparation {
     for (idx, entry) in transcript[startIndex...].enumerated() {
       let entryIndex = startIndex + idx
 
-      // Convert context custom entries (AGENTS.md, skills, mount announcements) into user messages
-      if case let .custom(customType, data) = entry.payload,
-         [
-           WuhuCustomMessageTypes.agentsContext,
-           WuhuCustomMessageTypes.skillsContext,
-           WuhuCustomMessageTypes.mountContext
-         ].contains(customType),
-         case let .object(obj) = data,
-         case let .string(text) = obj["text"],
-         !text.isEmpty
-      {
-        let userMsg = Message.user(UserMessage(content: [.text(text)]))
-        if pendingToolCallIDs.isEmpty {
-          messages.append(userMsg)
-        } else {
-          // Defer until all pending tool results arrive
-          deferredContextMessages.append(userMsg)
+      // Convert typed context entries (AGENTS.md, skills, mount announcements) into user messages.
+      if let customEntry = entry.payload.knownCustomEntry {
+        let text: String? = switch customEntry {
+        case .mountDeclared:
+          nil
+        case let .mountContext(entry):
+          entry.text
+        case let .agentsContext(entry):
+          entry.text
+        case let .skillsContext(entry):
+          entry.text
+        case .llmRetry, .llmGiveUp:
+          nil
         }
-        continue
+
+        if let text, !text.isEmpty {
+          let userMsg = Message.user(UserMessage(content: [.text(text)]))
+          if pendingToolCallIDs.isEmpty {
+            messages.append(userMsg)
+          } else {
+            // Defer until all pending tool results arrive
+            deferredContextMessages.append(userMsg)
+          }
+          continue
+        }
       }
 
       guard case let .message(m) = entry.payload else { continue }

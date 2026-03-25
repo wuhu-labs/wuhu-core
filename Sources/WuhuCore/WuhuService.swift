@@ -88,11 +88,12 @@ public actor WuhuService {
     await asyncBashRegistry.startReapWatchdog()
   }
 
-  private func runtime(for sessionID: String) -> WuhuSessionRuntime {
+  func runtime(for sessionID: String) -> WuhuSessionRuntime {
     if let existing = runtimes[sessionID] { return existing }
     let runtime = WuhuSessionRuntime(
       sessionID: .init(rawValue: sessionID),
       store: store,
+      runnerRegistry: runnerRegistry,
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
@@ -236,19 +237,22 @@ public actor WuhuService {
   /// When `runner` is provided, files are read via the runner's FileIO ops (works for both local and remote).
   /// When `runner` is nil, files are read from the local filesystem.
   public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any Runner)?) async throws {
-    // Mount announcement
-    let announcementPayload: WuhuEntryPayload = .custom(
-      customType: WuhuCustomMessageTypes.mountContext,
-      data: .object([
-        "mountID": .string(mount.id),
-        "name": .string(mount.name),
-        "path": .string(mount.path),
-        "text": .string("Mounted '\(mount.name)' at \(mount.path)"),
-      ]),
-    )
-    _ = try await store.appendEntry(sessionID: sessionID, payload: announcementPayload)
+    for entry in await mountEffectEntries(mount: mount, runner: runner) {
+      _ = try await store.appendEntry(sessionID: sessionID, payload: .knownCustom(entry))
+    }
+  }
 
-    // Mount-level AGENTS.md
+  func mountEffectEntries(mount: WuhuMount, runner: (any Runner)?) async -> [WuhuKnownCustomEntry] {
+    var entries: [WuhuKnownCustomEntry] = [
+      .mountDeclared(mount),
+      .mountContext(.init(
+        mountID: mount.id,
+        name: mount.name,
+        path: mount.path,
+        text: "Mounted '\(mount.name)' at \(mount.path)",
+      )),
+    ]
+
     let agentsFiles: [WuhuContextFile] = if let runner {
       await loadAgentsFilesViaRunner(runner: runner, root: mount.path)
     } else {
@@ -256,18 +260,13 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      let agentsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      )
-      _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
+      entries.append(.agentsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      )))
     }
 
-    // Mount-level skills
     let mountSkills: [WuhuSkill]
     if let runner {
       mountSkills = await loadSkillsViaRunner(runner: runner, root: mount.path)
@@ -280,16 +279,14 @@ public actor WuhuService {
     }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
-      let skillsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      )
-      _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
+      entries.append(.skillsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      )))
     }
+
+    return entries
   }
 
   /// Emit workspace-level or profile-level context entries (AGENTS.md, skills).
@@ -305,17 +302,11 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      var data: [String: JSONValue] = [
-        "source": .string(agentsSource),
-        "text": .string(rendered),
-      ]
-      if let profileName {
-        data["profileName"] = .string(profileName)
-      }
-      let agentsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object(data),
-      )
+      let agentsPayload = WuhuEntryPayload.knownCustom(.agentsContext(.init(
+        source: agentsSource,
+        profileName: profileName,
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
     }
 
@@ -334,13 +325,10 @@ public actor WuhuService {
     )
     if !skills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: skills)
-      let skillsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("workspace"),
-          "text": .string(rendered),
-        ]),
-      )
+      let skillsPayload = WuhuEntryPayload.knownCustom(.skillsContext(.init(
+        source: "workspace",
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
     }
   }
@@ -699,25 +687,29 @@ enum WuhuContextRenderer {
 extension WuhuService: SessionCommanding, SessionSubscribing {
   public func enqueue(sessionID: SessionID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
     await ensureAsyncBashRouter()
-    let session = try await store.getSession(id: sessionID.rawValue)
-
     let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
-    let mountResolver = MountResolverFactory.make(
-      sessionID: sid,
-      store: store,
-      runnerRegistry: runnerRegistry,
-    )
-    let baseTools = WuhuTools.codingAgentTools(
-      cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
-      mountResolver: mountResolver,
-      asyncBash: asyncBash,
-      braveSearchAPIKey: braveSearchAPIKey,
-    )
-    let resolvedTools = agentToolset(session: session, baseTools: baseTools)
+    let runtime = runtime(for: sid)
+    await runtime.setToolProvider { [weak self] state in
+      guard let self else { return [] }
 
-    let runtime = runtime(for: sessionID.rawValue)
-    await runtime.setTools(resolvedTools)
+      let mountResolver: MountResolver = { [runnerRegistry = self.runnerRegistry] mountName in
+        try await Self.resolveMount(named: mountName, in: state, runnerRegistry: runnerRegistry)
+      }
+
+      let baseTools = WuhuTools.codingAgentTools(
+        cwdProvider: { state.session.cwd },
+        mountResolver: mountResolver,
+        asyncBash: asyncBash,
+        braveSearchAPIKey: braveSearchAPIKey,
+      )
+
+      return await agentToolset(
+        currentSessionID: state.session.id,
+        hasPrimaryMount: state.mounts.primaryMount != nil,
+        baseTools: baseTools,
+      )
+    }
     try await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }
@@ -830,5 +822,40 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       steer: steer,
       followUp: followUp,
     )
+  }
+}
+
+private extension WuhuService {
+  static func resolveMount(
+    named rawName: String?,
+    in state: WuhuSessionLoopState,
+    runnerRegistry: RunnerRegistry,
+  ) async throws -> ResolvedMount {
+    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let mountName, !mountName.isEmpty {
+      guard let mount = state.mounts.mount(named: mountName) else {
+        throw MountResolutionError.mountNotFound(name: mountName)
+      }
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    if let mount = state.mounts.primaryMount {
+      guard let runner = await runnerRegistry.get(mount.runnerID) else {
+        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
+      }
+      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+    }
+
+    guard let cwd = state.session.cwd else {
+      throw MountResolutionError.noCwd
+    }
+    guard let runner = await runnerRegistry.get(.local) else {
+      throw MountResolutionError.runnerUnavailable(runnerID: .local)
+    }
+    return ResolvedMount(runner: runner, cwd: cwd)
   }
 }

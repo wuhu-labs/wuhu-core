@@ -204,10 +204,8 @@ public struct WuhuSessionTranscriptFormatter: Sendable {
         ))
         printedAnyVisibleMessage = true
 
-      case let .custom(customType, data):
-        guard let data else { break }
-
-        if customType == WuhuLLMCustomEntryTypes.retry, let evt = decodeFromJSONValue(data, as: WuhuLLMRetryEvent.self) {
+      case .custom:
+        if case let .llmRetry(evt)? = entry.payload.knownCustomEntry {
           let purpose = evt.purpose.map { " \($0)" } ?? ""
           let err = commandPrefix(collapseWhitespace(evt.error), maxChars: 240)
           appendMetaLine(
@@ -217,7 +215,7 @@ public struct WuhuSessionTranscriptFormatter: Sendable {
           break
         }
 
-        if customType == WuhuLLMCustomEntryTypes.giveUp, let evt = decodeFromJSONValue(data, as: WuhuLLMGiveUpEvent.self) {
+        if case let .llmGiveUp(evt)? = entry.payload.knownCustomEntry {
           let purpose = evt.purpose.map { " \($0)" } ?? ""
           let err = commandPrefix(collapseWhitespace(evt.error), maxChars: 240)
           appendMetaLine(

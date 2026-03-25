@@ -5,6 +5,7 @@ import WuhuAPI
 actor WuhuSessionRuntime {
   private let sessionID: SessionID
   private let store: SQLiteSessionStore
+  private let runnerRegistry: RunnerRegistry
   private let eventHub: WuhuLiveEventHub
   private let subscriptionHub: WuhuSessionSubscriptionHub
   private let runtimeConfig: WuhuSessionRuntimeConfig
@@ -24,6 +25,7 @@ actor WuhuSessionRuntime {
   init(
     sessionID: SessionID,
     store: SQLiteSessionStore,
+    runnerRegistry: RunnerRegistry,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
@@ -32,6 +34,7 @@ actor WuhuSessionRuntime {
   ) {
     self.sessionID = sessionID
     self.store = store
+    self.runnerRegistry = runnerRegistry
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
@@ -72,8 +75,8 @@ actor WuhuSessionRuntime {
     }
   }
 
-  func setTools(_ tools: [AnyAgentTool]) async {
-    await runtimeConfig.setTools(tools)
+  func setToolProvider(_ provider: @escaping WuhuSessionToolProvider) async {
+    await runtimeConfig.setToolProvider(provider)
   }
 
   func isIdle() -> Bool {

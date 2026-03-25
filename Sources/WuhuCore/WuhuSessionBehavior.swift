@@ -37,6 +37,7 @@ struct WuhuSessionPersistenceDiff: Sendable {
 
 struct WuhuSessionLoopState: Sendable, Equatable {
   var session: WuhuSession
+  var mounts: WuhuInterpretedMountState
   var toolCallStatus: [String: ToolCallStatus]
   var entries: [WuhuSessionEntry]
   var settings: SessionSettingsSnapshot
@@ -56,6 +57,7 @@ struct WuhuSessionLoopState: Sendable, Equatable {
         headEntryID: 0,
         tailEntryID: 0,
       ),
+      mounts: .init(),
       toolCallStatus: [:],
       entries: [],
       settings: .init(effectiveModel: .init(provider: .openai, id: "unknown")),
@@ -82,8 +84,14 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func loadState() async throws -> State {
     let parts = try await store.loadLoopStateParts(sessionID: sessionID)
+    let interpretedMounts = interpretToolState(entries: parts.entries)
+    var session = parts.session
+    if let primaryMount = interpretedMounts.primaryMount {
+      session.cwd = primaryMount.path
+    }
     return .init(
-      session: parts.session,
+      session: session,
+      mounts: interpretedMounts,
       toolCallStatus: parts.toolCallStatus,
       entries: parts.entries,
       settings: parts.settings,
@@ -139,8 +147,14 @@ struct WuhuSessionBehavior: AgentBehavior {
   func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State {
     let patch = try await buildLoopPersistencePatch(diff: diff, oldState: oldState, newState: newState)
     let durable = try await store.persistLoopStatePatch(sessionID: sessionID, patch: patch)
+    let interpretedMounts = interpretToolState(entries: durable.entries)
+    var session = durable.session
+    if let primaryMount = interpretedMounts.primaryMount {
+      session.cwd = primaryMount.path
+    }
     return .init(
-      session: durable.session,
+      session: session,
+      mounts: interpretedMounts,
       toolCallStatus: durable.toolCallStatus,
       entries: durable.entries,
       settings: durable.settings,
@@ -305,15 +319,14 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func buildContext(state: State) -> Context {
     let header = (try? WuhuPromptPreparation.extractHeader(from: state.entries, sessionID: sessionID.rawValue))
-    let systemPrompt = header?.systemPrompt ?? ""
     let messages = WuhuPromptPreparation.extractContextMessages(from: state.entries)
     let hydrated = hydrateImageBlobs(in: messages)
-    return Context(systemPrompt: systemPrompt, messages: hydrated, tools: [])
+    return Context(systemPrompt: header?.systemPrompt ?? "", messages: hydrated, tools: [])
   }
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
     let session = try await store.getSession(id: sessionID.rawValue)
-    let tools = await runtimeConfig.tools()
+    let tools = await runtimeConfig.tools(for: stateForToolCatalog(session: session))
 
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let provider = session.provider.piProvider
@@ -322,13 +335,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     requestOptions.sessionId = sessionID.rawValue
     mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
 
-    var effectiveSystemPrompt = context.systemPrompt ?? ""
-    if let cwd = session.cwd {
-      effectiveSystemPrompt += "\n\nWorking directory: \(cwd)\nAll relative paths are resolved from this directory."
-    }
-
     let effectiveContext = Context(
-      systemPrompt: effectiveSystemPrompt,
+      systemPrompt: context.systemPrompt,
       messages: context.messages,
       tools: tools.map(\.tool),
     )
@@ -375,8 +383,8 @@ struct WuhuSessionBehavior: AgentBehavior {
     state.status = .init(status: .running)
   }
 
-  func executeToolCall(_ call: ToolCall) async throws -> ToolResult {
-    let tools = await runtimeConfig.tools()
+  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult {
+    let tools = await runtimeConfig.tools(for: state)
     guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
       throw WuhuAIError.unsupported("Unknown tool: \(call.name)")
     }
@@ -405,6 +413,16 @@ struct WuhuSessionBehavior: AgentBehavior {
       payload: .message(.toolResult(toolResultMessage)),
       to: &state,
     )
+
+    for effect in result.effects {
+      _ = appendEntry(
+        createdAt: now,
+        payload: .knownCustom(effect),
+        to: &state,
+      )
+      applyKnownCustomEntry(effect, timestamp: now, state: &state)
+    }
+
     state.toolCallStatus[call.id] = .completed
     state.status = .init(status: statusForOperationalState(state))
   }
@@ -1021,6 +1039,60 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
     let uri = try blobStore.store(sessionID: sessionID.rawValue, data: rawData, mimeType: mimeType)
     return .image(blobURI: uri, mimeType: mimeType)
+  }
+
+  private func interpretToolState(entries: [WuhuSessionEntry]) -> WuhuInterpretedMountState {
+    var mounts = WuhuInterpretedMountState()
+    for entry in entries {
+      guard let knownCustom = entry.payload.knownCustomEntry else { continue }
+      applyKnownCustomEntry(knownCustom, timestamp: entry.createdAt, state: &mounts)
+    }
+    return mounts
+  }
+
+  private func applyKnownCustomEntry(
+    _ effect: WuhuKnownCustomEntry,
+    timestamp: Date,
+    state: inout State,
+  ) {
+    applyKnownCustomEntry(effect, timestamp: timestamp, state: &state.mounts)
+
+    if let primaryMount = state.mounts.primaryMount {
+      state.session.cwd = primaryMount.path
+      state.session.updatedAt = timestamp
+    }
+  }
+
+  private func applyKnownCustomEntry(
+    _ effect: WuhuKnownCustomEntry,
+    timestamp _: Date,
+    state: inout WuhuInterpretedMountState,
+  ) {
+    switch effect {
+    case let .mountDeclared(mount):
+      state.apply(mount)
+    case .mountContext, .agentsContext, .skillsContext, .llmRetry, .llmGiveUp:
+      break
+    }
+  }
+
+  private func stateForToolCatalog(session: WuhuSession) -> State {
+    .init(
+      session: session,
+      mounts: .init(),
+      toolCallStatus: [:],
+      entries: [],
+      settings: .init(
+        effectiveModel: .init(
+          provider: ProviderID(rawValue: session.provider.rawValue),
+          id: session.model,
+        ),
+      ),
+      status: .init(status: .idle),
+      systemUrgent: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+      steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+      followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
+    )
   }
 }
 
