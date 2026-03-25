@@ -54,60 +54,62 @@ public struct LoggingHTTPTransport: Sendable {
     span.attributes["http.status_code"] = response.status.code
     setHeaderAttributes(response.headers, prefix: "http.response.header", on: span)
 
-    let wrappedBody = BodyStream { continuation in
-      let task = Task {
-        var captured: Bytes = []
-        var terminalError: (any Error)?
+    let wrappedBody = Body.stream(contentType: response.body.contentType) {
+      AsyncThrowingStream<Bytes, Error> { continuation in
+        let task = Task {
+          var captured: Bytes = []
+          var terminalError: (any Error)?
 
-        defer {
-          writeResponse(
-            response: Response(status: response.status, headers: response.headers),
-            body: Data(captured),
-            to: dir,
-            error: terminalError,
-          )
-          span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
+          defer {
+            writeResponse(
+              response: Response(status: response.status, headers: response.headers),
+              body: Data(captured),
+              to: dir,
+              error: terminalError,
+            )
+            span.attributes["http.payload.response_path"] = "\(relativeDir)/response.txt"
 
-          if let terminalError {
-            span.recordError(terminalError)
-            span.setStatus(.init(code: .error, message: "\(terminalError)"))
+            if let terminalError {
+              span.recordError(terminalError)
+              span.setStatus(.init(code: .error, message: "\(terminalError)"))
+            }
+
+            span.end()
           }
 
-          span.end()
-        }
+          do {
+            for try await chunk in response.body.asyncBytes() {
+              captured.append(contentsOf: chunk)
+              switch continuation.yield(chunk) {
+              case .enqueued, .dropped:
+                continue
+              case .terminated:
+                terminalError = CancellationError()
+                return
+              @unknown default:
+                continue
+              }
+            }
+            continuation.finish()
 
-        do {
-          for try await chunk in response.body {
-            captured.append(contentsOf: chunk)
-            switch continuation.yield(chunk) {
-            case .enqueued, .dropped:
-              continue
-            case .terminated:
+            if Task.isCancelled {
               terminalError = CancellationError()
-              return
-            @unknown default:
-              continue
+            }
+          } catch {
+            terminalError = error
+
+            if Task.isCancelled {
+              continuation.finish()
+            } else {
+              continuation.finish(throwing: error)
             }
           }
-          continuation.finish()
-
-          if Task.isCancelled {
-            terminalError = CancellationError()
-          }
-        } catch {
-          terminalError = error
-
-          if Task.isCancelled {
-            continuation.finish()
-          } else {
-            continuation.finish(throwing: error)
-          }
         }
-      }
 
-      continuation.onTermination = { termination in
-        guard case .cancelled = termination else { return }
-        task.cancel()
+        continuation.onTermination = { termination in
+          guard case .cancelled = termination else { return }
+          task.cancel()
+        }
       }
     }
 
@@ -252,11 +254,7 @@ public struct LoggingHTTPTransport: Sendable {
 
   private func materialize(_ request: Request) async throws -> (Request, Data?) {
     guard let body = request.body else { return (request, nil) }
-
-    var bytes: Bytes = []
-    for try await chunk in body.stream {
-      bytes.append(contentsOf: chunk)
-    }
+    let bytes = try await body.bytes()
 
     var copy = request
     copy.body = .bytes(bytes, contentType: body.contentType)

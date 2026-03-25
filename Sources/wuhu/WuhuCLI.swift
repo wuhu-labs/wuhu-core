@@ -51,14 +51,21 @@ struct WuhuCLI: AsyncParsableCommand {
   struct RunnerCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "runner",
-      abstract: "Run a Wuhu runner (accepts connections from a Wuhu server).",
+      abstract: "Run a Wuhu runner.",
     )
 
     @Option(help: "Path to runner config YAML (default: ~/.wuhu/runner.yml).")
     var config: String?
 
+    @Flag(help: "Run the temporary HTTP runner instead of the mux/WebSocket runner.")
+    var http: Bool = false
+
     func run() async throws {
-      try await WuhuMuxRunnerServer().run(configPath: config)
+      if http {
+        try await WuhuHTTPRunnerServer().run(configPath: config)
+      } else {
+        try await WuhuMuxRunnerServer().run(configPath: config)
+      }
     }
   }
 
