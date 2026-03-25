@@ -190,8 +190,9 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  func drainInterruptItems(state: inout State) {
-    if state.status.status == .stopped { return }
+  @discardableResult
+  func drainInterruptItems(state: inout State) -> Bool {
+    if state.status.status == .stopped { return false }
 
     struct Candidate {
       enum Kind {
@@ -215,7 +216,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       return a.stableID < b.stableID
     }
 
-    guard !candidates.isEmpty else { return }
+    guard !candidates.isEmpty else { return false }
 
     state.systemUrgent.pending = []
     state.steer.pending = []
@@ -257,11 +258,13 @@ struct WuhuSessionBehavior: AgentBehavior {
       by: candidates.count { if case .steer = $0.kind { true } else { false } },
     )
     state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
+    return true
   }
 
-  func drainTurnItems(state: inout State) {
-    if state.status.status == .stopped { return }
-    guard !state.followUp.pending.isEmpty else { return }
+  @discardableResult
+  func drainTurnItems(state: inout State) -> Bool {
+    if state.status.status == .stopped { return false }
+    guard !state.followUp.pending.isEmpty else { return false }
 
     let items = state.followUp.pending.sorted {
       if $0.enqueuedAt != $1.enqueuedAt { return $0.enqueuedAt < $1.enqueuedAt }
@@ -285,6 +288,7 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
     state.followUp.cursor = advancedCursor(state.followUp.cursor, by: items.count)
     state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
+    return true
   }
 
   func buildContext(state: State) -> Context {

@@ -164,18 +164,14 @@ public actor AgentLoop<B: AgentBehavior> {
     }
 
     while !Task.isCancelled {
-      let oldInterruptState = state
-      behavior.drainInterruptItems(state: &state)
-      let drainedInterrupts = oldInterruptState != state
+      let drainedInterrupts = behavior.drainInterruptItems(state: &state)
 
       if drainedInterrupts {
         repetitionTracker.reset()
       }
 
       if !drainedInterrupts, !hasToolResults {
-        let oldTurnState = state
-        behavior.drainTurnItems(state: &state)
-        let drainedTurnItems = oldTurnState != state
+        let drainedTurnItems = behavior.drainTurnItems(state: &state)
         if !drainedTurnItems { break }
       }
 

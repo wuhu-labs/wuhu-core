@@ -61,12 +61,14 @@ public protocol AgentBehavior: Sendable {
   ///
   /// Called at the **interrupt checkpoint** — after tool results are
   /// collected, before next inference.
-  func drainInterruptItems(state: inout State)
+  @discardableResult
+  func drainInterruptItems(state: inout State) -> Bool
 
   /// Atomically drain turn-boundary items into the in-memory state.
   ///
   /// Called at the **turn boundary** — the agent would otherwise go idle.
-  func drainTurnItems(state: inout State)
+  @discardableResult
+  func drainTurnItems(state: inout State) -> Bool
 
   // MARK: Inference
 
