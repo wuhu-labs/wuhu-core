@@ -79,8 +79,10 @@ struct WuhuCLI: AsyncParsableCommand {
         Prompt.self,
         StopSession.self,
         GetSession.self,
+        ListProfiles.self,
         ListSkills.self,
         ListSessions.self,
+        SessionGroup.self,
         Workspace.self,
         User.self,
         Channel.self,
@@ -119,6 +121,9 @@ struct WuhuCLI: AsyncParsableCommand {
       @Option(help: "Direct path to mount.")
       var mountPath: String?
 
+      @Option(help: "Session group id (defaults to Inbox).")
+      var sessionGroupId: String?
+
       @Option(help: "System prompt override (optional).")
       var systemPrompt: String?
 
@@ -137,6 +142,7 @@ struct WuhuCLI: AsyncParsableCommand {
           systemPrompt: systemPrompt,
           mountTemplate: mountTemplate,
           mountPath: mountPath,
+          sessionGroupID: sessionGroupId,
           parentSessionID: parentSessionId,
         ))
         FileHandle.standardOutput.write(Data("\(session.id)\n".utf8))
@@ -402,6 +408,24 @@ struct WuhuCLI: AsyncParsableCommand {
       }
     }
 
+    struct ListProfiles: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        commandName: "list-profiles",
+        abstract: "List workspace profiles discovered under _profiles/.",
+      )
+
+      @OptionGroup
+      var shared: Shared
+
+      func run() async throws {
+        let client = try makeClient(shared.server)
+        let profiles = try await client.listProfiles()
+        for profile in profiles {
+          FileHandle.standardOutput.write(Data("\(profile.name)\t\(profile.agentsPath)\n".utf8))
+        }
+      }
+    }
+
     struct ListSessions: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "list-sessions",
@@ -411,15 +435,116 @@ struct WuhuCLI: AsyncParsableCommand {
       @Option(help: "Max sessions to list.")
       var limit: Int?
 
+      @Flag(help: "Include archived sessions.")
+      var includeArchived = false
+
+      @Option(help: "Only list sessions from this session group id.")
+      var sessionGroupId: String?
+
       @OptionGroup
       var shared: Shared
 
       func run() async throws {
         let client = try makeClient(shared.server)
-        let sessions = try await client.listSessions(limit: limit)
-        for s in sessions {
-          let cwdStr = s.cwd ?? "(no mount)"
-          FileHandle.standardOutput.write(Data("\(s.id)  \(s.provider.rawValue)  \(s.model)  cwd=\(cwdStr)  updatedAt=\(s.updatedAt)\n".utf8))
+        let sessions = try await client.listSessions(
+          limit: limit,
+          includeArchived: includeArchived,
+          sessionGroupID: sessionGroupId,
+        )
+        for summary in sessions {
+          let session = summary.session
+          let cwdStr = session.cwd ?? "(no mount)"
+          let lastMessage = summary.lastMessageText ?? "(no messages yet)"
+          FileHandle.standardOutput.write(
+            Data(
+              "\(session.id)\tgroup=\(session.sessionGroupID)\t\(summary.displayTitle)\t\(session.provider.rawValue)\t\(session.model)\tcwd=\(cwdStr)\tlast=\(lastMessage)\tupdatedAt=\(session.updatedAt)\n".utf8,
+            ),
+          )
+        }
+      }
+    }
+
+    struct SessionGroup: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        commandName: "session-group",
+        abstract: "Session group commands.",
+        subcommands: [
+          List.self,
+          Create.self,
+          Update.self,
+        ],
+      )
+
+      struct List: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "list",
+          abstract: "List session groups.",
+        )
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let groups = try await client.listSessionGroups()
+          for group in groups {
+            let profile = group.profileName ?? "(workspace default)"
+            let marker = group.isDefault ? " default" : ""
+            FileHandle.standardOutput.write(Data("\(group.id)\t\(group.name)\tprofile=\(profile)\(marker)\n".utf8))
+          }
+        }
+      }
+
+      struct Create: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "create",
+          abstract: "Create a session group.",
+        )
+
+        @Option(help: "Group name.")
+        var name: String
+
+        @Option(help: "Optional profile name under _profiles/.")
+        var profile: String?
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let group = try await client.createSessionGroup(.init(name: name, profileName: profile))
+          FileHandle.standardOutput.write(Data("\(group.id)\n".utf8))
+        }
+      }
+
+      struct Update: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+          commandName: "update",
+          abstract: "Rename a session group or change its profile.",
+        )
+
+        @Argument(help: "Session group id.")
+        var id: String
+
+        @Option(help: "New group name.")
+        var name: String
+
+        @Option(help: "Optional profile name under _profiles/. Use an empty string to clear.")
+        var profile: String?
+
+        @OptionGroup
+        var shared: Shared
+
+        func run() async throws {
+          let client = try makeClient(shared.server)
+          let normalizedProfile = profile?.trimmingCharacters(in: .whitespacesAndNewlines)
+          let request = WuhuUpdateSessionGroupRequest(
+            name: name,
+            profileName: normalizedProfile?.isEmpty == true ? nil : normalizedProfile,
+          )
+          let group = try await client.updateSessionGroup(id: id, request: request)
+          let profileText = group.profileName ?? "(workspace default)"
+          FileHandle.standardOutput.write(Data("\(group.id)\t\(group.name)\tprofile=\(profileText)\n".utf8))
         }
       }
     }

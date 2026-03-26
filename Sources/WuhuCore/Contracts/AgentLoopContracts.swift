@@ -5,39 +5,24 @@ import WuhuAI
 
 /// Domain-specific feature that drives an ``AgentLoop``.
 ///
-/// Owns persistence, inference, tool execution, and drain logic.
-/// All IO methods persist to the database and return **actions** describing
-/// what changed. The loop applies actions to in-memory state and emits
-/// them as observation events.
+/// Owns the state shape, domain rules, persistence diffing, inference,
+/// tool execution, and drain logic.
 ///
-/// ## Invariant
-///
-/// For every IO method that returns actions:
-///
-///     var state = /* current state */
-///     let actions = try await behavior.someMethod(state: state)
-///     for action in actions { behavior.apply(action, to: &state) }
-///     let reloaded = try await behavior.loadState()
-///     assert(state == reloaded)
-///
-/// The in-memory state after applying actions must equal a fresh load
-/// from the database. This **free test** verifies persistence, action
-/// generation, and the reducer in one assertion.
-///
-/// See <doc:ContractAgentLoop> for the full design rationale.
+/// The loop keeps a live in-memory state and only makes it externally
+/// visible after the behavior persists the diff from the last durable
+/// state to the new state.
 public protocol AgentBehavior: Sendable {
   // MARK: Associated Types
 
   /// Full state held by the loop.
   ///
-  /// The loop treats state as an opaque value — it is owned and evolved by
-  /// the behavior via ``apply(_:to:)``. The state must be equatable to support
-  /// observation snapshots and invariant checks.
+  /// The loop treats state as an opaque value. The state must be equatable so
+  /// the loop can detect when persistence work is needed.
   associatedtype State: Sendable & Equatable
 
-  /// Describes a persisted mutation. Applied to state by ``apply(_:to:)``,
-  /// then emitted to observers.
-  associatedtype CommittedAction: Sendable
+  /// Behavior-specific representation of the durable changes between two
+  /// versions of state.
+  associatedtype PersistenceDiff: Sendable
 
   /// Describes an ephemeral streaming update (inference text delta, etc.).
   /// Not persisted, not applied to committed state.
@@ -48,52 +33,42 @@ public protocol AgentBehavior: Sendable {
   associatedtype ExternalAction: Sendable
 
   /// The result of executing a tool. Opaque to the loop — it just
-  /// passes the value from ``executeToolCall(_:)`` to
+  /// passes the value from ``executeToolCall(_:state:)`` to
   /// ``toolDidExecute(_:result:state:)``.
   ///
   /// `Hashable` is required so the loop can detect consecutive
   /// identical tool results (see ``ToolCallRepetitionTracker``).
   associatedtype ToolResult: Sendable & Hashable
 
-  // MARK: State Management
-
-  /// Placeholder state used before ``loadState()`` runs.
-  ///
-  /// The loop initializes synchronously, but real state is loaded async at
-  /// startup. This value should be cheap and deterministic.
-  static var emptyState: State { get }
-
   /// Load full state from the database. Called once on startup.
   func loadState() async throws -> State
 
-  /// Pure reducer. Apply a committed action to in-memory state.
-  ///
-  /// - Important: Must be synchronous — no IO, no suspension.
-  func apply(_ action: CommittedAction, to state: inout State)
+  /// Compute the durable diff between two versions of state.
+  func diff(from oldState: State, to newState: State) -> PersistenceDiff?
+
+  /// Persist a previously computed diff and return the durable state that
+  /// should replace the loop's live state before observation.
+  func persist(_ diff: PersistenceDiff, from oldState: State, to newState: State) async throws -> State
 
   // MARK: External Actions
 
-  /// Handle a command from outside the loop.
-  ///
-  /// Persists the effect and returns actions. For example, an enqueue
-  /// command persists the queue item (and possibly flips `has_work`)
-  /// and returns actions that update in-memory queue state.
-  func handle(_ action: ExternalAction, state: State) async throws -> [CommittedAction]
+  /// Handle a command from outside the loop by mutating the in-memory state.
+  func handle(_ action: ExternalAction, state: inout State)
 
   // MARK: Drain
 
-  /// Atomically drain interrupt-priority items and write them to the
-  /// transcript. Returns actions describing what was drained.
+  /// Atomically drain interrupt-priority items into the in-memory state.
   ///
   /// Called at the **interrupt checkpoint** — after tool results are
   /// collected, before next inference.
-  func drainInterruptItems(state: State) async throws -> [CommittedAction]
+  @discardableResult
+  func drainInterruptItems(state: inout State) -> Bool
 
-  /// Atomically drain turn-boundary items and write them to the
-  /// transcript. Returns actions describing what was drained.
+  /// Atomically drain turn-boundary items into the in-memory state.
   ///
   /// Called at the **turn boundary** — the agent would otherwise go idle.
-  func drainTurnItems(state: State) async throws -> [CommittedAction]
+  @discardableResult
+  func drainTurnItems(state: inout State) -> Bool
 
   // MARK: Inference
 
@@ -114,25 +89,22 @@ public protocol AgentBehavior: Sendable {
 
   // MARK: Persist Inference Results
 
-  /// Persist the assistant's response and return actions.
+  /// Save the assistant's response into the in-memory state.
   func persistAssistantEntry(
     _ message: AssistantMessage,
-    state: State,
-  ) async throws -> [CommittedAction]
+    state: inout State,
+  )
 
   // MARK: Tool Lifecycle
 
-  /// Record that a tool call is about to execute.
-  ///
-  /// Persists the status change for crash recovery: on restart,
-  /// tool calls marked as started but not completed are treated as failed.
+  /// Mark that a tool call is about to execute in the in-memory state.
   func toolWillExecute(
     _ call: ToolCall,
-    state: State,
-  ) async throws -> [CommittedAction]
+    state: inout State,
+  )
 
   /// Execute a tool call. Runs outside the serialized path (parallel).
-  func executeToolCall(_ call: ToolCall) async throws -> ToolResult
+  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult
 
   /// Append supplementary text to a tool result.
   ///
@@ -140,38 +112,39 @@ public protocol AgentBehavior: Sendable {
   /// without knowing the concrete result type.
   func appendText(_ text: String, to result: ToolResult) -> ToolResult
 
-  /// Persist a tool result and return actions.
+  /// Save a tool result into the in-memory state.
   func toolDidExecute(
     _ call: ToolCall,
     result: ToolResult,
-    state: State,
-  ) async throws -> [CommittedAction]
+    state: inout State,
+  )
 
-  /// Persist an error for a tool call that threw during execution.
+  /// Save an error result for a tool call into the in-memory state.
   func toolDidFail(
     _ call: ToolCall,
     error: any Error,
-    state: State,
-  ) async throws -> [CommittedAction]
+    state: inout State,
+  )
 
   // MARK: Compaction
 
   /// Whether compaction should run after this inference.
   func shouldCompact(state: State) -> Bool
 
-  /// Perform compaction and return actions.
-  func performCompaction(state: State) async throws -> [CommittedAction]
+  /// Perform compaction and return the next in-memory state.
+  func performCompaction(state: State) async throws -> State
 
   // MARK: Crash Recovery
 
   /// Tool call IDs stuck in `.started` from a previous crash.
   func staleToolCallIDs(in state: State) -> [String]
 
-  /// Inject an error result for a crash-interrupted tool call.
+  /// Inject an error result for a crash-interrupted tool call into the
+  /// in-memory state.
   func recoverStaleToolCall(
     id: String,
-    state: State,
-  ) async throws -> [CommittedAction]
+    state: inout State,
+  )
 
   // MARK: Cold Start
 
@@ -231,12 +204,11 @@ public struct AgentStreamSink<Action: Sendable>: Sendable {
 
 /// Events emitted by the agent loop for observation.
 ///
-/// Committed actions advance the persisted state. Stream events are
-/// ephemeral — they are not persisted and do not advance the stable
-/// version.
-public enum AgentLoopEvent<CommittedAction: Sendable, StreamAction: Sendable>: Sendable {
-  /// A persisted mutation was applied to state.
-  case committed(CommittedAction)
+/// State updates are emitted only after the new state has been persisted.
+/// Stream events are ephemeral and do not advance the durable state.
+public enum AgentLoopEvent<State: Sendable, StreamAction: Sendable>: Sendable {
+  /// The durable state changed.
+  case stateUpdated(State)
 
   /// Inference streaming has begun.
   case streamBegan
@@ -263,12 +235,12 @@ public struct AgentLoopObservation<B: AgentBehavior>: Sendable {
   public var inflight: [B.StreamAction]?
 
   /// Live event stream from the point of observation.
-  public var events: AsyncStream<AgentLoopEvent<B.CommittedAction, B.StreamAction>>
+  public var events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>
 
   public init(
     state: B.State,
     inflight: [B.StreamAction]?,
-    events: AsyncStream<AgentLoopEvent<B.CommittedAction, B.StreamAction>>,
+    events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>,
   ) {
     self.state = state
     self.inflight = inflight

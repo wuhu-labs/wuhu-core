@@ -1,13 +1,20 @@
 import Foundation
 import WuhuAI
+import WuhuAPI
 
 public struct AgentToolResult: Sendable, Hashable {
   public var content: [ContentBlock]
   public var details: JSONValue
+  public var effects: [WuhuKnownCustomEntry]
 
-  public init(content: [ContentBlock], details: JSONValue = .object([:])) {
+  public init(
+    content: [ContentBlock],
+    details: JSONValue = .object([:]),
+    effects: [WuhuKnownCustomEntry] = [],
+  ) {
     self.content = content
     self.details = details
+    self.effects = effects
   }
 }
 

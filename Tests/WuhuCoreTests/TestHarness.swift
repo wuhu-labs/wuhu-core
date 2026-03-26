@@ -94,6 +94,8 @@ struct TestHarness {
     provider: WuhuProvider = .openai,
     model: String = "mock-model",
     systemPrompt: String = "You are a test assistant.",
+    sessionGroupID: String? = nil,
+    parentSessionID: String? = nil,
   ) async throws -> WuhuSession {
     let sessionID = UUID().uuidString.lowercased()
     return try await service.createSession(
@@ -102,6 +104,8 @@ struct TestHarness {
       model: model,
       systemPrompt: systemPrompt,
       cwd: cwd,
+      sessionGroupID: sessionGroupID,
+      parentSessionID: parentSessionID,
     )
   }
 

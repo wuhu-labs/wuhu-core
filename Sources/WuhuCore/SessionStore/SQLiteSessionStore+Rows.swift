@@ -34,39 +34,6 @@ struct MountTemplateRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 }
 
-struct MountRow: Codable, FetchableRecord, MutablePersistableRecord {
-  static let databaseTableName = "mounts"
-
-  var id: String
-  var sessionID: String
-  var name: String
-  var path: String
-  var mountTemplateID: String?
-  var isPrimary: Bool
-  var runnerID: String
-  var createdAt: Date
-
-  func toModel() -> WuhuMount {
-    let runner: RunnerID = if runnerID == "local" {
-      .local
-    } else if runnerID.hasPrefix("remote:") {
-      .remote(name: String(runnerID.dropFirst("remote:".count)))
-    } else {
-      .local
-    }
-    return .init(
-      id: id,
-      sessionID: sessionID,
-      name: name,
-      path: path,
-      mountTemplateID: mountTemplateID,
-      isPrimary: isPrimary,
-      runnerID: runner,
-      createdAt: createdAt,
-    )
-  }
-}
-
 struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "sessions"
 
@@ -79,7 +46,9 @@ struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
   var pendingReasoningEffort: String?
   var executionStatus: String
   var cwd: String?
+  var sessionGroupID: String
   var parentSessionID: String?
+  var profileName: String?
   var customTitle: String?
   var isArchived: Bool
   var createdAt: Date
@@ -99,13 +68,37 @@ struct SessionRow: Codable, FetchableRecord, MutablePersistableRecord {
       provider: provider,
       model: model,
       cwd: cwd,
+      sessionGroupID: sessionGroupID,
       parentSessionID: parentSessionID,
+      profileName: profileName,
       customTitle: customTitle,
       isArchived: isArchived,
       createdAt: createdAt,
       updatedAt: updatedAt,
       headEntryID: headEntryID,
       tailEntryID: tailEntryID,
+    )
+  }
+}
+
+struct SessionGroupRow: Codable, FetchableRecord, MutablePersistableRecord {
+  static let databaseTableName = "session_groups"
+
+  var id: String
+  var name: String
+  var profileName: String?
+  var isDefault: Bool
+  var createdAt: Date
+  var updatedAt: Date
+
+  func toModel() -> WuhuSessionGroup {
+    .init(
+      id: id,
+      name: name,
+      profileName: profileName,
+      isDefault: isDefault,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
     )
   }
 }
@@ -125,6 +118,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 
   static func new(
+    id: Int64? = nil,
     sessionID: String,
     parentEntryID: Int64?,
     payload: WuhuEntryPayload,
@@ -132,7 +126,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   ) throws -> EntryRow {
     let encoded = try WuhuJSON.encoder.encode(payload)
     return .init(
-      id: nil,
+      id: id,
       sessionID: sessionID,
       parentEntryID: parentEntryID,
       type: payload.typeString,
@@ -163,7 +157,7 @@ struct EntryRow: Codable, FetchableRecord, MutablePersistableRecord {
   }
 }
 
-struct ToolCallStatusRow: Codable, FetchableRecord, TableRecord {
+struct ToolCallStatusRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "tool_call_status"
   var sessionID: String
   var toolCallID: String
@@ -172,7 +166,7 @@ struct ToolCallStatusRow: Codable, FetchableRecord, TableRecord {
   var updatedAt: Date
 }
 
-struct UserQueuePendingRow: Codable, FetchableRecord, TableRecord {
+struct UserQueuePendingRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "user_queue_pending"
   var id: String
   var sessionID: String
@@ -181,16 +175,20 @@ struct UserQueuePendingRow: Codable, FetchableRecord, TableRecord {
   var payload: Data
 }
 
-struct UserQueueJournalRow: Codable, FetchableRecord, TableRecord {
+struct UserQueueJournalRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "user_queue_journal"
-  var id: Int64
+  var id: Int64?
   var sessionID: String
   var lane: String
   var payload: Data
   var createdAt: Date
+
+  mutating func didInsert(_ inserted: InsertionSuccess) {
+    id = inserted.rowID
+  }
 }
 
-struct SystemQueuePendingRow: Codable, FetchableRecord, TableRecord {
+struct SystemQueuePendingRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "system_queue_pending"
   var id: String
   var sessionID: String
@@ -198,12 +196,16 @@ struct SystemQueuePendingRow: Codable, FetchableRecord, TableRecord {
   var payload: Data
 }
 
-struct SystemQueueJournalRow: Codable, FetchableRecord, TableRecord {
+struct SystemQueueJournalRow: Codable, FetchableRecord, MutablePersistableRecord {
   static let databaseTableName = "system_queue_journal"
-  var id: Int64
+  var id: Int64?
   var sessionID: String
   var payload: Data
   var createdAt: Date
+
+  mutating func didInsert(_ inserted: InsertionSuccess) {
+    id = inserted.rowID
+  }
 }
 
 // MARK: - Free functions

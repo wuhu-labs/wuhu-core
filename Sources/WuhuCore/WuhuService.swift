@@ -3,17 +3,31 @@ import Foundation
 import WuhuAI
 import WuhuAPI
 
+public enum WuhuProfileResolutionError: Error, Sendable, CustomStringConvertible {
+  case invalidProfileName(String)
+  case profileNotFound(String)
+  case profilesUnavailable
+
+  public var description: String {
+    switch self {
+    case let .invalidProfileName(name):
+      "Invalid profile name: \(name)"
+    case let .profileNotFound(name):
+      "Profile not found: \(name)"
+    case .profilesUnavailable:
+      "Profiles are unavailable because the server has no workspace root."
+    }
+  }
+}
+
 public actor WuhuService {
   let store: SQLiteSessionStore
   let blobStore: WuhuBlobStore
   private let retryPolicy: WuhuLLMRetryPolicy
-  private let asyncBashRegistry: WuhuAsyncBashRegistry
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
-  private let instanceID: String
   private let eventHub = WuhuLiveEventHub()
   private let subscriptionHub = WuhuSessionSubscriptionHub()
-  private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
   @Dependency(\.streamFn) private var streamFn
 
@@ -23,7 +37,6 @@ public actor WuhuService {
     store: SQLiteSessionStore,
     blobStore: WuhuBlobStore,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
-    asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry? = nil,
@@ -31,51 +44,22 @@ public actor WuhuService {
     self.store = store
     self.blobStore = blobStore
     self.retryPolicy = retryPolicy
-    self.asyncBashRegistry = asyncBashRegistry
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
-    instanceID = UUID().uuidString.lowercased()
   }
 
-  deinit {
-    let router = asyncBashRouter
-    let registry = asyncBashRegistry
-    if let router {
-      Task { await router.stop() }
-    }
-    Task { await registry.stopReapWatchdog() }
-  }
+  deinit {}
 
-  public func startAgentLoopManager() async {
-    await ensureAsyncBashRouter()
-  }
+  public func startAgentLoopManager() async {}
 
-  private func ensureAsyncBashRouter() async {
-    guard asyncBashRouter == nil else { return }
-    let router = WuhuAsyncBashCompletionRouter(
-      registry: asyncBashRegistry,
-      instanceID: instanceID,
-      enqueueSystemJSON: { [weak self] sessionID, jsonText, timestamp in
-        guard let self else { return }
-        do {
-          try await enqueueSystemJSON(sessionID: sessionID, jsonText: jsonText, timestamp: timestamp)
-        } catch {
-          let line = "[WuhuService] ERROR: failed to enqueue async bash completion for session '\(sessionID)': \(String(describing: error))\n"
-          FileHandle.standardError.write(Data(line.utf8))
-        }
-      },
-    )
-    asyncBashRouter = router
-    await router.start()
-    await asyncBashRegistry.startReapWatchdog()
-  }
-
-  private func runtime(for sessionID: String) -> WuhuSessionRuntime {
+  func runtime(for sessionID: String) -> WuhuSessionRuntime {
     if let existing = runtimes[sessionID] { return existing }
     let runtime = WuhuSessionRuntime(
       sessionID: .init(rawValue: sessionID),
       store: store,
+      runnerRegistry: runnerRegistry,
+      braveSearchAPIKey: braveSearchAPIKey,
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
@@ -84,11 +68,6 @@ public actor WuhuService {
     )
     runtimes[sessionID] = runtime
     return runtime
-  }
-
-  private func enqueueSystemJSON(sessionID: String, jsonText: String, timestamp: Date) async throws {
-    let input = SystemUrgentInput(source: .asyncBashCallback, content: .text(jsonText))
-    try await runtime(for: sessionID).enqueueSystem(input: input, enqueuedAt: timestamp)
   }
 
   private func logServiceError(_ message: String, error: Error) {
@@ -127,20 +106,23 @@ public actor WuhuService {
   }
 
   public func renameSession(sessionID: String, title: String) async throws -> WuhuSession {
-    try await store.renameSession(id: sessionID, title: title)
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    return try await runtime(for: sessionID).setCustomTitle(trimmed.isEmpty ? nil : trimmed)
   }
 
   public func archiveSession(sessionID: String) async throws -> WuhuSession {
-    try await store.archiveSession(id: sessionID)
+    try await runtime(for: sessionID).setArchived(true)
   }
 
   public func unarchiveSession(sessionID: String) async throws -> WuhuSession {
-    try await store.unarchiveSession(id: sessionID)
+    try await runtime(for: sessionID).setArchived(false)
+  }
+
+  func setSessionCwd(sessionID: String, cwd: String?) async throws -> WuhuSession {
+    try await runtime(for: sessionID).setCwd(cwd)
   }
 
   public func setSessionModel(sessionID: String, request: WuhuSetSessionModelRequest) async throws -> WuhuSetSessionModelResponse {
-    _ = try await store.getSession(id: sessionID)
-
     let effectiveModel: String = {
       let trimmed = (request.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       if !trimmed.isEmpty { return trimmed }
@@ -165,8 +147,23 @@ public actor WuhuService {
     reasoningEffort: ReasoningEffort? = nil,
     systemPrompt: String,
     cwd: String?,
+    sessionGroupID: String? = nil,
     parentSessionID: String? = nil,
   ) async throws -> WuhuSession {
+    let resolved: (sessionGroupID: String, profileName: String?)
+    if let parentSessionID {
+      let parent = try await store.getSession(id: parentSessionID)
+      resolved = (parent.sessionGroupID, parent.profileName)
+    } else {
+      let requestedGroupID = (sessionGroupID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let groupID = requestedGroupID.isEmpty ? WuhuSessionGroup.defaultID : requestedGroupID
+      let group = try await store.getSessionGroup(id: groupID)
+      if let profileName = group.profileName {
+        _ = try requireProfile(named: profileName)
+      }
+      resolved = (group.id, group.profileName)
+    }
+
     let session = try await store.createSession(
       sessionID: sessionID,
       provider: provider,
@@ -174,12 +171,18 @@ public actor WuhuService {
       reasoningEffort: reasoningEffort,
       systemPrompt: systemPrompt,
       cwd: cwd,
+      sessionGroupID: resolved.sessionGroupID,
       parentSessionID: parentSessionID,
+      profileName: resolved.profileName,
     )
 
     // Emit workspace-level context entries if workspace root is configured
     if let workspaceRoot {
-      try await emitWorkspaceContext(sessionID: session.id, workspaceRoot: workspaceRoot)
+      try await emitWorkspaceContext(
+        sessionID: session.id,
+        workspaceRoot: workspaceRoot,
+        profileName: resolved.profileName,
+      )
     }
 
     return try await store.getSession(id: session.id)
@@ -195,19 +198,22 @@ public actor WuhuService {
   /// When `runner` is provided, files are read via the runner's FileIO ops (works for both local and remote).
   /// When `runner` is nil, files are read from the local filesystem.
   public func emitMountContext(sessionID: String, mount: WuhuMount, runner: (any Runner)?) async throws {
-    // Mount announcement
-    let announcementPayload: WuhuEntryPayload = .custom(
-      customType: WuhuCustomMessageTypes.mountContext,
-      data: .object([
-        "mountID": .string(mount.id),
-        "name": .string(mount.name),
-        "path": .string(mount.path),
-        "text": .string("Mounted '\(mount.name)' at \(mount.path)"),
-      ]),
-    )
-    _ = try await store.appendEntry(sessionID: sessionID, payload: announcementPayload)
+    for entry in await mountEffectEntries(mount: mount, runner: runner) {
+      _ = try await store.appendEntry(sessionID: sessionID, payload: .knownCustom(entry))
+    }
+  }
 
-    // Mount-level AGENTS.md
+  func mountEffectEntries(mount: WuhuMount, runner: (any Runner)?) async -> [WuhuKnownCustomEntry] {
+    var entries: [WuhuKnownCustomEntry] = [
+      .mountDeclared(mount),
+      .mountContext(.init(
+        mountID: mount.id,
+        name: mount.name,
+        path: mount.path,
+        text: "Mounted '\(mount.name)' at \(mount.path)",
+      )),
+    ]
+
     let agentsFiles: [WuhuContextFile] = if let runner {
       await loadAgentsFilesViaRunner(runner: runner, root: mount.path)
     } else {
@@ -215,18 +221,13 @@ public actor WuhuService {
     }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      let agentsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      )
-      _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
+      entries.append(.agentsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      )))
     }
 
-    // Mount-level skills
     let mountSkills: [WuhuSkill]
     if let runner {
       mountSkills = await loadSkillsViaRunner(runner: runner, root: mount.path)
@@ -239,31 +240,34 @@ public actor WuhuService {
     }
     if !mountSkills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: mountSkills)
-      let skillsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("mount"),
-          "mountID": .string(mount.id),
-          "text": .string(rendered),
-        ]),
-      )
-      _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
+      entries.append(.skillsContext(.init(
+        source: "mount",
+        mountID: mount.id,
+        text: rendered,
+      )))
     }
+
+    return entries
   }
 
-  /// Emit workspace-level context entries (AGENTS.md, skills).
-  private func emitWorkspaceContext(sessionID: String, workspaceRoot: String) async throws {
-    // Workspace AGENTS.md
-    let agentsFiles = loadAgentsFiles(at: workspaceRoot)
+  /// Emit workspace-level or profile-level context entries (AGENTS.md, skills).
+  private func emitWorkspaceContext(sessionID: String, workspaceRoot: String, profileName: String?) async throws {
+    let agentsFiles: [WuhuContextFile]
+    let agentsSource: String
+    if let profileName {
+      agentsFiles = try loadProfileAgentsFiles(named: profileName, workspaceRoot: workspaceRoot)
+      agentsSource = "profile"
+    } else {
+      agentsFiles = loadAgentsFiles(at: workspaceRoot)
+      agentsSource = "workspace"
+    }
     if !agentsFiles.isEmpty {
       let rendered = WuhuContextRenderer.renderAgentsFiles(agentsFiles)
-      let agentsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.agentsContext,
-        data: .object([
-          "source": .string("workspace"),
-          "text": .string(rendered),
-        ]),
-      )
+      let agentsPayload = WuhuEntryPayload.knownCustom(.agentsContext(.init(
+        source: agentsSource,
+        profileName: profileName,
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: agentsPayload)
     }
 
@@ -282,19 +286,51 @@ public actor WuhuService {
     )
     if !skills.isEmpty {
       let rendered = WuhuSkills.promptSection(skills: skills)
-      let skillsPayload: WuhuEntryPayload = .custom(
-        customType: WuhuCustomMessageTypes.skillsContext,
-        data: .object([
-          "source": .string("workspace"),
-          "text": .string(rendered),
-        ]),
-      )
+      let skillsPayload = WuhuEntryPayload.knownCustom(.skillsContext(.init(
+        source: "workspace",
+        text: rendered,
+      )))
       _ = try await store.appendEntry(sessionID: sessionID, payload: skillsPayload)
     }
   }
 
   public func listSessions(limit: Int? = nil, includeArchived: Bool = false) async throws -> [WuhuSession] {
     try await store.listSessions(limit: limit, includeArchived: includeArchived)
+  }
+
+  public func listSessionSummaries(
+    limit: Int? = nil,
+    includeArchived: Bool = false,
+    sessionGroupID: String? = nil,
+  ) async throws -> [WuhuSessionSummary] {
+    try await store.listSessionSummaries(
+      limit: limit,
+      includeArchived: includeArchived,
+      sessionGroupID: sessionGroupID,
+    )
+  }
+
+  public func listSessionGroups() async throws -> [WuhuSessionGroup] {
+    try await store.listSessionGroups()
+  }
+
+  public func createSessionGroup(name: String, profileName: String?) async throws -> WuhuSessionGroup {
+    if let profileName = normalizedProfileName(profileName) {
+      _ = try requireProfile(named: profileName)
+    }
+    return try await store.createSessionGroup(name: name, profileName: profileName)
+  }
+
+  public func updateSessionGroup(id: String, name: String, profileName: String?) async throws -> WuhuSessionGroup {
+    if let profileName = normalizedProfileName(profileName) {
+      _ = try requireProfile(named: profileName)
+    }
+    return try await store.updateSessionGroup(id: id, name: name, profileName: profileName)
+  }
+
+  public func listProfiles() async throws -> [WuhuProfile] {
+    guard let workspaceRoot else { return [] }
+    return try loadProfiles(at: workspaceRoot)
   }
 
   public func getSession(id: String) async throws -> WuhuSession {
@@ -471,6 +507,60 @@ private func loadAgentsFiles(at root: String) -> [WuhuContextFile] {
   return files
 }
 
+private func normalizedProfileName(_ profileName: String?) -> String? {
+  let trimmed = profileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  return trimmed.isEmpty ? nil : trimmed
+}
+
+private func validateProfileName(_ profileName: String) throws {
+  guard !profileName.contains("/"), !profileName.contains("\\"), profileName != ".", profileName != ".." else {
+    throw WuhuProfileResolutionError.invalidProfileName(profileName)
+  }
+}
+
+private func profileRootURL(named profileName: String, workspaceRoot: String) throws -> URL {
+  try validateProfileName(profileName)
+  return URL(fileURLWithPath: workspaceRoot, isDirectory: true)
+    .appendingPathComponent("_profiles", isDirectory: true)
+    .appendingPathComponent(profileName, isDirectory: true)
+}
+
+private func loadProfileAgentsFiles(named profileName: String, workspaceRoot: String) throws -> [WuhuContextFile] {
+  let root = try profileRootURL(named: profileName, workspaceRoot: workspaceRoot).path
+  return loadAgentsFiles(at: root)
+}
+
+private func loadProfiles(at workspaceRoot: String) throws -> [WuhuProfile] {
+  let fm = FileManager.default
+  let profilesRoot = URL(fileURLWithPath: workspaceRoot, isDirectory: true)
+    .appendingPathComponent("_profiles", isDirectory: true)
+
+  guard fm.fileExists(atPath: profilesRoot.path) else { return [] }
+
+  return try fm.contentsOfDirectory(at: profilesRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+    .compactMap { url -> WuhuProfile? in
+      let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+      guard values?.isDirectory == true else { return nil }
+      let agentsPath = url.appendingPathComponent("AGENTS.md").path
+      guard fm.fileExists(atPath: agentsPath) else { return nil }
+      return WuhuProfile(name: url.lastPathComponent, agentsPath: agentsPath)
+    }
+    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+private extension WuhuService {
+  func requireProfile(named profileName: String) throws -> WuhuProfile {
+    guard let workspaceRoot else {
+      throw WuhuProfileResolutionError.profilesUnavailable
+    }
+    let normalized = normalizedProfileName(profileName) ?? profileName
+    guard let profile = try loadProfiles(at: workspaceRoot).first(where: { $0.name == normalized }) else {
+      throw WuhuProfileResolutionError.profileNotFound(profileName)
+    }
+    return profile
+  }
+}
+
 /// Load AGENTS.md files via a runner's FileIO ops (works for both local and remote runners).
 private func loadAgentsFilesViaRunner(runner: any Runner, root: String) async -> [WuhuContextFile] {
   let candidates = [
@@ -557,44 +647,31 @@ enum WuhuContextRenderer {
 
 extension WuhuService: SessionCommanding, SessionSubscribing {
   public func enqueue(sessionID: SessionID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
-    await ensureAsyncBashRouter()
-    let session = try await store.getSession(id: sessionID.rawValue)
-
-    let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
-    let mountResolver = MountResolverFactory.make(
-      sessionID: sid,
-      store: store,
-      runnerRegistry: runnerRegistry,
-    )
-    let baseTools = WuhuTools.codingAgentTools(
-      cwdProvider: { [store] in try await store.getSession(id: sid).cwd },
-      mountResolver: mountResolver,
-      asyncBash: asyncBash,
-      braveSearchAPIKey: braveSearchAPIKey,
-    )
-    let resolvedTools = agentToolset(session: session, baseTools: baseTools)
+    let runtime = runtime(for: sid)
+    await runtime.setToolProvider { [weak self] state in
+      guard let self else { return [] }
 
-    let runtime = runtime(for: sessionID.rawValue)
-    await runtime.setTools(resolvedTools)
-    await runtime.ensureStarted()
+      return await agentToolset(
+        currentSessionID: state.session.id,
+        hasPrimaryMount: state.mounts.primaryMount != nil,
+      )
+    }
+    try await runtime.ensureStarted()
     return try await runtime.enqueue(message: message, lane: lane)
   }
 
   public func cancel(sessionID: SessionID, id: QueueItemID, lane: UserQueueLane) async throws {
-    _ = try await store.getSession(id: sessionID.rawValue)
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.ensureStarted()
+    try await runtime.ensureStarted()
     try await runtime.cancel(id: id, lane: lane)
   }
 
   public func subscribe(sessionID: SessionID, since request: SessionSubscriptionRequest) async throws -> SessionSubscription {
-    _ = try await store.getSession(id: sessionID.rawValue)
-
     let live = await subscriptionHub.subscribe(sessionID: sessionID.rawValue)
 
     let runtime = runtime(for: sessionID.rawValue)
-    await runtime.ensureStarted()
+    try await runtime.ensureStarted()
 
     var initial = try await loadInitialState(sessionID: sessionID, request: request)
 

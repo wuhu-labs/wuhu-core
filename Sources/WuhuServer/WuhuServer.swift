@@ -305,13 +305,63 @@ public struct WuhuServer: Sendable {
 
     // MARK: - Sessions
 
-    router.get("v1/sessions") { request, context async throws -> [WuhuSession] in
+    router.get("v1/profiles") { _, _ async throws -> [WuhuProfile] in
+      try await service.listProfiles()
+    }
+
+    router.get("v1/session-groups") { _, _ async throws -> [WuhuSessionGroup] in
+      try await service.listSessionGroups()
+    }
+
+    router.post("v1/session-groups") { request, context async throws -> Response in
+      let create = try await request.decode(as: WuhuCreateSessionGroupRequest.self, context: context)
+      do {
+        let group = try await service.createSessionGroup(name: create.name, profileName: create.profileName)
+        return try context.responseEncoder.encode(group, from: request, context: context)
+      } catch let err as WuhuSessionGroupStoreError {
+        switch err {
+        case .nameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        case .cannotModifyDefaultGroup, .groupNotFound, .invalidName:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      } catch let err as WuhuProfileResolutionError {
+        throw HTTPError(.badRequest, message: err.description)
+      }
+    }
+
+    router.patch("v1/session-groups/:id") { request, context async throws -> Response in
+      let id = try context.parameters.require("id")
+      let update = try await request.decode(as: WuhuUpdateSessionGroupRequest.self, context: context)
+      do {
+        let group = try await service.updateSessionGroup(id: id, name: update.name, profileName: update.profileName)
+        return try context.responseEncoder.encode(group, from: request, context: context)
+      } catch let err as WuhuSessionGroupStoreError {
+        switch err {
+        case .groupNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        case .nameAlreadyExists:
+          throw HTTPError(.conflict, message: err.description)
+        case .cannotModifyDefaultGroup, .invalidName:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      } catch let err as WuhuProfileResolutionError {
+        throw HTTPError(.badRequest, message: err.description)
+      }
+    }
+
+    router.get("v1/sessions") { request, context async throws -> [WuhuSessionSummary] in
       struct Query: Decodable {
         var limit: Int?
         var includeArchived: Bool?
+        var sessionGroupID: String?
       }
       let query = try request.uri.decodeQuery(as: Query.self, context: context)
-      return try await service.listSessions(limit: query.limit, includeArchived: query.includeArchived ?? false)
+      return try await service.listSessionSummaries(
+        limit: query.limit,
+        includeArchived: query.includeArchived ?? false,
+        sessionGroupID: query.sessionGroupID,
+      )
     }
 
     router.get("v1/sessions/:id") { request, context async throws -> Response in
@@ -369,17 +419,28 @@ public struct WuhuServer: Sendable {
         cwd = nil
       }
 
-      _ = try await service.createSession(
-        sessionID: sessionID,
-        provider: create.provider,
-        model: model,
-        reasoningEffort: create.reasoningEffort,
-        systemPrompt: systemPrompt,
-        cwd: cwd,
-        parentSessionID: create.parentSessionID,
-      )
+      do {
+        _ = try await service.createSession(
+          sessionID: sessionID,
+          provider: create.provider,
+          model: model,
+          reasoningEffort: create.reasoningEffort,
+          systemPrompt: systemPrompt,
+          cwd: cwd,
+          sessionGroupID: create.sessionGroupID,
+          parentSessionID: create.parentSessionID,
+        )
+      } catch let err as WuhuSessionGroupStoreError {
+        switch err {
+        case .groupNotFound:
+          throw HTTPError(.notFound, message: err.description)
+        case .cannotModifyDefaultGroup, .invalidName, .nameAlreadyExists:
+          throw HTTPError(.badRequest, message: err.description)
+        }
+      } catch let err as WuhuProfileResolutionError {
+        throw HTTPError(.badRequest, message: err.description)
+      }
 
-      // Create mount record if we have a cwd
       if let cwd {
         let mountName: String
         let mountTemplateID: String?
@@ -394,14 +455,15 @@ public struct WuhuServer: Sendable {
           mountTemplateID = nil
         }
 
-        let mount = try await store.createMount(
+        mountToEmit = WuhuMount(
+          id: UUID().uuidString.lowercased(),
           sessionID: sessionID,
           name: mountName,
           path: cwd,
           mountTemplateID: mountTemplateID,
           isPrimary: true,
+          createdAt: Date(),
         )
-        mountToEmit = mount
       }
 
       // Emit mount-level context entries
@@ -411,12 +473,6 @@ public struct WuhuServer: Sendable {
 
       let finalSession = try await service.getSession(id: sessionID)
       return try context.responseEncoder.encode(finalSession, from: request, context: context)
-    }
-
-    router.get("v1/sessions/:id/mounts") { request, context async throws -> Response in
-      let id = try context.parameters.require("id")
-      let mounts = try await store.listMounts(sessionID: id)
-      return try context.responseEncoder.encode(mounts, from: request, context: context)
     }
 
     router.patch("v1/sessions/:id") { request, context async throws -> Response in

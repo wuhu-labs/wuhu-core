@@ -107,6 +107,92 @@ struct ServiceIntegrationTests {
     #expect(texts.contains("I can help with that!"))
   }
 
+  @Test func mountToolAffectsLaterToolCallsInSameAssistantTurn() async throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(
+      "wuhu-mount-state-\(UUID().uuidString.lowercased())",
+      isDirectory: true,
+    )
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: root) }
+
+    let readme = root.appendingPathComponent("README.md")
+    try "# Hello Mount State".write(to: readme, atomically: true, encoding: .utf8)
+
+    let mock = MockStreamFn(responses: [
+      .toolCalls([
+        MockToolCall(
+          id: "tc-mount",
+          name: WuhuAgentToolNames.mount,
+          arguments: .object([
+            "path": .string(root.path),
+            "name": .string("workspace"),
+          ]),
+        ),
+        MockToolCall(
+          id: "tc-read",
+          name: "read",
+          arguments: .object([
+            "path": .string("README.md"),
+          ]),
+        ),
+      ]),
+      .text("Read after mount worked."),
+    ])
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession(cwd: nil)
+    try await harness.enqueueAndWaitForIdle("mount then read", sessionID: session.id)
+
+    let toolResults = try await harness.messages(sessionID: session.id).compactMap { message -> WuhuToolResultMessage? in
+      if case let .toolResult(result) = message { return result }
+      return nil
+    }
+
+    let readResult = try #require(toolResults.first { $0.toolCallId == "tc-read" })
+    let readText = readResult.content.compactMap { block -> String? in
+      if case let .text(text, _) = block { return text }
+      return nil
+    }.joined(separator: "\n")
+
+    #expect(readText.contains("Hello Mount State"))
+    #expect(toolResults.contains { $0.toolCallId == "tc-mount" })
+  }
+
+  @Test func sessionMetadataEditsRouteThroughRuntime() async throws {
+    let mock = MockStreamFn(text: "unused")
+    let harness = try TestHarness(mockLLM: mock)
+
+    let session = try await harness.createSession(cwd: nil)
+
+    let renamed = try await harness.service.renameSession(sessionID: session.id, title: "  Breakfast Chat  ")
+    #expect(renamed.customTitle == "Breakfast Chat")
+
+    let archived = try await harness.service.archiveSession(sessionID: session.id)
+    #expect(archived.isArchived == true)
+
+    let cwdUpdated = try await harness.service.setSessionCwd(sessionID: session.id, cwd: "/tmp/workspace")
+    #expect(cwdUpdated.cwd == "/tmp/workspace")
+
+    var persisted: WuhuSession?
+    for _ in 0 ..< 500 {
+      let current = try await harness.store.getSession(id: session.id)
+      if current.customTitle == "Breakfast Chat",
+         current.isArchived == true,
+         current.cwd == "/tmp/workspace"
+      {
+        persisted = current
+        break
+      }
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    let final = try #require(persisted)
+    #expect(final.customTitle == "Breakfast Chat")
+    #expect(final.isArchived == true)
+    #expect(final.cwd == "/tmp/workspace")
+  }
+
   // MARK: - Resume after restart
 
   @Test func resumeAfterRestart() async throws {

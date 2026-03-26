@@ -4,8 +4,6 @@ import WuhuAPI
 
 enum WuhuAgentToolNames {
   static let bash = "bash"
-  static let asyncBash = "async_bash"
-  static let asyncBashStatus = "async_bash_status"
 
   static let listChildSessions = "list_child_sessions"
   static let readSessionFinalMessage = "read_session_final_message"
@@ -14,32 +12,28 @@ enum WuhuAgentToolNames {
   static let mountTemplateList = "mount_template_list"
   static let mountTemplateGet = "mount_template_get"
   static let createSession = "create_session"
-  static let joinSessions = "join_sessions"
   static let mount = "mount"
   static let listRunners = "list_runners"
 }
 
 extension WuhuService {
   func agentToolset(
-    session: WuhuSession,
-    baseTools: [AnyAgentTool],
+    currentSessionID: String,
+    hasPrimaryMount: Bool,
   ) -> [AnyAgentTool] {
-    var tools = baseTools
-    tools.append(contentsOf: agentManagementTools(currentSessionID: session.id))
-    return tools
+    agentManagementTools(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount)
   }
 
-  private func agentManagementTools(currentSessionID: String) -> [AnyAgentTool] {
+  private func agentManagementTools(currentSessionID: String, hasPrimaryMount: Bool) -> [AnyAgentTool] {
     [
       createSessionTool(currentSessionID: currentSessionID),
       listChildSessionsTool(currentSessionID: currentSessionID),
       readSessionFinalMessageTool(currentSessionID: currentSessionID),
-      joinSessionsTool(currentSessionID: currentSessionID),
       sessionSteerTool(),
       sessionFollowUpTool(),
       mountTemplateListTool(),
       mountTemplateGetTool(),
-      mountTool(currentSessionID: currentSessionID),
+      mountTool(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount),
       listRunnersTool(),
     ]
   }
@@ -197,156 +191,6 @@ extension WuhuService {
     }
   }
 
-  private func joinSessionsTool(currentSessionID: String) -> AnyAgentTool {
-    struct Params: Sendable {
-      var sessionIDs: [String]
-      var timeout: Double?
-
-      static func parse(toolName: String, args: JSONValue) throws -> Params {
-        let a = try ToolArgs(toolName: toolName, args: args)
-        let sessionIDs = try a.requireStringArray("sessionIDs")
-        let timeout = try a.optionalDouble("timeout")
-        try a.ensureNoExtraKeys(allowed: ["sessionIDs", "timeout"])
-        return .init(sessionIDs: sessionIDs, timeout: timeout)
-      }
-    }
-
-    let schema: JSONValue = .object([
-      "type": .string("object"),
-      "properties": .object([
-        "sessionIDs": .object([
-          "type": .string("array"),
-          "items": .object(["type": .string("string")]),
-          "description": .string("Session IDs to wait for. All must be child sessions of the current session."),
-        ]),
-        "timeout": .object([
-          "type": .string("number"),
-          "description": .string("Maximum seconds to wait before returning with partial results (optional, default: 3600)."),
-        ]),
-      ]),
-      "required": .array([.string("sessionIDs")]),
-      "additionalProperties": .bool(false),
-    ])
-
-    let tool = Tool(
-      name: WuhuAgentToolNames.joinSessions,
-      description: "Wait for one or more child sessions to finish (reach idle or stopped state). Blocks until all specified sessions are no longer running, then returns their final statuses and messages. Use this after dispatching parallel sessions with create_session or fork.",
-      parameters: schema,
-    )
-
-    return AnyAgentTool(tool: tool, label: WuhuAgentToolNames.joinSessions) { [weak self] _, args in
-      guard let self else { throw WuhuToolExecutionError(message: "Service unavailable") }
-      let params = try Params.parse(toolName: tool.name, args: args)
-
-      let ids = params.sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-      guard !ids.isEmpty else { throw WuhuToolExecutionError(message: "sessionIDs must not be empty") }
-
-      let children = try await store.listChildSessions(parentSessionID: currentSessionID)
-      let childIDs = Set(children.map(\.session.id))
-      for id in ids {
-        guard childIDs.contains(id) else {
-          throw WuhuToolExecutionError(message: "Session '\(id)' is not a child of the current session")
-        }
-      }
-
-      let timeout = params.timeout ?? 3600
-      let deadline = Date().addingTimeInterval(timeout)
-      var pending = Set(ids)
-
-      struct SessionResult: Sendable {
-        var id: String
-        var status: String
-        var finalMessage: String?
-        var finalEntryID: Int64?
-      }
-      var results: [SessionResult] = []
-
-      do {
-        let snapshot = try await store.listChildSessions(parentSessionID: currentSessionID)
-        let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.session.id, $0) })
-
-        for id in pending {
-          guard let record = byID[id] else { continue }
-          if record.executionStatus != .running {
-            let final = try? await loadFinalAssistantMessage(sessionID: id)
-            results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
-          }
-        }
-        for r in results {
-          pending.remove(r.id)
-        }
-      }
-
-      var intervalNs: UInt64 = 2_000_000_000
-      let maxIntervalNs: UInt64 = 30_000_000_000
-
-      while !pending.isEmpty, Date() < deadline {
-        try Task.checkCancellation()
-        try await Task.sleep(nanoseconds: intervalNs)
-        intervalNs = min(intervalNs * 2, maxIntervalNs)
-
-        let snapshot = try await store.listChildSessions(parentSessionID: currentSessionID)
-        let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.session.id, $0) })
-
-        var newlyDone: [String] = []
-        for id in pending {
-          guard let record = byID[id] else { continue }
-          if record.executionStatus != .running {
-            let final = try? await loadFinalAssistantMessage(sessionID: id)
-            results.append(.init(id: id, status: record.executionStatus.rawValue, finalMessage: final?.text, finalEntryID: final?.entryID))
-            newlyDone.append(id)
-          }
-        }
-        for id in newlyDone {
-          pending.remove(id)
-        }
-      }
-
-      let allDone = pending.isEmpty
-
-      let completedJSON: [JSONValue] = results.map { r in
-        .object([
-          "sessionID": .string(r.id),
-          "status": .string(r.status),
-          "finalMessage": r.finalMessage.map { .string($0) } ?? .null,
-          "finalEntryID": r.finalEntryID.map { .number(Double($0)) } ?? .null,
-        ])
-      }
-      let timedOutJSON: [JSONValue] = pending.sorted().map { id in
-        .object([
-          "sessionID": .string(id),
-          "status": .string("running"),
-        ])
-      }
-
-      let summary = results.map { "✅ \($0.id) [\($0.status)]" }
-        + pending.sorted().map { "⏳ \($0) [still running]" }
-
-      var text = allDone
-        ? "All \(ids.count) session\(ids.count == 1 ? "" : "s") completed."
-        : "\(results.count)/\(ids.count) completed, \(pending.count) timed out."
-      text += "\n\n" + summary.joined(separator: "\n")
-
-      if !allDone {
-        text += "\n\nUse join_sessions again with the timed-out IDs to continue waiting."
-      }
-
-      for r in results {
-        guard let msg = r.finalMessage else { continue }
-        text += "\n\n--- \(r.id) ---\n\(msg)"
-      }
-
-      return AgentToolResult(
-        content: [.text(text)],
-        details: .object([
-          "completed": .bool(allDone),
-          "sessions": .array(completedJSON),
-          "timedOut": .array(timedOutJSON),
-        ]),
-      )
-    }
-  }
-
   private func sessionSteerTool() -> AnyAgentTool {
     sessionEnqueueTool(name: WuhuAgentToolNames.sessionSteer, lane: .steer)
   }
@@ -455,7 +299,7 @@ extension WuhuService {
     }
   }
 
-  private func mountTool(currentSessionID: String) -> AnyAgentTool {
+  private func mountTool(currentSessionID: String, hasPrimaryMount: Bool) -> AnyAgentTool {
     struct Params: Sendable {
       var path: String?
       var name: String?
@@ -550,39 +394,28 @@ extension WuhuService {
       }
 
       // Determine primary: explicit > first-mount-is-primary
-      let existingMounts = try await store.listMounts(sessionID: currentSessionID)
       let isPrimary: Bool = if let explicit = params.primary {
         explicit
       } else {
-        existingMounts.isEmpty
+        !hasPrimaryMount
       }
 
-      let mount = try await store.createMount(
+      let mount = WuhuMount(
+        id: UUID().uuidString.lowercased(),
         sessionID: currentSessionID,
         name: effectiveName,
         path: mountPath,
         mountTemplateID: mountTemplateID,
         isPrimary: isPrimary,
         runnerID: runnerID,
+        createdAt: Date(),
       )
 
-      // Update cwd if this is the primary mount
-      if isPrimary {
-        try await store.setSessionCwd(sessionID: currentSessionID, cwd: mountPath)
-      }
-
-      // Emit context entries (AGENTS.md, skills) — uses runner for remote mounts
-      try await emitMountContext(sessionID: currentSessionID, mount: mount, runner: runner)
+      let effects = await mountEffectEntries(mount: mount, runner: runner)
 
       return AgentToolResult(
         content: [.text("Mounted '\(effectiveName)' at \(mountPath)\(runnerID == .local ? "" : " (runner: \(runnerID.displayName))")")],
-        details: .object([
-          "mountID": .string(mount.id),
-          "name": .string(effectiveName),
-          "path": .string(mountPath),
-          "isPrimary": .bool(mount.isPrimary),
-          "runner": .string(runnerID.wireValue),
-        ]),
+        effects: effects,
       )
     }
   }
@@ -643,13 +476,14 @@ extension WuhuService {
       parentSessionID: parentSessionID,
     )
 
-    // Create mount record
-    let mount = try await store.createMount(
+    let mount = WuhuMount(
+      id: UUID().uuidString.lowercased(),
       sessionID: childSessionID,
       name: mountTemplateIdentifier,
       path: resolved.workspacePath,
       mountTemplateID: resolved.templateID,
       isPrimary: true,
+      createdAt: Date(),
     )
 
     // Emit mount-level context

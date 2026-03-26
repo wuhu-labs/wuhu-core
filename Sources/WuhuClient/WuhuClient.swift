@@ -84,6 +84,40 @@ public struct WuhuClient: Sendable {
     return try WuhuJSON.decoder.decode([[String: String]].self, from: data)
   }
 
+  public func listProfiles() async throws -> [WuhuProfile] {
+    let url = baseURL.appending(path: "v1").appending(path: "profiles")
+    let req = Request(url: url, method: "GET")
+    let data = try await responseData(for: req)
+    return try WuhuJSON.decoder.decode([WuhuProfile].self, from: data)
+  }
+
+  public func listSessionGroups() async throws -> [WuhuSessionGroup] {
+    let url = baseURL.appending(path: "v1").appending(path: "session-groups")
+    let req = Request(url: url, method: "GET")
+    let data = try await responseData(for: req)
+    return try WuhuJSON.decoder.decode([WuhuSessionGroup].self, from: data)
+  }
+
+  public func createSessionGroup(_ request: WuhuCreateSessionGroupRequest) async throws -> WuhuSessionGroup {
+    let url = baseURL.appending(path: "v1").appending(path: "session-groups")
+    var req = Request(url: url, method: "POST")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    try req.setBody(WuhuJSON.encoder.encode(request), contentType: "application/json")
+    let data = try await responseData(for: req)
+    return try WuhuJSON.decoder.decode(WuhuSessionGroup.self, from: data)
+  }
+
+  public func updateSessionGroup(id: String, request: WuhuUpdateSessionGroupRequest) async throws -> WuhuSessionGroup {
+    let url = baseURL.appending(path: "v1").appending(path: "session-groups").appending(path: id)
+    var req = Request(url: url, method: "PATCH")
+    req.setHeader("application/json", for: "Content-Type")
+    req.setHeader("application/json", for: "Accept")
+    try req.setBody(WuhuJSON.encoder.encode(request), contentType: "application/json")
+    let data = try await responseData(for: req)
+    return try WuhuJSON.decoder.decode(WuhuSessionGroup.self, from: data)
+  }
+
   public func readWorkspaceDoc(path: String) async throws -> WuhuWorkspaceDoc {
     var url = baseURL.appending(path: "v1").appending(path: "workspace").appending(path: "doc")
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -143,7 +177,11 @@ public struct WuhuClient: Sendable {
     return try WuhuJSON.decoder.decode(WuhuSetSessionModelResponse.self, from: data)
   }
 
-  public func listSessions(limit: Int? = nil, includeArchived: Bool = false) async throws -> [WuhuSession] {
+  public func listSessions(
+    limit: Int? = nil,
+    includeArchived: Bool = false,
+    sessionGroupID: String? = nil,
+  ) async throws -> [WuhuSessionSummary] {
     var url = baseURL.appending(path: "v1").appending(path: "sessions")
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     var items: [URLQueryItem] = []
@@ -153,12 +191,15 @@ public struct WuhuClient: Sendable {
     if includeArchived {
       items.append(URLQueryItem(name: "includeArchived", value: "true"))
     }
+    if let sessionGroupID, !sessionGroupID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      items.append(URLQueryItem(name: "sessionGroupID", value: sessionGroupID))
+    }
     components?.queryItems = items.isEmpty ? nil : items
     url = components?.url ?? url
 
     let req = Request(url: url, method: "GET")
     let data = try await responseData(for: req)
-    return try WuhuJSON.decoder.decode([WuhuSession].self, from: data)
+    return try WuhuJSON.decoder.decode([WuhuSessionSummary].self, from: data)
   }
 
   public func getSession(

@@ -129,63 +129,6 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  // MARK: - Mounts
-
-  public func createMount(
-    sessionID: String,
-    name: String,
-    path: String,
-    mountTemplateID: String? = nil,
-    isPrimary: Bool = true,
-    runnerID: RunnerID = .local,
-  ) async throws -> WuhuMount {
-    let now = Date()
-    let id = UUID().uuidString.lowercased()
-
-    return try await dbQueue.write { db in
-      var row = MountRow(
-        id: id,
-        sessionID: sessionID,
-        name: name,
-        path: path,
-        mountTemplateID: mountTemplateID,
-        isPrimary: isPrimary,
-        runnerID: runnerID.wireValue,
-        createdAt: now,
-      )
-      try row.insert(db)
-      return row.toModel()
-    }
-  }
-
-  public func listMounts(sessionID: String) async throws -> [WuhuMount] {
-    try await dbQueue.read { db in
-      try MountRow
-        .filter(Column("sessionID") == sessionID)
-        .order(Column("createdAt").asc)
-        .fetchAll(db)
-        .map { $0.toModel() }
-    }
-  }
-
-  public func getPrimaryMount(sessionID: String) async throws -> WuhuMount? {
-    try await dbQueue.read { db in
-      try MountRow
-        .filter(Column("sessionID") == sessionID && Column("isPrimary") == true)
-        .fetchOne(db)
-        .map { $0.toModel() }
-    }
-  }
-
-  public func getMountByName(sessionID: String, name: String) async throws -> WuhuMount? {
-    try await dbQueue.read { db in
-      try MountRow
-        .filter(Column("sessionID") == sessionID && Column("name") == name)
-        .fetchOne(db)
-        .map { $0.toModel() }
-    }
-  }
-
   // MARK: - Sessions
 
   public func createSession(
@@ -195,7 +138,9 @@ public actor SQLiteSessionStore: SessionStore {
     reasoningEffort: ReasoningEffort?,
     systemPrompt: String,
     cwd: String?,
-    parentSessionID: String?,
+    sessionGroupID: String? = nil,
+    parentSessionID: String? = nil,
+    profileName: String? = nil,
   ) async throws -> WuhuSession {
     let now = Date()
     let sessionID = rawSessionID.lowercased()
@@ -211,7 +156,9 @@ public actor SQLiteSessionStore: SessionStore {
         pendingReasoningEffort: nil,
         executionStatus: SessionExecutionStatus.idle.rawValue,
         cwd: cwd,
+        sessionGroupID: sessionGroupID ?? WuhuSessionGroup.defaultID,
         parentSessionID: parentSessionID,
+        profileName: profileName,
         isArchived: false,
         createdAt: now,
         updatedAt: now,
@@ -376,7 +323,7 @@ public actor SQLiteSessionStore: SessionStore {
     }
   }
 
-  private static func linearize(
+  static func linearize(
     entries: [WuhuSessionEntry],
     sessionID: String,
     headEntryID: Int64,

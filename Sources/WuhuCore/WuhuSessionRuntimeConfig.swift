@@ -1,14 +1,25 @@
 import Foundation
 import WuhuAI
 
-actor WuhuSessionRuntimeConfig {
-  private var _tools: [AnyAgentTool] = []
+typealias WuhuSessionToolProvider = @Sendable (WuhuSessionLoopState) async -> [AnyAgentTool]
 
-  func setTools(_ tools: [AnyAgentTool]) {
-    _tools = tools
+actor WuhuSessionRuntimeConfig {
+  private let braveSearchAPIKey: String?
+  private var toolProvider: WuhuSessionToolProvider = { _ in [] }
+
+  init(braveSearchAPIKey: String? = nil) {
+    self.braveSearchAPIKey = braveSearchAPIKey
   }
 
-  func tools() -> [AnyAgentTool] {
-    _tools
+  func setToolProvider(_ provider: @escaping WuhuSessionToolProvider) {
+    toolProvider = provider
+  }
+
+  func tools(for state: WuhuSessionLoopState) async -> [AnyAgentTool] {
+    await toolProvider(state)
+  }
+
+  func codingToolContext() -> String? {
+    braveSearchAPIKey
   }
 }
