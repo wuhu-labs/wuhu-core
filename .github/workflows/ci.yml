@@ -93,7 +93,7 @@ jobs:
           key: ${{ runner.os }}-spm-${{ steps.toolchain.outputs.key }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
 
       - name: Install SwiftFormat
-        run: brew install swiftformat
+        run: brew install swiftformat@0.59 && brew link swiftformat@0.59 --force
 
       - name: SwiftFormat (lint)
         run: swiftformat --lint .
