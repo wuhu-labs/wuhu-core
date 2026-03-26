@@ -24,6 +24,36 @@ public struct BashRequest: Sendable, Hashable, Codable {
   }
 }
 
+public struct BashStartRequest: Sendable, Hashable, Codable {
+  public var taskID: String
+  public var command: String
+  public var cwd: String
+  public var timeout: Double?
+
+  public init(taskID: String, command: String, cwd: String, timeout: Double? = nil) {
+    self.taskID = taskID
+    self.command = command
+    self.cwd = cwd
+    self.timeout = timeout
+  }
+}
+
+public struct BashWaitRequest: Sendable, Hashable, Codable {
+  public var taskID: String
+
+  public init(taskID: String) {
+    self.taskID = taskID
+  }
+}
+
+public struct BashKillRequest: Sendable, Hashable, Codable {
+  public var taskID: String
+
+  public init(taskID: String) {
+    self.taskID = taskID
+  }
+}
+
 public struct ReadRequest: Sendable, Hashable, Codable {
   public var path: String
   /// If true, response includes binary data.
@@ -106,6 +136,14 @@ public struct HelloResponse: Sendable, Hashable, Codable {
   }
 }
 
+public struct BashStartResponse: Sendable, Hashable, Codable {
+  public init() {}
+}
+
+public struct BashKillResponse: Sendable, Hashable, Codable {
+  public init() {}
+}
+
 public struct ReadResponse: Sendable, Hashable, Codable {
   public var content: String?
   public var size: Int
@@ -185,6 +223,9 @@ public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringC
 public enum RunnerRequest: Sendable, Hashable {
   case hello(HelloRequest)
   case bash(id: String, BashRequest)
+  case bashStart(id: String, BashStartRequest)
+  case bashWait(id: String, BashWaitRequest)
+  case bashKill(id: String, BashKillRequest)
   case read(id: String, ReadRequest)
   case write(id: String, WriteRequest)
   case exists(id: String, ExistsRequest)
@@ -200,6 +241,9 @@ public enum RunnerRequest: Sendable, Hashable {
 public enum RunnerResponse: Sendable {
   case hello(HelloResponse)
   case bash(id: String, Result<BashResult, RunnerWireError>)
+  case bashStart(id: String, Result<BashStartResponse, RunnerWireError>)
+  case bashWait(id: String, Result<BashResult, RunnerWireError>)
+  case bashKill(id: String, Result<BashKillResponse, RunnerWireError>)
   case read(id: String, Result<ReadResponse, RunnerWireError>)
   case write(id: String, Result<WriteResponse, RunnerWireError>)
   case exists(id: String, Result<ExistsResponse, RunnerWireError>)
@@ -214,6 +258,9 @@ public enum RunnerResponse: Sendable {
     switch self {
     case .hello: nil
     case let .bash(id, _): id
+    case let .bashStart(id, _): id
+    case let .bashWait(id, _): id
+    case let .bashKill(id, _): id
     case let .read(id, _): id
     case let .write(id, _): id
     case let .exists(id, _): id

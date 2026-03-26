@@ -363,6 +363,32 @@ struct MuxRunnerRPCTests {
     }
   }
 
+  @Test("Bash start/wait reattaches by task id", arguments: TransportKind.allCases)
+  func bashStartAndWaitReattaches(transport: TransportKind) async throws {
+    try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
+      let runner = InMemoryRunner()
+      await runner.stubBash(
+        pattern: "echo resumable",
+        result: BashResult(exitCode: 0, output: "resumable\n", timedOut: false, terminated: false),
+      )
+
+      let handlerTask = Task {
+        await MuxRunnerHandler.serve(session: serverSession, runner: runner, name: "test-runner")
+      }
+      defer { handlerTask.cancel() }
+
+      let client = MuxRunnerClient(name: "test-runner", session: clientSession)
+
+      try await client.startBash(taskID: "bash-retry", command: "echo resumable", cwd: "/tmp", timeout: nil)
+      try await client.startBash(taskID: "bash-retry", command: "echo resumable", cwd: "/tmp", timeout: nil)
+      let result = try await client.waitForBash(taskID: "bash-retry")
+
+      #expect(result.exitCode == 0)
+      #expect(result.output == "resumable\n")
+      #expect(await runner.bashStartCount(taskID: "bash-retry") == 1)
+    }
+  }
+
   @Test("Slow operation doesn't block fast concurrent operations", arguments: TransportKind.allCases)
   func slowDoesNotBlockFast(transport: TransportKind) async throws {
     try await MuxTransportFactory.withPair(transport: transport) { clientSession, serverSession in
@@ -411,14 +437,32 @@ actor SlowInMemoryRunner: Runner {
   private var files: [String: Data] = [:]
   private var directories: Set<String> = ["/"]
   private var bashDelay: Duration = .seconds(1)
+  private var bashTasks: [String: Task<BashResult, Error>] = [:]
 
   func seedDirectory(path: String) {
     directories.insert(path)
   }
 
-  func runBash(command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    try await Task.sleep(for: bashDelay)
-    return BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false)
+  func startBash(taskID: String, command _: String, cwd _: String, timeout _: TimeInterval?) async throws {
+    if bashTasks[taskID] != nil { return }
+    bashTasks[taskID] = Task {
+      try await Task.sleep(for: bashDelay)
+      return BashResult(exitCode: 0, output: "slow done\n", timedOut: false, terminated: false)
+    }
+  }
+
+  func waitForBash(taskID: String) async throws -> BashResult {
+    guard let task = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    return try await task.value
+  }
+
+  func killBash(taskID: String) async throws {
+    guard let task = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    task.cancel()
   }
 
   func readData(path: String) async throws -> Data {

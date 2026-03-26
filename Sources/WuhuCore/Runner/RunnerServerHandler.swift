@@ -31,6 +31,30 @@ public actor RunnerServerHandler {
         return (.bash(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
       }
 
+    case let .bashStart(id, p):
+      do {
+        try await runner.startBash(taskID: p.taskID, command: p.command, cwd: p.cwd, timeout: p.timeout)
+        return (.bashStart(id: id, .success(BashStartResponse())), nil)
+      } catch {
+        return (.bashStart(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
+
+    case let .bashWait(id, p):
+      do {
+        let result = try await runner.waitForBash(taskID: p.taskID)
+        return (.bashWait(id: id, .success(result)), nil)
+      } catch {
+        return (.bashWait(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
+
+    case let .bashKill(id, p):
+      do {
+        try await runner.killBash(taskID: p.taskID)
+        return (.bashKill(id: id, .success(BashKillResponse())), nil)
+      } catch {
+        return (.bashKill(id: id, .failure(RunnerWireError(String(describing: error)))), nil)
+      }
+
     case let .read(id, p):
       do {
         if p.binary {

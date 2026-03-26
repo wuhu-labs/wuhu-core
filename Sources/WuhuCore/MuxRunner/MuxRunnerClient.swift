@@ -25,6 +25,21 @@ public actor MuxRunnerClient: Runner {
     try await rpc(.bash, request: BashRequest(command: command, cwd: cwd, timeout: timeout))
   }
 
+  public func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws {
+    let _: BashStartResponse = try await rpc(
+      .bashStart,
+      request: BashStartRequest(taskID: taskID, command: command, cwd: cwd, timeout: timeout),
+    )
+  }
+
+  public func waitForBash(taskID: String) async throws -> BashResult {
+    try await rpc(.bashWait, request: BashWaitRequest(taskID: taskID))
+  }
+
+  public func killBash(taskID: String) async throws {
+    let _: BashKillResponse = try await rpc(.bashKill, request: BashKillRequest(taskID: taskID))
+  }
+
   public func readData(path: String) async throws -> Data {
     let stream = try await session.open()
     try await MuxRunnerCodec.writeRequest(stream, op: .read, payload: ReadRequest(path: path, binary: true))

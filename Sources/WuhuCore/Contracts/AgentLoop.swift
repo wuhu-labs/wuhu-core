@@ -316,10 +316,10 @@ public actor AgentLoop<B: AgentBehavior> {
       return
     }
 
-    let task = behavior.startToolCall(call, state: &state)
+    let execution = behavior.startToolCall(call, state: &state)
     try await waitUntilDurableCurrentVersion()
 
-    let toolResult = await task.value
+    let toolResult = await execution.run()
     let resultHash = toolResult.hashValue
     let recordedCount = repetitionTracker.record(
       toolName: call.name,

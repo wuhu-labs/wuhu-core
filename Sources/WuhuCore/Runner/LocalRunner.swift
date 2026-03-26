@@ -7,12 +7,73 @@ import Foundation
 public actor LocalRunner: Runner {
   public nonisolated let id: RunnerID = .local
 
+  private struct ManagedBashTask: Sendable {
+    let request: BashStartRequest
+    var state: State
+
+    enum State: Sendable {
+      case running(Task<BashResult, Error>)
+      case finished(Result<BashResult, RunnerWireError>)
+    }
+  }
+
+  private var bashTasks: [String: ManagedBashTask] = [:]
+
   public init() {}
 
   // MARK: - Process execution
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+  public func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws {
+    let request = BashStartRequest(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+    if let existing = bashTasks[taskID] {
+      guard existing.request == request else {
+        throw RunnerError.requestFailed(
+          message: "Bash task '\(taskID)' already exists with different parameters",
+        )
+      }
+      return
+    }
+
+    let task = Task {
+      try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+    }
+    bashTasks[taskID] = .init(request: request, state: .running(task))
+  }
+
+  public func waitForBash(taskID: String) async throws -> BashResult {
+    guard let existing = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+
+    switch existing.state {
+    case let .finished(result):
+      switch result {
+      case let .success(value):
+        return value
+      case let .failure(error):
+        throw RunnerError.requestFailed(message: error.message)
+      }
+
+    case let .running(task):
+      do {
+        let result = try await task.value
+        bashTasks[taskID]?.state = .finished(.success(result))
+        return result
+      } catch {
+        let wireError = RunnerWireError(String(describing: error))
+        bashTasks[taskID]?.state = .finished(.failure(wireError))
+        throw RunnerError.requestFailed(message: wireError.message)
+      }
+    }
+  }
+
+  public func killBash(taskID: String) async throws {
+    guard let existing = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    if case let .running(task) = existing.state {
+      task.cancel()
+    }
   }
 
   // MARK: - File I/O

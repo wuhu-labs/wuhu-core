@@ -395,17 +395,21 @@ struct WuhuSessionBehavior: AgentBehavior {
     return nil
   }
 
-  func startToolCall(_ call: ToolCall, state: inout State) -> Task<ToolResult, Never> {
+  func startToolCall(_ call: ToolCall, state: inout State) -> AgentToolExecutionHandle<ToolResult> {
+    if call.name == "bash" {
+      return startBashToolCall(call, state: &state)
+    }
+
     if state.toolCallStatus[call.id] == .started {
       let repairedResult = staleToolCallResult(call: call)
-      return Task { repairedResult }
+      return .init { repairedResult }
     }
 
     state.toolCallStatus[call.id] = .started
     state.status = .init(status: .running)
 
     let executionState = state
-    return Task { [self] in
+    return .init { [self] in
       do {
         let tools = await tools(for: executionState)
         guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
@@ -430,6 +434,30 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func persistToolResult(_ result: ToolResult, for call: ToolCall, state: inout State) {
     let now = Date()
+
+    if call.name == "bash",
+       storedBashTaskRequest(for: call.id, entries: state.entries) != nil,
+       let persistedResult = try? WuhuJSON.encoder.encodeToJSONValue(
+         WuhuToolResult(
+           content: result.content.map(WuhuContentBlock.fromPi),
+           details: result.details,
+         ),
+       )
+    {
+      _ = appendEntry(
+        createdAt: now,
+        payload: .toolExecution(.init(
+          phase: .end,
+          toolCallId: call.id,
+          toolName: call.name,
+          arguments: call.arguments,
+          result: persistedResult,
+          isError: result.isError,
+        )),
+        to: &state,
+      )
+    }
+
     let toolResultMessage = WuhuToolResultMessage(
       toolCallId: call.id,
       toolName: call.name,
@@ -553,6 +581,113 @@ struct WuhuSessionBehavior: AgentBehavior {
       ]),
       isError: true,
     )
+  }
+
+  private func startBashToolCall(_ call: ToolCall, state: inout State) -> AgentToolExecutionHandle<ToolResult> {
+    let existingRequest = storedBashTaskRequest(for: call.id, entries: state.entries)
+    let request: BashTaskRequest
+
+    if let existingRequest {
+      request = existingRequest
+    } else {
+      guard state.toolCallStatus[call.id] != .started else {
+        let repairedResult = staleToolCallResult(call: call)
+        return .init { repairedResult }
+      }
+
+      do {
+        request = try buildBashTaskRequest(for: call, state: state)
+      } catch {
+        let toolError = makeToolErrorResult(call: call, errorDescription: "\(error)")
+        return .init { toolError }
+      }
+
+      do {
+        let requestJSON = try WuhuJSON.encoder.encodeToJSONValue(request)
+        _ = appendEntry(
+          createdAt: Date(),
+          payload: .toolExecution(.init(
+            phase: .start,
+            toolCallId: call.id,
+            toolName: call.name,
+            arguments: call.arguments,
+            result: requestJSON,
+          )),
+          to: &state,
+        )
+      } catch {
+        let toolError = makeToolErrorResult(call: call, errorDescription: "\(error)")
+        return .init { toolError }
+      }
+    }
+
+    state.toolCallStatus[call.id] = .started
+    state.status = .init(status: .running)
+
+    return .init { [self, request] in
+      do {
+        @Dependency(\.runnerLocator) var runnerLocator
+        let runner = try await runnerLocator.resolve(request.runnerID)
+        return try await executeBashTask(request: request, runner: runner)
+      } catch {
+        return makeToolErrorResult(call: call, errorDescription: "\(error)")
+      }
+    }
+  }
+
+  private func storedBashTaskRequest(
+    for toolCallID: String,
+    entries: [WuhuSessionEntry],
+  ) -> BashTaskRequest? {
+    for entry in entries.reversed() {
+      guard case let .toolExecution(execution) = entry.payload else { continue }
+      guard execution.phase == .start else { continue }
+      guard execution.toolCallId == toolCallID, execution.toolName == "bash" else { continue }
+      guard let result = execution.result,
+            let request = decodeJSONValue(result, as: BashTaskRequest.self)
+      else { continue }
+      return request
+    }
+    return nil
+  }
+
+  private func buildBashTaskRequest(for call: ToolCall, state: State) throws -> BashTaskRequest {
+    let params = try BashToolParams.parse(toolName: call.name, args: call.arguments)
+    let target = try resolveBashTarget(mountName: params.mount, state: state)
+    return makeBashTaskRequest(
+      toolCallId: call.id,
+      params: params,
+      runnerID: target.runnerID,
+      cwd: target.cwd,
+    )
+  }
+
+  private func resolveBashTarget(
+    mountName rawName: String?,
+    state: State,
+  ) throws -> (runnerID: RunnerID, cwd: String) {
+    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let mountName, !mountName.isEmpty {
+      guard let mount = state.mounts.mount(named: mountName) else {
+        throw MountResolutionError.mountNotFound(name: mountName)
+      }
+      return (mount.runnerID, mount.path)
+    }
+
+    if let mount = state.mounts.primaryMount {
+      return (mount.runnerID, mount.path)
+    }
+
+    guard let cwd = state.session.cwd else {
+      throw MountResolutionError.noCwd
+    }
+    return (.local, cwd)
+  }
+
+  private func decodeJSONValue<T: Decodable>(_ value: JSONValue, as _: T.Type) -> T? {
+    guard let data = try? WuhuJSON.encoder.encode(value) else { return nil }
+    return try? WuhuJSON.decoder.decode(T.self, from: data)
   }
 
   private func hydrateImageBlobs(in messages: [Message]) -> [Message] {

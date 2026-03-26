@@ -11,6 +11,9 @@ public struct RunnerHandle: Sendable {
   public var listDirectory: @Sendable (_ path: String) async throws -> [DirectoryEntry]
   public var find: @Sendable (_ params: FindParams) async throws -> FindResult
   public var grep: @Sendable (_ params: GrepParams) async throws -> GrepResult
+  public var startBash: @Sendable (_ taskID: String, _ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> Void
+  public var waitForBash: @Sendable (_ taskID: String) async throws -> BashResult
+  public var killBash: @Sendable (_ taskID: String) async throws -> Void
   public var runBash: @Sendable (_ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> BashResult
 
   public init(
@@ -22,6 +25,9 @@ public struct RunnerHandle: Sendable {
     listDirectory: @escaping @Sendable (_ path: String) async throws -> [DirectoryEntry],
     find: @escaping @Sendable (_ params: FindParams) async throws -> FindResult,
     grep: @escaping @Sendable (_ params: GrepParams) async throws -> GrepResult,
+    startBash: @escaping @Sendable (_ taskID: String, _ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> Void,
+    waitForBash: @escaping @Sendable (_ taskID: String) async throws -> BashResult,
+    killBash: @escaping @Sendable (_ taskID: String) async throws -> Void,
     runBash: @escaping @Sendable (_ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> BashResult,
   ) {
     self.id = id
@@ -32,6 +38,9 @@ public struct RunnerHandle: Sendable {
     self.listDirectory = listDirectory
     self.find = find
     self.grep = grep
+    self.startBash = startBash
+    self.waitForBash = waitForBash
+    self.killBash = killBash
     self.runBash = runBash
   }
 }
@@ -63,6 +72,15 @@ public extension RunnerLocator {
         listDirectory: { path in try await runner.listDirectory(path: path) },
         find: { params in try await runner.find(params: params) },
         grep: { params in try await runner.grep(params: params) },
+        startBash: { taskID, cwd, command, timeout in
+          try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+        },
+        waitForBash: { taskID in
+          try await runner.waitForBash(taskID: taskID)
+        },
+        killBash: { taskID in
+          try await runner.killBash(taskID: taskID)
+        },
         runBash: { cwd, command, timeout in
           try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
         },
@@ -70,29 +88,40 @@ public extension RunnerLocator {
     }
   }
 
-  static let localOnly = Self { runnerID in
-    guard runnerID == .local else {
-      throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
-    }
+  static let localOnly: Self = {
     let runner = LocalRunner()
-    return RunnerHandle(
-      id: .local,
-      readText: { path in try await runner.readString(path: path, encoding: .utf8) },
-      readData: { path in try await runner.readData(path: path) },
-      writeText: { path, content, createDirs in
-        try await runner.writeString(path: path, content: content, createIntermediateDirectories: createDirs, encoding: .utf8)
-      },
-      writeData: { path, data, createDirs in
-        try await runner.writeData(path: path, data: data, createIntermediateDirectories: createDirs)
-      },
-      listDirectory: { path in try await runner.listDirectory(path: path) },
-      find: { params in try await runner.find(params: params) },
-      grep: { params in try await runner.grep(params: params) },
-      runBash: { cwd, command, timeout in
-        try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
-      },
-    )
-  }
+    return Self { runnerID in
+      guard runnerID == .local else {
+        throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
+      }
+      return RunnerHandle(
+        id: .local,
+        readText: { path in try await runner.readString(path: path, encoding: .utf8) },
+        readData: { path in try await runner.readData(path: path) },
+        writeText: { path, content, createDirs in
+          try await runner.writeString(path: path, content: content, createIntermediateDirectories: createDirs, encoding: .utf8)
+        },
+        writeData: { path, data, createDirs in
+          try await runner.writeData(path: path, data: data, createIntermediateDirectories: createDirs)
+        },
+        listDirectory: { path in try await runner.listDirectory(path: path) },
+        find: { params in try await runner.find(params: params) },
+        grep: { params in try await runner.grep(params: params) },
+        startBash: { taskID, cwd, command, timeout in
+          try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+        },
+        waitForBash: { taskID in
+          try await runner.waitForBash(taskID: taskID)
+        },
+        killBash: { taskID in
+          try await runner.killBash(taskID: taskID)
+        },
+        runBash: { cwd, command, timeout in
+          try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
+        },
+      )
+    }
+  }()
 }
 
 private enum RunnerLocatorKey: DependencyKey {

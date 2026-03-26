@@ -28,6 +28,29 @@ public struct BashResult: Sendable, Hashable {
   }
 }
 
+/// Durable identity and execution parameters for a resumable bash task.
+public struct BashTaskRequest: Sendable, Hashable, Codable {
+  public var taskID: String
+  public var runnerID: RunnerID
+  public var command: String
+  public var cwd: String
+  public var timeout: Double?
+
+  public init(
+    taskID: String,
+    runnerID: RunnerID,
+    command: String,
+    cwd: String,
+    timeout: Double? = nil,
+  ) {
+    self.taskID = taskID
+    self.runnerID = runnerID
+    self.command = command
+    self.cwd = cwd
+    self.timeout = timeout
+  }
+}
+
 /// File existence check result.
 public enum FileExistence: String, Sendable, Hashable, Codable {
   case notFound
@@ -168,6 +191,9 @@ public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
   /// -- Process execution --
+  func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws
+  func waitForBash(taskID: String) async throws -> BashResult
+  func killBash(taskID: String) async throws
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
 
   // -- File I/O --
@@ -186,6 +212,14 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Workspace materialization --
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
+}
+
+public extension Runner {
+  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
+    let taskID = UUID().uuidString.lowercased()
+    try await startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+    return try await waitForBash(taskID: taskID)
+  }
 }
 
 // MARK: - Runner errors

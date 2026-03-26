@@ -76,7 +76,7 @@ private func resolvePathViaMountOrCwd(
   return .init(runner: runner, cwd: cwd, absolutePath: absolutePath, mount: nil)
 }
 
-private func resolveBashTarget(
+func resolveBashTarget(
   mountName: String?,
   cwdProvider: CwdProvider,
   mountResolver: MountResolver?,
@@ -91,6 +91,44 @@ private func resolveBashTarget(
   let cwd = try await requireCwd(cwdProvider)
   let runner = try await runnerLocator.resolve(.local)
   return (runner, cwd)
+}
+
+struct BashToolParams: Sendable {
+  var command: String
+  var timeout: Double?
+  var mount: String?
+
+  static func parse(toolName: String, args: JSONValue) throws -> Self {
+    let a = try ToolArgs(toolName: toolName, args: args)
+    let command = try a.requireString("command")
+    let timeout = try a.optionalDouble("timeout")
+    let mount = try a.optionalString("mount")
+    return .init(command: command, timeout: timeout, mount: mount)
+  }
+}
+
+func makeBashTaskRequest(
+  toolCallId: String,
+  params: BashToolParams,
+  runnerID: RunnerID,
+  cwd: String,
+) -> BashTaskRequest {
+  .init(
+    taskID: toolCallId,
+    runnerID: runnerID,
+    command: params.command,
+    cwd: cwd,
+    timeout: params.timeout,
+  )
+}
+
+func executeBashTask(
+  request: BashTaskRequest,
+  runner: RunnerHandle,
+) async throws -> AgentToolResult {
+  try await runner.startBash(request.taskID, request.cwd, request.command, request.timeout)
+  let run = try await runner.waitForBash(request.taskID)
+  return try formatBashResult(run)
 }
 
 // MARK: - read
@@ -645,20 +683,6 @@ private func grepTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
 // MARK: - bash
 
 private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountResolver?) -> AnyAgentTool {
-  struct Params: Sendable {
-    var command: String
-    var timeout: Double?
-    var mount: String?
-
-    static func parse(toolName: String, args: JSONValue) throws -> Params {
-      let a = try ToolArgs(toolName: toolName, args: args)
-      let command = try a.requireString("command")
-      let timeout = try a.optionalDouble("timeout")
-      let mount = try a.optionalString("mount")
-      return .init(command: command, timeout: timeout, mount: mount)
-    }
-  }
-
   var properties: [String: JSONValue] = [
     "command": .object(["type": .string("string"), "description": .string("Bash command to execute")]),
     "timeout": .object(["type": .string("number"), "description": .string("Timeout in seconds (optional, no default timeout)")]),
@@ -680,20 +704,25 @@ private func bashTool(cwdProvider: @escaping CwdProvider, mountResolver: MountRe
     parameters: schema,
   )
 
-  return AnyAgentTool(tool: tool, label: "bash") { _, args in
-    let params = try Params.parse(toolName: tool.name, args: args)
+  return AnyAgentTool(tool: tool, label: "bash") { toolCallId, args in
+    let params = try BashToolParams.parse(toolName: tool.name, args: args)
     let target = try await resolveBashTarget(
       mountName: params.mount,
       cwdProvider: cwdProvider,
       mountResolver: mountResolver,
     )
-    let run = try await target.runner.runBash(target.cwd, params.command, params.timeout)
-    return try formatBashResult(run)
+    let request = makeBashTaskRequest(
+      toolCallId: toolCallId,
+      params: params,
+      runnerID: target.runner.id,
+      cwd: target.cwd,
+    )
+    return try await executeBashTask(request: request, runner: target.runner)
   }
 }
 
 /// Format a BashResult into an AgentToolResult with truncation handling.
-private func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
+func formatBashResult(_ run: BashResult) throws -> AgentToolResult {
   let exitCode = run.exitCode
   let output = run.output
   let timedOut = run.timedOut
