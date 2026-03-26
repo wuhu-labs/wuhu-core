@@ -1,3 +1,4 @@
+import AsyncAlgorithms
 import AsyncExtensions
 import Foundation
 import WuhuAI
@@ -11,11 +12,6 @@ private struct PublishedSnapshot<State: Sendable>: Sendable {
 private struct StreamingSnapshot<Action: Sendable>: Sendable {
   var inferenceID: UUID?
   var actions: [Action]?
-}
-
-private enum ObservationInput<State: Sendable, Action: Sendable>: Sendable {
-  case published(PublishedSnapshot<State>)
-  case streaming(StreamingSnapshot<Action>)
 }
 
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
@@ -70,35 +66,10 @@ public actor AgentLoop<B: AgentBehavior> {
 
   /// Observe the loop's current published snapshot, gap-free.
   public func observe() -> AgentLoopObservation<B.State, B.StreamAction> {
-    let initialPublished = publishedSnapshots.value
-    let initialStreaming = streamingSnapshots.value
-    let initialObserved = Self.makeObservedState(
-      published: initialPublished,
-      streaming: initialStreaming,
-    )
-
-    let publishedEvents = publishedSnapshots
-      .dropFirst(1)
-      .map { ObservationInput<B.State, B.StreamAction>.published($0) }
-      .eraseToAnyAsyncSequence()
-    let streamingEvents = streamingSnapshots
-      .dropFirst(1)
-      .map { ObservationInput<B.State, B.StreamAction>.streaming($0) }
-      .eraseToAnyAsyncSequence()
-
-    return merge(publishedEvents, streamingEvents)
-      .scan((initialPublished, initialStreaming)) { state, input in
-        switch input {
-        case let .published(published):
-          (published, state.1)
-        case let .streaming(streaming):
-          (state.0, streaming)
-        }
-      }
+    combineLatest(publishedSnapshots, streamingSnapshots)
       .map { published, streaming in
         Self.makeObservedState(published: published, streaming: streaming)
       }
-      .prepend(initialObserved)
       .eraseToAnyAsyncSequence()
   }
 

@@ -34,8 +34,9 @@ let package = Package(
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
     .package(
       url: "https://github.com/sideeffect-io/AsyncExtensions.git",
-      revision: "b97d381f6156e8c34b718bddfb9481f957a07edc"
+      revision: "b97d381f6156e8c34b718bddfb9481f957a07edc",
     ),
+    .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.1.0"),
     .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
     .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
@@ -80,6 +81,7 @@ let package = Package(
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
+        .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "AsyncExtensions", package: "AsyncExtensions"),
         .product(name: "Tracing", package: "swift-distributed-tracing"),
       ],
