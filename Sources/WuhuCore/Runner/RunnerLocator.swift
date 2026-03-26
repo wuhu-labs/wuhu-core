@@ -12,7 +12,8 @@ public struct RunnerHandle: Sendable {
   public var find: @Sendable (_ params: FindParams) async throws -> FindResult
   public var grep: @Sendable (_ params: GrepParams) async throws -> GrepResult
   public var startBash: @Sendable (_ taskID: String, _ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> Void
-  public var waitForBash: @Sendable (_ taskID: String) async throws -> BashResult
+  public var streamBash: @Sendable (_ taskID: String, _ after: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error>
+  public var ackBash: @Sendable (_ taskID: String, _ through: BashStreamCursor) async throws -> Void
   public var killBash: @Sendable (_ taskID: String) async throws -> Void
   public var runBash: @Sendable (_ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> BashResult
 
@@ -26,7 +27,8 @@ public struct RunnerHandle: Sendable {
     find: @escaping @Sendable (_ params: FindParams) async throws -> FindResult,
     grep: @escaping @Sendable (_ params: GrepParams) async throws -> GrepResult,
     startBash: @escaping @Sendable (_ taskID: String, _ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> Void,
-    waitForBash: @escaping @Sendable (_ taskID: String) async throws -> BashResult,
+    streamBash: @escaping @Sendable (_ taskID: String, _ after: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error>,
+    ackBash: @escaping @Sendable (_ taskID: String, _ through: BashStreamCursor) async throws -> Void,
     killBash: @escaping @Sendable (_ taskID: String) async throws -> Void,
     runBash: @escaping @Sendable (_ cwd: String, _ command: String, _ timeout: TimeInterval?) async throws -> BashResult,
   ) {
@@ -39,7 +41,8 @@ public struct RunnerHandle: Sendable {
     self.find = find
     self.grep = grep
     self.startBash = startBash
-    self.waitForBash = waitForBash
+    self.streamBash = streamBash
+    self.ackBash = ackBash
     self.killBash = killBash
     self.runBash = runBash
   }
@@ -75,8 +78,11 @@ public extension RunnerLocator {
         startBash: { taskID, cwd, command, timeout in
           try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
         },
-        waitForBash: { taskID in
-          try await runner.waitForBash(taskID: taskID)
+        streamBash: { taskID, after in
+          try await runner.streamBash(taskID: taskID, after: after)
+        },
+        ackBash: { taskID, through in
+          try await runner.ackBash(taskID: taskID, through: through)
         },
         killBash: { taskID in
           try await runner.killBash(taskID: taskID)
@@ -110,8 +116,11 @@ public extension RunnerLocator {
         startBash: { taskID, cwd, command, timeout in
           try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
         },
-        waitForBash: { taskID in
-          try await runner.waitForBash(taskID: taskID)
+        streamBash: { taskID, after in
+          try await runner.streamBash(taskID: taskID, after: after)
+        },
+        ackBash: { taskID, through in
+          try await runner.ackBash(taskID: taskID, through: through)
         },
         killBash: { taskID in
           try await runner.killBash(taskID: taskID)

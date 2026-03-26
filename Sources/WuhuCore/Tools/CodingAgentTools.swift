@@ -127,8 +127,16 @@ func executeBashTask(
   runner: RunnerHandle,
 ) async throws -> AgentToolResult {
   try await runner.startBash(request.taskID, request.cwd, request.command, request.timeout)
-  let run = try await runner.waitForBash(request.taskID)
-  return try formatBashResult(run)
+
+  let stream = try await runner.streamBash(request.taskID, nil)
+  for try await event in stream {
+    try await runner.ackBash(request.taskID, event.cursor)
+    if case let .finished(result) = event.payload {
+      return try formatBashResult(result)
+    }
+  }
+
+  throw ToolError.message("Bash stream ended without a terminal result")
 }
 
 // MARK: - read

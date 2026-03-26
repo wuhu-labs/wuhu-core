@@ -9,9 +9,16 @@ import WuhuAPI
 /// reads the response, and returns. The stream is the correlation —
 /// no request IDs, no pending maps, no continuations.
 public actor MuxRunnerClient: Runner {
+  private struct ManagedBashTask {
+    let request: BashTaskRequest
+    let task: Task<BashResult, Error>
+    var lastAckedCursor: BashStreamCursor?
+  }
+
   public nonisolated let id: RunnerID
   public let runnerName: String
   private let session: MuxSession
+  private var bashTasks: [String: ManagedBashTask] = [:]
 
   public init(name: String, session: MuxSession) {
     id = .remote(name: name)
@@ -26,18 +33,54 @@ public actor MuxRunnerClient: Runner {
   }
 
   public func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws {
-    let _: BashStartResponse = try await rpc(
-      .bashStart,
-      request: BashStartRequest(taskID: taskID, command: command, cwd: cwd, timeout: timeout),
-    )
+    let request = BashTaskRequest(taskID: taskID, runnerID: id, command: command, cwd: cwd, timeout: timeout)
+    if let existing = bashTasks[taskID] {
+      guard existing.request == request else {
+        throw RunnerError.requestFailed(message: "Bash task '\(taskID)' already exists with different parameters")
+      }
+      return
+    }
+
+    let task = Task { [self] in
+      try await runBash(command: command, cwd: cwd, timeout: timeout)
+    }
+    bashTasks[taskID] = .init(request: request, task: task, lastAckedCursor: nil)
   }
 
-  public func waitForBash(taskID: String) async throws -> BashResult {
-    try await rpc(.bashWait, request: BashWaitRequest(taskID: taskID))
+  public func streamBash(taskID: String, after cursor: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error> {
+    guard let managed = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+
+    let afterCursor = cursor
+    return AsyncThrowingStream { continuation in
+      Task {
+        do {
+          let result = try await managed.task.value
+          if (afterCursor ?? 0) < 1 {
+            continuation.yield(.init(cursor: 1, payload: .finished(result)))
+          }
+          continuation.finish()
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+    }
+  }
+
+  public func ackBash(taskID: String, through cursor: BashStreamCursor) async throws {
+    guard var managed = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    managed.lastAckedCursor = max(managed.lastAckedCursor ?? 0, cursor)
+    bashTasks[taskID] = managed
   }
 
   public func killBash(taskID: String) async throws {
-    let _: BashKillResponse = try await rpc(.bashKill, request: BashKillRequest(taskID: taskID))
+    guard let managed = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    managed.task.cancel()
   }
 
   public func readData(path: String) async throws -> Data {

@@ -61,8 +61,11 @@ struct ContractSessionCoreTests {
         startBash: { taskID, cwd, command, timeout in
           try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
         },
-        waitForBash: { taskID in
-          try await runner.waitForBash(taskID: taskID)
+        streamBash: { taskID, after in
+          try await runner.streamBash(taskID: taskID, after: after)
+        },
+        ackBash: { taskID, through in
+          try await runner.ackBash(taskID: taskID, through: through)
         },
         killBash: { taskID in
           try await runner.killBash(taskID: taskID)

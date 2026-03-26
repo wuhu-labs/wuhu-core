@@ -51,6 +51,23 @@ public struct BashTaskRequest: Sendable, Hashable, Codable {
   }
 }
 
+public typealias BashStreamCursor = Int
+
+public enum BashStreamPayload: Sendable, Hashable {
+  case output(String)
+  case finished(BashResult)
+}
+
+public struct BashStreamEvent: Sendable, Hashable {
+  public var cursor: BashStreamCursor
+  public var payload: BashStreamPayload
+
+  public init(cursor: BashStreamCursor, payload: BashStreamPayload) {
+    self.cursor = cursor
+    self.payload = payload
+  }
+}
+
 /// File existence check result.
 public enum FileExistence: String, Sendable, Hashable, Codable {
   case notFound
@@ -192,7 +209,8 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Process execution --
   func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws
-  func waitForBash(taskID: String) async throws -> BashResult
+  func streamBash(taskID: String, after cursor: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error>
+  func ackBash(taskID: String, through cursor: BashStreamCursor) async throws
   func killBash(taskID: String) async throws
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
 
@@ -218,7 +236,16 @@ public extension Runner {
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
     let taskID = UUID().uuidString.lowercased()
     try await startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
-    return try await waitForBash(taskID: taskID)
+
+    let stream = try await streamBash(taskID: taskID, after: nil)
+    for try await event in stream {
+      try await ackBash(taskID: taskID, through: event.cursor)
+      if case let .finished(result) = event.payload {
+        return result
+      }
+    }
+
+    throw RunnerError.requestFailed(message: "Bash stream ended without a terminal result")
   }
 }
 

@@ -42,21 +42,6 @@ public enum MuxRunnerHandler {
         let (response, _) = await handler.handle(request: .bash(id: "", req))
         try await writeRunnerResponse(stream, op: op, response: response)
 
-      case .bashStart:
-        let req = try MuxRunnerCodec.decode(BashStartRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .bashStart(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
-
-      case .bashWait:
-        let req = try MuxRunnerCodec.decode(BashWaitRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .bashWait(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
-
-      case .bashKill:
-        let req = try MuxRunnerCodec.decode(BashKillRequest.self, from: payload)
-        let (response, _) = await handler.handle(request: .bashKill(id: "", req))
-        try await writeRunnerResponse(stream, op: op, response: response)
-
       case .read:
         let req = try MuxRunnerCodec.decode(ReadRequest.self, from: payload)
         let (response, binaryData) = await handler.handle(request: .read(id: "", req))
@@ -129,12 +114,6 @@ public enum MuxRunnerHandler {
     case let .hello(resp):
       try await MuxRunnerCodec.writeSuccess(stream, op: op, payload: resp)
     case let .bash(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .bashStart(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .bashWait(_, result):
-      try await writeResult(stream, op: op, result: result)
-    case let .bashKill(_, result):
       try await writeResult(stream, op: op, result: result)
     case let .read(_, result):
       try await writeResult(stream, op: op, result: result)
