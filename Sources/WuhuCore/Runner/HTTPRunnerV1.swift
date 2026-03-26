@@ -41,7 +41,7 @@ public enum HTTPRunnerV1 {
       path: String,
       basePath: String? = nil,
       offset: Int? = nil,
-      limit: Int? = nil
+      limit: Int? = nil,
     ) {
       self.path = path
       self.basePath = basePath
@@ -66,7 +66,7 @@ public enum HTTPRunnerV1 {
       startLine: Int,
       endLine: Int,
       hasMore: Bool,
-      nextOffset: Int?
+      nextOffset: Int?,
     ) {
       self.resolvedPath = resolvedPath
       self.content = content
@@ -88,7 +88,7 @@ public enum HTTPRunnerV1 {
       path: String,
       basePath: String? = nil,
       content: String,
-      createDirectories: Bool = true
+      createDirectories: Bool = true,
     ) {
       self.path = path
       self.basePath = basePath
@@ -115,7 +115,7 @@ public enum HTTPRunnerV1 {
     public init(
       path: String? = nil,
       basePath: String? = nil,
-      limit: Int? = nil
+      limit: Int? = nil,
     ) {
       self.path = path
       self.basePath = basePath
@@ -135,7 +135,7 @@ public enum HTTPRunnerV1 {
       entries: [DirectoryEntry],
       totalEntries: Int,
       returnedEntries: Int,
-      hasMore: Bool
+      hasMore: Bool,
     ) {
       self.resolvedPath = resolvedPath
       self.entries = entries
@@ -155,7 +155,7 @@ public enum HTTPRunnerV1 {
       path: String,
       basePath: String? = nil,
       oldText: String,
-      newText: String
+      newText: String,
     ) {
       self.path = path
       self.basePath = basePath
@@ -172,7 +172,7 @@ public enum HTTPRunnerV1 {
     public init(
       resolvedPath: String,
       firstChangedLine: Int,
-      diff: String
+      diff: String,
     ) {
       self.resolvedPath = resolvedPath
       self.firstChangedLine = firstChangedLine
@@ -190,7 +190,7 @@ public enum HTTPRunnerV1 {
       taskID: String,
       command: String,
       cwd: String,
-      timeout: Double? = nil
+      timeout: Double? = nil,
     ) {
       self.taskID = taskID
       self.command = command

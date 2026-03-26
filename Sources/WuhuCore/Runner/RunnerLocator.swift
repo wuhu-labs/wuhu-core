@@ -80,13 +80,13 @@ public extension RunnerLocator {
     baseURL: URL,
     name: String? = nil,
     basePath: String? = nil,
-    fetch: FetchClient = sharedFetchClient
+    fetch: FetchClient = sharedFetchClient,
   ) -> Self {
     let handle = RunnerHandle.http(
       baseURL: baseURL,
       name: name,
       basePath: basePath,
-      fetch: fetch
+      fetch: fetch,
     )
 
     return .init { runnerID in
@@ -113,14 +113,14 @@ public extension RunnerHandle {
           path: path,
           content: content,
           createIntermediateDirectories: createDirs,
-          encoding: .utf8
+          encoding: .utf8,
         )
       },
       writeData: { path, data, createDirs in
         try await runner.writeData(
           path: path,
           data: data,
-          createIntermediateDirectories: createDirs
+          createIntermediateDirectories: createDirs,
         )
       },
       listDirectory: { path in
@@ -146,7 +146,7 @@ public extension RunnerHandle {
       },
       runBash: { cwd, command, timeout in
         try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
-      }
+      },
     )
   }
 
@@ -154,13 +154,13 @@ public extension RunnerHandle {
     baseURL: URL,
     name: String? = nil,
     basePath: String? = nil,
-    fetch: FetchClient = sharedFetchClient
+    fetch: FetchClient = sharedFetchClient,
   ) -> Self {
     HTTPRunnerClient(
       baseURL: baseURL,
       name: name,
       basePath: basePath,
-      fetch: fetch
+      fetch: fetch,
     ).runnerHandle()
   }
 }

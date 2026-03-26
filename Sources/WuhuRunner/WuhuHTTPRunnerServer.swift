@@ -10,7 +10,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
 
   public static func handler(
     runner: RunnerHandle,
-    name _: String = "local"
+    name _: String = "local",
   ) -> Handler {
     var router = Router()
 
@@ -27,14 +27,14 @@ public struct WuhuHTTPRunnerServer: Sendable {
           throw routeError(
             status: .badRequest,
             code: .invalidRequest,
-            message: "offset must be >= 1"
+            message: "offset must be >= 1",
           )
         }
         if let limit = payload.limit, limit < 1 {
           throw routeError(
             status: .badRequest,
             code: .invalidRequest,
-            message: "limit must be >= 1"
+            message: "limit must be >= 1",
           )
         }
 
@@ -51,7 +51,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
             throw routeError(
               status: .unprocessableContent,
               code: .offsetOutOfRange,
-              message: "Offset \(requestedOffset) is beyond end of file (0 lines total)"
+              message: "Offset \(requestedOffset) is beyond end of file (0 lines total)",
             )
           }
 
@@ -63,8 +63,8 @@ public struct WuhuHTTPRunnerServer: Sendable {
               startLine: 0,
               endLine: 0,
               hasMore: false,
-              nextOffset: nil
-            )
+              nextOffset: nil,
+            ),
           )
         }
 
@@ -73,7 +73,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           throw routeError(
             status: .unprocessableContent,
             code: .offsetOutOfRange,
-            message: "Offset \(requestedOffset) is beyond end of file (\(allLines.count) lines total)"
+            message: "Offset \(requestedOffset) is beyond end of file (\(allLines.count) lines total)",
           )
         }
 
@@ -94,8 +94,8 @@ public struct WuhuHTTPRunnerServer: Sendable {
             startLine: requestedOffset,
             endLine: endIndex,
             hasMore: hasMore,
-            nextOffset: hasMore ? (endIndex + 1) : nil
-          )
+            nextOffset: hasMore ? (endIndex + 1) : nil,
+          ),
         )
       }
     }
@@ -110,8 +110,8 @@ public struct WuhuHTTPRunnerServer: Sendable {
         return jsonResponse(
           HTTPRunnerV1.WriteResponse(
             resolvedPath: resolvedPath,
-            bytesWritten: payload.content.utf8.count
-          )
+            bytesWritten: payload.content.utf8.count,
+          ),
         )
       }
     }
@@ -121,14 +121,14 @@ public struct WuhuHTTPRunnerServer: Sendable {
         let payload = try await decodeJSONBody(HTTPRunnerV1.LsRequest.self, from: request)
         let resolvedPath = try resolveAbsolutePath(
           path: payload.path ?? ".",
-          basePath: payload.basePath
+          basePath: payload.basePath,
         )
 
         if let limit = payload.limit, limit < 1 {
           throw routeError(
             status: .badRequest,
             code: .invalidRequest,
-            message: "limit must be >= 1"
+            message: "limit must be >= 1",
           )
         }
 
@@ -149,8 +149,8 @@ public struct WuhuHTTPRunnerServer: Sendable {
             entries: returnedEntries,
             totalEntries: entries.count,
             returnedEntries: returnedEntries.count,
-            hasMore: returnedEntries.count < entries.count
-          )
+            hasMore: returnedEntries.count < entries.count,
+          ),
         )
       }
     }
@@ -174,7 +174,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           throw routeError(
             status: .conflict,
             code: .editConflict,
-            message: "Could not find the exact text in \(payload.path). The old text must match exactly including all whitespace and newlines."
+            message: "Could not find the exact text in \(payload.path). The old text must match exactly including all whitespace and newlines.",
           )
         }
 
@@ -185,7 +185,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           throw routeError(
             status: .conflict,
             code: .editConflict,
-            message: "Found \(occurrences) occurrences of the text in \(payload.path). The text must be unique. Please provide more context to make it unique."
+            message: "Found \(occurrences) occurrences of the text in \(payload.path). The text must be unique. Please provide more context to make it unique.",
           )
         }
 
@@ -196,7 +196,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           throw routeError(
             status: .conflict,
             code: .editConflict,
-            message: "No changes made to \(payload.path). The replacement produced identical content."
+            message: "No changes made to \(payload.path). The replacement produced identical content.",
           )
         }
 
@@ -214,9 +214,9 @@ public struct WuhuHTTPRunnerServer: Sendable {
             diff: formatSimpleDiff(
               oldText: normalizedOldText,
               newText: normalizedNewText,
-              line: firstChangedLine
-            )
-          )
+              line: firstChangedLine,
+            ),
+          ),
         )
       }
     }
@@ -258,9 +258,9 @@ public struct WuhuHTTPRunnerServer: Sendable {
 
   public static func handler(
     runner: any Runner,
-    name: String = "local"
+    name: String = "local",
   ) -> Handler {
-    self.handler(runner: .wrapping(runner), name: name)
+    handler(runner: .wrapping(runner), name: name)
   }
 
   public static func listen(
@@ -268,13 +268,13 @@ public struct WuhuHTTPRunnerServer: Sendable {
     port: Int,
     runner: RunnerHandle,
     name: String = "local",
-    options: ServeOptions = .init()
+    options: ServeOptions = .init(),
   ) async throws -> ServeNIOListener {
     try await ServeNIOListener.bind(
       host: host,
       port: port,
       options: options,
-      handler: self.handler(runner: runner, name: name)
+      handler: handler(runner: runner, name: name),
     )
   }
 
@@ -283,21 +283,21 @@ public struct WuhuHTTPRunnerServer: Sendable {
     port: Int,
     runner: any Runner = LocalRunner(),
     name: String = "local",
-    options: ServeOptions = .init()
+    options: ServeOptions = .init(),
   ) async throws -> ServeNIOListener {
-    try await self.listen(
+    try await listen(
       host: host,
       port: port,
       runner: .wrapping(runner),
       name: name,
-      options: options
+      options: options,
     )
   }
 
   public func run(configPath: String?) async throws {
     let path = (configPath?.isEmpty == false) ? configPath! : WuhuRunnerConfig.defaultPath()
     let config = try WuhuRunnerConfig.load(path: path)
-    try await self.run(config: config)
+    try await run(config: config)
   }
 
   public func run(config: WuhuRunnerConfig) async throws {
@@ -307,14 +307,14 @@ public struct WuhuHTTPRunnerServer: Sendable {
       host: host,
       port: port,
       runner: .wrapping(LocalRunner()),
-      name: config.name
+      name: config.name,
     )
 
     writeStderr("Starting HTTP runner '\(config.name)' on \(host):\(port)\n")
 
     do {
       while true {
-        try await Task.sleep(for: .seconds(86_400))
+        try await Task.sleep(for: .seconds(86400))
       }
     } catch is CancellationError {
       await listener.close()
@@ -331,13 +331,13 @@ private struct HTTPRunnerRouteError: Error, Sendable {
 private func routeError(
   status: Status,
   code: HTTPRunnerV1.ErrorCode,
-  message: String
+  message: String,
 ) -> HTTPRunnerRouteError {
   HTTPRunnerRouteError(status: status, code: code, message: message)
 }
 
 private func respond(
-  _ operation: @escaping @Sendable () async throws -> Response
+  _ operation: @escaping @Sendable () async throws -> Response,
 ) async -> Response {
   do {
     return try await operation()
@@ -350,8 +350,8 @@ private func respond(
       routeError(
         status: .internalServerError,
         code: .internalError,
-        message: String(describing: error)
-      )
+        message: String(describing: error),
+      ),
     )
   }
 }
@@ -399,44 +399,44 @@ private func mapRunnerError(_ error: RunnerError) -> HTTPRunnerRouteError {
     routeError(
       status: .notFound,
       code: .fileNotFound,
-      message: "File not found: \(path)"
+      message: "File not found: \(path)",
     )
   case let .notADirectory(path):
     routeError(
       status: .unprocessableContent,
       code: .notADirectory,
-      message: "Not a directory: \(path)"
+      message: "Not a directory: \(path)",
     )
   case let .requestFailed(message):
     routeError(
       status: .internalServerError,
       code: .internalError,
-      message: message
+      message: message,
     )
   case let .timeout(message):
     routeError(
       status: Status(code: 504, reasonPhrase: "Gateway Timeout"),
       code: .internalError,
-      message: message
+      message: message,
     )
   case let .disconnected(runnerName):
     routeError(
       status: .internalServerError,
       code: .internalError,
-      message: "Runner '\(runnerName)' is disconnected"
+      message: "Runner '\(runnerName)' is disconnected",
     )
   }
 }
 
 private func decodeJSONBody<Payload: Decodable>(
   _ type: Payload.Type,
-  from request: Request
+  from request: Request,
 ) async throws -> Payload {
   guard let body = request.body else {
     throw routeError(
       status: .badRequest,
       code: .invalidRequest,
-      message: "Missing JSON request body"
+      message: "Missing JSON request body",
     )
   }
 
@@ -446,14 +446,14 @@ private func decodeJSONBody<Payload: Decodable>(
     throw routeError(
       status: .badRequest,
       code: .invalidRequest,
-      message: "Invalid JSON request body: \(error)"
+      message: "Invalid JSON request body: \(error)",
     )
   }
 }
 
 private func resolveAbsolutePath(
   path rawPath: String,
-  basePath rawBasePath: String?
+  basePath rawBasePath: String?,
 ) throws -> String {
   let expandedPath = ToolPath.expand(rawPath)
   if expandedPath.hasPrefix("/") {
@@ -464,7 +464,7 @@ private func resolveAbsolutePath(
     throw routeError(
       status: .badRequest,
       code: .missingBasePath,
-      message: "basePath is required when path is relative"
+      message: "basePath is required when path is relative",
     )
   }
 
@@ -473,7 +473,7 @@ private func resolveAbsolutePath(
     throw routeError(
       status: .badRequest,
       code: .invalidBasePath,
-      message: "basePath must be absolute"
+      message: "basePath must be absolute",
     )
   }
 
@@ -483,7 +483,7 @@ private func resolveAbsolutePath(
 
 private func jsonResponse(
   _ value: some Encodable,
-  status: Status = .ok
+  status: Status = .ok,
 ) -> Response {
   do {
     let body = try Body.json(value, encoder: WuhuJSON.encoder)
@@ -500,8 +500,8 @@ private func jsonResponse(
       routeError(
         status: .internalServerError,
         code: .internalError,
-        message: String(describing: error)
-      )
+        message: String(describing: error),
+      ),
     )
   }
 }
@@ -509,9 +509,9 @@ private func jsonResponse(
 private func jsonErrorResponse(_ error: HTTPRunnerRouteError) -> Response {
   jsonResponse(
     HTTPRunnerV1.ErrorResponse(
-      error: .init(code: error.code, message: error.message)
+      error: .init(code: error.code, message: error.message),
     ),
-    status: error.status
+    status: error.status,
   )
 }
 
@@ -588,7 +588,7 @@ private func fuzzyFindText(content: String, needle: String) -> FuzzyMatch {
   return .init(
     found: false,
     range: content.startIndex ..< content.startIndex,
-    contentForReplacement: content
+    contentForReplacement: content,
   )
 }
 

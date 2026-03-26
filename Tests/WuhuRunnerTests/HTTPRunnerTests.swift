@@ -14,7 +14,7 @@ struct HTTPRunnerHandlerTests {
     let sourceFile = root.appendingPathComponent("Sources/App.swift")
     try FileManager.default.createDirectory(
       at: sourceFile.deletingLastPathComponent(),
-      withIntermediateDirectories: true
+      withIntermediateDirectories: true,
     )
     try "one\ntwo\nthree\n".write(to: sourceFile, atomically: true, encoding: .utf8)
 
@@ -25,9 +25,9 @@ struct HTTPRunnerHandlerTests {
         path: "Sources/App.swift",
         basePath: root.path,
         offset: 2,
-        limit: 1
+        limit: 1,
       ),
-      as: HTTPRunnerV1.ReadResponse.self
+      as: HTTPRunnerV1.ReadResponse.self,
     )
 
     #expect(response.resolvedPath == sourceFile.path)
@@ -53,9 +53,9 @@ struct HTTPRunnerHandlerTests {
       payload: HTTPRunnerV1.LsRequest(
         path: ".",
         basePath: root.path,
-        limit: 2
+        limit: 2,
       ),
-      as: HTTPRunnerV1.LsResponse.self
+      as: HTTPRunnerV1.LsResponse.self,
     )
 
     #expect(response.resolvedPath == root.path)
@@ -80,9 +80,9 @@ struct HTTPRunnerHandlerTests {
         path: "notes.txt",
         basePath: root.path,
         oldText: "old\n",
-        newText: "new\n"
+        newText: "new\n",
       ),
-      as: HTTPRunnerV1.EditResponse.self
+      as: HTTPRunnerV1.EditResponse.self,
     )
 
     let updated = try Data(contentsOf: fileURL)
@@ -99,7 +99,7 @@ struct HTTPRunnerHandlerTests {
       handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/read",
       payload: HTTPRunnerV1.ReadRequest(path: "notes.txt"),
-      method: .post
+      method: .post,
     )
 
     let error = try await response.body.json(HTTPRunnerV1.ErrorResponse.self, decoder: WuhuJSON.decoder)
@@ -117,12 +117,12 @@ struct HTTPRunnerRawHTTPTests {
       path: "hello.txt",
       basePath: root.path,
       content: "hello world",
-      createDirectories: true
+      createDirectories: true,
     )
     let wire = try await roundTripRawHTTP(
       handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/write",
-      payload: payload
+      payload: payload,
     )
 
     let response = try decodeHTTPJSONResponse(wire, as: HTTPRunnerV1.WriteResponse.self)
@@ -144,7 +144,7 @@ struct HTTPRunnerRawHTTPTests {
       path: "edit.txt",
       basePath: root.path,
       oldText: "old\n",
-      newText: "new\n"
+      newText: "new\n",
     )
     let bodyData = try WuhuJSON.encoder.encode(payload)
     let chunks = [
@@ -155,7 +155,7 @@ struct HTTPRunnerRawHTTPTests {
     let wire = try await roundTripChunkedRawHTTP(
       handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/edit",
-      bodyChunks: chunks
+      bodyChunks: chunks,
     )
 
     let response = try decodeHTTPJSONResponse(wire, as: HTTPRunnerV1.EditResponse.self)
@@ -177,15 +177,15 @@ struct HTTPRunnerIntegrationTests {
       host: "127.0.0.1",
       port: 0,
       runner: .wrapping(LocalRunner()),
-      name: "test-runner"
+      name: "test-runner",
     )
 
     do {
       let port = try #require(listener.localAddress?.port)
-      let client = HTTPRunnerClient(
-        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+      let client = try HTTPRunnerClient(
+        baseURL: #require(URL(string: "http://127.0.0.1:\(port)")),
         name: "test-runner",
-        basePath: root.path
+        basePath: root.path,
       )
       let runner = client.runnerHandle()
 
@@ -216,15 +216,15 @@ struct HTTPRunnerIntegrationTests {
       host: "127.0.0.1",
       port: 0,
       runner: .wrapping(LocalRunner()),
-      name: "test-runner"
+      name: "test-runner",
     )
 
     do {
       let port = try #require(listener.localAddress?.port)
-      let locator = RunnerLocator.http(
-        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+      let locator = try RunnerLocator.http(
+        baseURL: #require(URL(string: "http://127.0.0.1:\(port)")),
         name: "test-runner",
-        basePath: root.path
+        basePath: root.path,
       )
       let runner = try await locator.resolve(.remote(name: "test-runner"))
 
@@ -248,21 +248,21 @@ struct HTTPRunnerIntegrationTests {
       host: "127.0.0.1",
       port: 0,
       runner: .wrapping(LocalRunner()),
-      name: "test-runner"
+      name: "test-runner",
     )
 
     do {
       let port = try #require(listener.localAddress?.port)
-      let client = HTTPRunnerClient(
-        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
-        name: "test-runner"
+      let client = try HTTPRunnerClient(
+        baseURL: #require(URL(string: "http://127.0.0.1:\(port)")),
+        name: "test-runner",
       )
 
       try await client.startBash(
         taskID: "bash-1",
         command: "printf 'hello\\n'",
         cwd: root.path,
-        timeout: nil
+        timeout: nil,
       )
 
       let stream = try await client.streamBash(taskID: "bash-1", after: nil)
@@ -301,14 +301,14 @@ struct HTTPRunnerIntegrationTests {
       host: "127.0.0.1",
       port: 0,
       runner: .wrapping(LocalRunner()),
-      name: "test-runner"
+      name: "test-runner",
     )
 
     do {
       let port = try #require(listener.localAddress?.port)
-      let runner = RunnerHandle.http(
-        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
-        name: "test-runner"
+      let runner = try RunnerHandle.http(
+        baseURL: #require(URL(string: "http://127.0.0.1:\(port)")),
+        name: "test-runner",
       )
 
       let result = try await runner.runBash(root.path, "printf 'runner\\n'", nil)
@@ -327,12 +327,12 @@ private func invokeResponse(
   handler: @escaping Handler,
   path: String,
   payload: some Encodable,
-  method: Fetch.Method = .post
+  method: Fetch.Method = .post,
 ) async throws -> Response {
-  let request = Request(
-    url: try #require(URL(string: "http://runner.test\(path)")),
+  let request = try Request(
+    url: #require(URL(string: "http://runner.test\(path)")),
     method: method,
-    body: try Body.json(payload, encoder: WuhuJSON.encoder)
+    body: Body.json(payload, encoder: WuhuJSON.encoder),
   )
   return try await handler(request)
 }
@@ -341,7 +341,7 @@ private func invokeJSON<ResponseBody: Decodable>(
   handler: @escaping Handler,
   path: String,
   payload: some Encodable,
-  as _: ResponseBody.Type
+  as _: ResponseBody.Type,
 ) async throws -> ResponseBody {
   let response = try await invokeResponse(handler: handler, path: path, payload: payload)
   #expect((200 ..< 300).contains(response.status.code))
@@ -351,7 +351,7 @@ private func invokeJSON<ResponseBody: Decodable>(
 private func roundTripRawHTTP(
   handler: @escaping Handler,
   path: String,
-  payload: some Encodable
+  payload: some Encodable,
 ) async throws -> String {
   let body = try WuhuJSON.encoder.encode(payload)
   let requestHead = "POST \(path) HTTP/1.1\r\n"
@@ -369,7 +369,7 @@ private func roundTripRawHTTP(
 private func roundTripChunkedRawHTTP(
   handler: @escaping Handler,
   path: String,
-  bodyChunks: [[UInt8]]
+  bodyChunks: [[UInt8]],
 ) async throws -> String {
   let requestHead = "POST \(path) HTTP/1.1\r\n"
     + "Host: runner.test\r\n"
@@ -393,7 +393,7 @@ private func roundTripChunkedRawHTTP(
 
 private func decodeHTTPJSONResponse<ResponseBody: Decodable>(
   _ wire: String,
-  as _: ResponseBody.Type
+  as _: ResponseBody.Type,
 ) throws -> ResponseBody {
   let marker = "\r\n\r\n"
   let body = try #require(wire.range(of: marker)).upperBound
