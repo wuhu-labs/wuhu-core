@@ -32,6 +32,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private var flushSignal: AsyncStream<Void>.Continuation?
   private var hasPendingWorkSignal = false
   private var hasPendingFlushSignal = false
+  private var flushing = false
 
   // MARK: Observation
 
@@ -149,6 +150,10 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func flushIfNeeded() async throws {
+    guard !flushing else { return }
+    flushing = true
+    defer { flushing = false }
+
     while let diff = behavior.diff(from: publishedState, to: state) {
       let oldState = publishedState
       let newState = state
@@ -160,15 +165,21 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: - Agent Loop
 
-  /// Run the loop until idle: recover → (drain → infer → tools → compact)*
+  /// Run the loop until idle: (drain → infer → execute persisted tools → compact)*
   private func runUntilIdle() async throws {
-    var hasToolResults = recoverStaleToolCalls()
+    var hasToolResults = false
 
-    if !hasToolResults, behavior.needsInference(state: state) {
+    if behavior.needsInference(state: state) {
       hasToolResults = true
     }
 
     while !Task.isCancelled {
+      if let call = behavior.nextToolCall(state: state) {
+        try await executeNextToolCall(call)
+        hasToolResults = true
+        continue
+      }
+
       let drainedInterrupts = behavior.drainInterruptItems(state: &state)
 
       if drainedInterrupts {
@@ -186,14 +197,9 @@ public actor AgentLoop<B: AgentBehavior> {
       let message = try await performInferenceWithRetry(context: context)
       behavior.persistAssistantEntry(message, state: &state)
 
-      let toolCalls = message.content.compactMap { block -> ToolCall? in
-        if case let .toolCall(call) = block { return call }
-        return nil
-      }
-
-      if !toolCalls.isEmpty {
-        try await executeToolCalls(toolCalls)
+      if behavior.nextToolCall(state: state) != nil {
         hasToolResults = true
+        continue
       }
 
       if behavior.shouldCompact(state: state) {
@@ -285,77 +291,42 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  // MARK: - Crash Recovery
-
-  private func recoverStaleToolCalls() -> Bool {
-    let staleIDs = behavior.staleToolCallIDs(in: state)
-    for id in staleIDs {
-      behavior.recoverStaleToolCall(id: id, state: &state)
-    }
-    return !staleIDs.isEmpty
-  }
-
   // MARK: - Tool Execution
 
-  private func executeToolCalls(_ calls: [ToolCall]) async throws {
-    var blocked: [ToolCall] = []
-    var allowed: [ToolCall] = []
-    for call in calls {
-      let argsHash = call.arguments.hashValue
-      let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
-      if count >= ToolCallRepetitionTracker.blockThreshold {
-        blocked.append(call)
-      } else {
-        allowed.append(call)
-      }
+  private func executeNextToolCall(_ call: ToolCall) async throws {
+    // Persist the assistant entry that declared this tool call before starting
+    // execution bookkeeping.
+    try await flushIfNeeded()
+
+    let argsHash = call.arguments.hashValue
+    let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
+
+    if count >= ToolCallRepetitionTracker.blockThreshold {
+      let blockedResult = behavior.blockedToolResult(for: call)
+      behavior.persistToolResult(blockedResult, for: call, state: &state)
+      try await flushIfNeeded()
+      return
     }
 
-    for call in calls {
-      behavior.toolWillExecute(call, state: &state)
-    }
+    let task = behavior.startToolCall(call, state: &state)
 
-    for call in blocked {
-      let error = ToolCallRepetitionError.blocked
-      behavior.toolDidFail(call, error: error, state: &state)
-    }
+    // Persist started bookkeeping before waiting for the tool's result.
+    try await flushIfNeeded()
 
-    // Tool calls are executed in transcript order so stateful tools can affect
-    // later tools in the same assistant turn.
-    for call in allowed {
-      let result: Result<B.ToolResult, any Error>
-      do {
-        let toolResult = try await behavior.executeToolCall(call, state: state)
-        result = .success(toolResult)
-      } catch {
-        result = .failure(error)
-      }
-
-      switch result {
-      case let .success(toolResult):
-        let argsHash = call.arguments.hashValue
-        let resultHash = toolResult.hashValue
-        let count = repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: resultHash,
-        )
-        let finalResult: B.ToolResult = if count >= ToolCallRepetitionTracker.warningThreshold {
-          behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
-        } else {
-          toolResult
-        }
-        behavior.toolDidExecute(call, result: finalResult, state: &state)
-      case let .failure(error):
-        let argsHash = call.arguments.hashValue
-        let errorHash = String(describing: error).hashValue
-        repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: errorHash,
-        )
-        behavior.toolDidFail(call, error: error, state: &state)
-      }
+    let toolResult = await task.value
+    let resultHash = toolResult.hashValue
+    let recordedCount = repetitionTracker.record(
+      toolName: call.name,
+      argsHash: argsHash,
+      resultHash: resultHash,
+    )
+    let finalResult: B.ToolResult = if recordedCount >= ToolCallRepetitionTracker.warningThreshold {
+      behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
+    } else {
+      toolResult
     }
+    behavior.persistToolResult(finalResult, for: call, state: &state)
+    try await flushIfNeeded()
   }
 
   // MARK: - Emit

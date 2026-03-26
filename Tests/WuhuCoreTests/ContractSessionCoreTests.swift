@@ -82,6 +82,23 @@ struct ContractSessionCoreTests {
     return reloaded
   }
 
+  private func startToolAndAssertInvariant(
+    _ behavior: WuhuSessionBehavior,
+    _ state: WuhuSessionLoopState,
+    call: ToolCall,
+  ) async throws -> (state: WuhuSessionLoopState, task: Task<AgentToolResult, Never>) {
+    var next = state
+    let task = behavior.startToolCall(call, state: &next)
+    let durable = if let diff = behavior.diff(from: state, to: next) {
+      try await behavior.persist(diff, from: state, to: next)
+    } else {
+      next
+    }
+    let reloaded = try await behavior.loadState()
+    #expect(durable == reloaded)
+    return (reloaded, task)
+  }
+
   private func runBehaviorTurn(
     _ behavior: WuhuSessionBehavior,
     startingFrom initialState: WuhuSessionLoopState,
@@ -96,20 +113,13 @@ struct ContractSessionCoreTests {
       behavior.persistAssistantEntry(assistant, state: &state)
     }
 
-    let calls = assistant.content.compactMap { block -> ToolCall? in
-      if case let .toolCall(call) = block { return call }
-      return nil
-    }
-
-    for call in calls {
-      state = try await applyAndAssertInvariant(behavior, state) { state in
-        behavior.toolWillExecute(call, state: &state)
-      }
-
-      let result = try await behavior.executeToolCall(call, state: state)
+    while let call = behavior.nextToolCall(state: state) {
+      let started = try await startToolAndAssertInvariant(behavior, state, call: call)
+      state = started.state
+      let result = await started.task.value
 
       state = try await applyAndAssertInvariant(behavior, state) { state in
-        behavior.toolDidExecute(call, result: result, state: &state)
+        behavior.persistToolResult(result, for: call, state: &state)
       }
     }
 
@@ -180,17 +190,18 @@ struct ContractSessionCoreTests {
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.pending)
 
     // Mark started.
-    state = try await applyAndAssertInvariant(behavior, state) { state in
-      behavior.toolWillExecute(call, state: &state)
-    }
+    let started = try await startToolAndAssertInvariant(behavior, state, call: call)
+    state = started.state
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.started)
 
-    // Simulate crash: recover stale tool call should append an errored tool result.
-    let stale = behavior.staleToolCallIDs(in: state)
-    #expect(stale == ["t1"])
+    // Simulate crash: the next tool call resumes through the same API surface
+    // and currently repairs the missing result as an error.
+    let next = behavior.nextToolCall(state: state)
+    #expect(next?.id == "t1")
 
+    let repairedResult = await behavior.startToolCall(call, state: &state).value
     state = try await applyAndAssertInvariant(behavior, state) { state in
-      behavior.recoverStaleToolCall(id: "t1", state: &state)
+      behavior.persistToolResult(repairedResult, for: call, state: &state)
     }
     #expect(state.toolCallStatus["t1"] == ToolCallStatus.errored)
     #expect(state.entries.contains { entry in

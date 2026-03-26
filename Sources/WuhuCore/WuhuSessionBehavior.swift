@@ -379,17 +379,47 @@ struct WuhuSessionBehavior: AgentBehavior {
     state.status = .init(status: statusForOperationalState(state))
   }
 
-  func toolWillExecute(_ call: ToolCall, state: inout State) {
-    state.toolCallStatus[call.id] = .started
-    state.status = .init(status: .running)
+  func nextToolCall(state: State) -> ToolCall? {
+    for entry in state.entries {
+      guard case let .message(message) = entry.payload else { continue }
+      guard case let .assistant(assistant) = message else { continue }
+      for block in assistant.content {
+        guard case let .toolCall(id, name, arguments) = block else { continue }
+        let call = ToolCall(id: id, name: name, arguments: arguments)
+        guard let status = state.toolCallStatus[call.id] else { continue }
+        if status == .pending || status == .started {
+          return call
+        }
+      }
+    }
+    return nil
   }
 
-  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult {
-    let tools = await tools(for: state)
-    guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
-      throw WuhuAIError.unsupported("Unknown tool: \(call.name)")
+  func startToolCall(_ call: ToolCall, state: inout State) -> Task<ToolResult, Never> {
+    if state.toolCallStatus[call.id] == .started {
+      let repairedResult = staleToolCallResult(call: call)
+      return Task { repairedResult }
     }
-    return try await tool.execute(toolCallId: call.id, args: call.arguments)
+
+    state.toolCallStatus[call.id] = .started
+    state.status = .init(status: .running)
+
+    let executionState = state
+    return Task { [self] in
+      do {
+        let tools = await tools(for: executionState)
+        guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
+          return makeToolErrorResult(call: call, errorDescription: "Unknown tool: \(call.name)")
+        }
+        return try await tool.execute(toolCallId: call.id, args: call.arguments)
+      } catch {
+        return makeToolErrorResult(call: call, errorDescription: "\(error)")
+      }
+    }
+  }
+
+  func blockedToolResult(for call: ToolCall) -> ToolResult {
+    makeToolErrorResult(call: call, errorDescription: "\(ToolCallRepetitionError.blocked)")
   }
 
   func appendText(_ text: String, to result: AgentToolResult) -> AgentToolResult {
@@ -398,14 +428,14 @@ struct WuhuSessionBehavior: AgentBehavior {
     return copy
   }
 
-  func toolDidExecute(_ call: ToolCall, result: ToolResult, state: inout State) {
+  func persistToolResult(_ result: ToolResult, for call: ToolCall, state: inout State) {
     let now = Date()
     let toolResultMessage = WuhuToolResultMessage(
       toolCallId: call.id,
       toolName: call.name,
       content: result.content.map(WuhuContentBlock.fromPi),
       details: result.details,
-      isError: false,
+      isError: result.isError,
       timestamp: now,
     )
 
@@ -424,29 +454,7 @@ struct WuhuSessionBehavior: AgentBehavior {
       applyKnownCustomEntry(effect, timestamp: now, state: &state)
     }
 
-    state.toolCallStatus[call.id] = .completed
-    state.status = .init(status: statusForOperationalState(state))
-  }
-
-  func toolDidFail(_ call: ToolCall, error: any Error, state: inout State) {
-    let now = Date()
-    let toolResult: Message = .toolResult(.init(
-      toolCallId: call.id,
-      toolName: call.name,
-      content: [.text("[tool error] \(error)")],
-      details: .object([
-        "wuhu_tool_error": .string("\(error)"),
-      ]),
-      isError: true,
-      timestamp: now,
-    ))
-
-    _ = appendEntry(
-      createdAt: now,
-      payload: .message(.fromPi(toolResult)),
-      to: &state,
-    )
-    state.toolCallStatus[call.id] = .errored
+    state.toolCallStatus[call.id] = result.isError ? .errored : .completed
     state.status = .init(status: statusForOperationalState(state))
   }
 
@@ -492,65 +500,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     return next
   }
 
-  func staleToolCallIDs(in state: State) -> [String] {
-    var finished: Set<String> = []
-    for entry in state.entries {
-      guard case let .message(message) = entry.payload else { continue }
-      guard case let .toolResult(toolResult) = message else { continue }
-      finished.insert(toolResult.toolCallId)
-    }
-
-    return state.toolCallStatus.compactMap { id, status in
-      guard status == .started || status == .pending else { return nil }
-      return finished.contains(id) ? nil : id
-    }.sorted()
-  }
-
-  func recoverStaleToolCall(id: String, state: inout State) {
-    if state.entries.contains(where: { entry in
-      guard case let .message(message) = entry.payload else { return false }
-      guard case let .toolResult(toolResult) = message else { return false }
-      return toolResult.toolCallId == id
-    }) {
-      state.toolCallStatus[id] = .errored
-      state.status = .init(status: statusForOperationalState(state))
-      return
-    }
-
-    let toolName: String = {
-      for entry in state.entries.reversed() {
-        guard case let .message(message) = entry.payload else { continue }
-        guard case let .assistant(assistant) = message else { continue }
-        for block in assistant.content {
-          guard case let .toolCall(callID, name, _) = block else { continue }
-          if callID == id { return name }
-        }
-      }
-      return "unknown"
-    }()
-
-    let now = Date()
-    let repaired: Message = .toolResult(.init(
-      toolCallId: id,
-      toolName: toolName,
-      content: [.text(WuhuToolRepairer.lostToolResultText)],
-      details: .object([
-        "wuhu_repair": .string("stale_tool_call"),
-        "reason": .string("lost"),
-      ]),
-      isError: true,
-      timestamp: now,
-    ))
-
-    _ = appendEntry(
-      createdAt: now,
-      payload: .message(.fromPi(repaired)),
-      to: &state,
-    )
-    state.toolCallStatus[id] = .errored
-    state.status = .init(status: statusForOperationalState(state))
-  }
-
   func hasWork(state: State) -> Bool {
     switch state.status.status {
     case .stopped:
@@ -583,6 +532,27 @@ struct WuhuSessionBehavior: AgentBehavior {
       }
     }
     return false
+  }
+
+  private func makeToolErrorResult(call _: ToolCall, errorDescription: String) -> ToolResult {
+    .init(
+      content: [.text("[tool error] \(errorDescription)")],
+      details: .object([
+        "wuhu_tool_error": .string(errorDescription),
+      ]),
+      isError: true,
+    )
+  }
+
+  private func staleToolCallResult(call _: ToolCall) -> ToolResult {
+    .init(
+      content: [.text(WuhuToolRepairer.lostToolResultText)],
+      details: .object([
+        "wuhu_repair": .string("stale_tool_call"),
+        "reason": .string("lost"),
+      ]),
+      isError: true,
+    )
   }
 
   private func hydrateImageBlobs(in messages: [Message]) -> [Message] {

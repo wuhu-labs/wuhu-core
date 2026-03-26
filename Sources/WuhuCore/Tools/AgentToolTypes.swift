@@ -6,15 +6,18 @@ public struct AgentToolResult: Sendable, Hashable {
   public var content: [ContentBlock]
   public var details: JSONValue
   public var effects: [WuhuKnownCustomEntry]
+  public var isError: Bool
 
   public init(
     content: [ContentBlock],
     details: JSONValue = .object([:]),
     effects: [WuhuKnownCustomEntry] = [],
+    isError: Bool = false,
   ) {
     self.content = content
     self.details = details
     self.effects = effects
+    self.isError = isError
   }
 }
 
