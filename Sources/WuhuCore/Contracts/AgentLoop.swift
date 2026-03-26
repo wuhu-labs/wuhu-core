@@ -26,7 +26,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private var publishedState: B.State
   private var inflight: [B.StreamAction]?
   private var liveVersion: Int = 0
-  private var durableVersion: Int = 0
+  private var durableWaiters = MonotonicWaiters<Int>(current: 0)
 
   // MARK: Lifecycle
 
@@ -35,7 +35,6 @@ public actor AgentLoop<B: AgentBehavior> {
   private var flushSignal: AsyncStream<Void>.Continuation?
   private var hasPendingWorkSignal = false
   private var hasPendingFlushSignal = false
-  private var flushWaiters: [UUID: FlushWaiter] = [:]
 
   // MARK: Observation
 
@@ -69,7 +68,7 @@ public actor AgentLoop<B: AgentBehavior> {
   public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
     (
       state: state,
-      hasPendingFlush: durableVersion < liveVersion,
+      hasPendingFlush: durableWaiters.current < liveVersion,
     )
   }
 
@@ -101,7 +100,7 @@ public actor AgentLoop<B: AgentBehavior> {
     started = true
     defer {
       started = false
-      failAllFlushWaiters(with: CancellationError())
+      durableWaiters.failAll(with: CancellationError())
       workSignal?.finish()
       flushSignal?.finish()
       workSignal = nil
@@ -160,9 +159,8 @@ public actor AgentLoop<B: AgentBehavior> {
       let targetVersion = liveVersion
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
       publishedState = durableState
-      durableVersion = targetVersion
+      durableWaiters.advance(to: targetVersion)
       emit(.stateUpdated(durableState))
-      resumeFlushWaiters()
     }
   }
 
@@ -201,8 +199,7 @@ public actor AgentLoop<B: AgentBehavior> {
       behavior.persistAssistantEntry(message, state: &state)
 
       if behavior.nextToolCall(state: state) != nil {
-        let version = liveVersion
-        try await waitUntilDurable(version)
+        try await waitUntilDurableCurrentVersion()
         hasToolResults = true
         continue
       }
@@ -305,14 +302,12 @@ public actor AgentLoop<B: AgentBehavior> {
     if count >= ToolCallRepetitionTracker.blockThreshold {
       let blockedResult = behavior.blockedToolResult(for: call)
       behavior.persistToolResult(blockedResult, for: call, state: &state)
-      let version = liveVersion
-      try await waitUntilDurable(version)
+      try await waitUntilDurableCurrentVersion()
       return
     }
 
     let task = behavior.startToolCall(call, state: &state)
-    let startedVersion = liveVersion
-    try await waitUntilDurable(startedVersion)
+    try await waitUntilDurableCurrentVersion()
 
     let toolResult = await task.value
     let resultHash = toolResult.hashValue
@@ -327,46 +322,34 @@ public actor AgentLoop<B: AgentBehavior> {
       toolResult
     }
     behavior.persistToolResult(finalResult, for: call, state: &state)
-    let resultVersion = liveVersion
-    try await waitUntilDurable(resultVersion)
+    try await waitUntilDurableCurrentVersion()
   }
 
   // MARK: - Flush Barriers
 
-  private func waitUntilDurable(_ targetVersion: Int) async throws {
-    guard durableVersion < targetVersion else { return }
+  private func waitUntilDurableCurrentVersion() async throws {
+    let targetVersion = liveVersion
+    guard durableWaiters.current < targetVersion else { return }
 
-    let id = UUID()
+    let waiterID = UUID()
     try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
-        flushWaiters[id] = .init(targetVersion: targetVersion, continuation: continuation)
+        let registered = durableWaiters.register(
+          id: waiterID,
+          until: targetVersion,
+          continuation: continuation,
+        )
+        guard registered else { return }
         hasPendingFlushSignal = true
         flushSignal?.yield(())
       }
     } onCancel: {
-      Task { await self.cancelFlushWaiter(id, error: CancellationError()) }
+      Task { await self.cancelFlushWaiter(waiterID, error: CancellationError()) }
     }
   }
 
   private func cancelFlushWaiter(_ id: UUID, error: any Error) {
-    guard let waiter = flushWaiters.removeValue(forKey: id) else { return }
-    waiter.continuation.resume(throwing: error)
-  }
-
-  private func resumeFlushWaiters() {
-    let ready = flushWaiters.filter { $0.value.targetVersion <= durableVersion }
-    for (id, waiter) in ready {
-      flushWaiters.removeValue(forKey: id)
-      waiter.continuation.resume()
-    }
-  }
-
-  private func failAllFlushWaiters(with error: any Error) {
-    let waiters = flushWaiters
-    flushWaiters.removeAll()
-    for (_, waiter) in waiters {
-      waiter.continuation.resume(throwing: error)
-    }
+    durableWaiters.cancel(id: id, error: error)
   }
 
   // MARK: - Emit
@@ -398,9 +381,4 @@ enum ToolCallRepetitionError: Error, CustomStringConvertible {
   var description: String {
     ToolCallRepetitionTracker.blockText
   }
-}
-
-private struct FlushWaiter: Sendable {
-  let targetVersion: Int
-  let continuation: CheckedContinuation<Void, Error>
 }
