@@ -100,22 +100,24 @@ struct LoggingHTTPTransportTests {
         var headers = Headers()
         headers[.contentType] = "text/event-stream"
 
-        let body = BodyStream { continuation in
-          let producer = Task {
-            continuation.yield(Array(serializeSSEEvent(.init(data: "first")).utf8))
-            do {
-              try await Task.sleep(for: .seconds(60))
-              continuation.yield(Array(serializeSSEEvent(.init(data: "second")).utf8))
-              continuation.finish()
-            } catch {
-              continuation.finish()
+        let body = Body.stream(contentType: "text/event-stream") {
+          AsyncThrowingStream<Bytes, Error> { continuation in
+            let producer = Task {
+              continuation.yield(Array(serializeSSEEvent(.init(data: "first")).utf8))
+              do {
+                try await Task.sleep(for: .seconds(60))
+                continuation.yield(Array(serializeSSEEvent(.init(data: "second")).utf8))
+                continuation.finish()
+              } catch {
+                continuation.finish()
+              }
             }
-          }
 
-          continuation.onTermination = { _ in
-            producer.cancel()
-            Task {
-              await probe.markCancelled()
+            continuation.onTermination = { _ in
+              producer.cancel()
+              Task {
+                await probe.markCancelled()
+              }
             }
           }
         }
@@ -132,7 +134,7 @@ struct LoggingHTTPTransportTests {
 
     let consumer = Task {
       do {
-        for try await chunk in activeResponse.body {
+        for try await chunk in activeResponse.body.asyncBytes() {
           #expect(String(decoding: chunk, as: UTF8.self).contains("data: first"))
           await firstEvent.markSeen()
         }

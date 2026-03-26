@@ -62,75 +62,107 @@ public extension RunnerLocator {
       guard let runner = await registry.get(runnerID) else {
         throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
       }
-      return RunnerHandle(
-        id: runner.id,
-        readText: { path in try await runner.readString(path: path, encoding: .utf8) },
-        readData: { path in try await runner.readData(path: path) },
-        writeText: { path, content, createDirs in
-          try await runner.writeString(path: path, content: content, createIntermediateDirectories: createDirs, encoding: .utf8)
-        },
-        writeData: { path, data, createDirs in
-          try await runner.writeData(path: path, data: data, createIntermediateDirectories: createDirs)
-        },
-        listDirectory: { path in try await runner.listDirectory(path: path) },
-        find: { params in try await runner.find(params: params) },
-        grep: { params in try await runner.grep(params: params) },
-        startBash: { taskID, cwd, command, timeout in
-          try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
-        },
-        streamBash: { taskID, after in
-          try await runner.streamBash(taskID: taskID, after: after)
-        },
-        ackBash: { taskID, through in
-          try await runner.ackBash(taskID: taskID, through: through)
-        },
-        killBash: { taskID in
-          try await runner.killBash(taskID: taskID)
-        },
-        runBash: { cwd, command, timeout in
-          try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
-        },
-      )
+      return .wrapping(runner)
     }
   }
 
   static let localOnly: Self = {
     let runner = LocalRunner()
-    return Self { runnerID in
+    return .init { runnerID in
       guard runnerID == .local else {
         throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
       }
-      return RunnerHandle(
-        id: .local,
-        readText: { path in try await runner.readString(path: path, encoding: .utf8) },
-        readData: { path in try await runner.readData(path: path) },
-        writeText: { path, content, createDirs in
-          try await runner.writeString(path: path, content: content, createIntermediateDirectories: createDirs, encoding: .utf8)
-        },
-        writeData: { path, data, createDirs in
-          try await runner.writeData(path: path, data: data, createIntermediateDirectories: createDirs)
-        },
-        listDirectory: { path in try await runner.listDirectory(path: path) },
-        find: { params in try await runner.find(params: params) },
-        grep: { params in try await runner.grep(params: params) },
-        startBash: { taskID, cwd, command, timeout in
-          try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
-        },
-        streamBash: { taskID, after in
-          try await runner.streamBash(taskID: taskID, after: after)
-        },
-        ackBash: { taskID, through in
-          try await runner.ackBash(taskID: taskID, through: through)
-        },
-        killBash: { taskID in
-          try await runner.killBash(taskID: taskID)
-        },
-        runBash: { cwd, command, timeout in
-          try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
-        },
-      )
+      return .wrapping(runner)
     }
   }()
+
+  static func http(
+    baseURL: URL,
+    name: String? = nil,
+    basePath: String? = nil,
+    fetch: FetchClient = sharedFetchClient,
+  ) -> Self {
+    let handle = RunnerHandle.http(
+      baseURL: baseURL,
+      name: name,
+      basePath: basePath,
+      fetch: fetch,
+    )
+
+    return .init { runnerID in
+      guard runnerID == handle.id else {
+        throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
+      }
+      return handle
+    }
+  }
+}
+
+public extension RunnerHandle {
+  static func wrapping(_ runner: any Runner) -> Self {
+    .init(
+      id: runner.id,
+      readText: { path in
+        try await runner.readString(path: path, encoding: .utf8)
+      },
+      readData: { path in
+        try await runner.readData(path: path)
+      },
+      writeText: { path, content, createDirs in
+        try await runner.writeString(
+          path: path,
+          content: content,
+          createIntermediateDirectories: createDirs,
+          encoding: .utf8,
+        )
+      },
+      writeData: { path, data, createDirs in
+        try await runner.writeData(
+          path: path,
+          data: data,
+          createIntermediateDirectories: createDirs,
+        )
+      },
+      listDirectory: { path in
+        try await runner.listDirectory(path: path)
+      },
+      find: { params in
+        try await runner.find(params: params)
+      },
+      grep: { params in
+        try await runner.grep(params: params)
+      },
+      startBash: { taskID, cwd, command, timeout in
+        try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+      },
+      streamBash: { taskID, after in
+        try await runner.streamBash(taskID: taskID, after: after)
+      },
+      ackBash: { taskID, through in
+        try await runner.ackBash(taskID: taskID, through: through)
+      },
+      killBash: { taskID in
+        try await runner.killBash(taskID: taskID)
+      },
+      runBash: { cwd, command, timeout in
+        try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
+      },
+    )
+  }
+
+  static func http(
+    baseURL: URL,
+    name: String? = nil,
+    basePath: String? = nil,
+    fetch: FetchClient = sharedFetchClient,
+  ) -> Self {
+    HTTPRunnerClient(
+      baseURL: baseURL,
+      name: name,
+      basePath: basePath,
+      fetch: fetch,
+    ).runnerHandle()
+  }
 }
 
 private enum RunnerLocatorKey: DependencyKey {

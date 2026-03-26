@@ -53,12 +53,12 @@ public struct BashTaskRequest: Sendable, Hashable, Codable {
 
 public typealias BashStreamCursor = Int
 
-public enum BashStreamPayload: Sendable, Hashable {
+public enum BashStreamPayload: Sendable, Hashable, Codable {
   case output(String)
   case finished(BashResult)
 }
 
-public struct BashStreamEvent: Sendable, Hashable {
+public struct BashStreamEvent: Sendable, Hashable, Codable {
   public var cursor: BashStreamCursor
   public var payload: BashStreamPayload
 

@@ -19,8 +19,9 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.5.0"),
-    .package(url: "https://github.com/wuhu-labs/wuhu-fetch.git", exact: "0.1.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.5.1"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-fetch.git", exact: "0.2.0"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-serve.git", revision: "cab564da8ce634a34c2462efe1bb9df9c6d423c7"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.3"),
     .package(url: "https://github.com/wuhu-labs/wuhu-yamux.git", exact: "0.1.3"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
@@ -75,6 +76,7 @@ let package = Package(
         "WuhuAPI",
         .product(name: "WuhuAI", package: "wuhu-ai"),
         .product(name: "Fetch", package: "wuhu-fetch"),
+        .product(name: "FetchSSE", package: "wuhu-fetch"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "GRDB", package: "GRDB.swift"),
@@ -117,8 +119,12 @@ let package = Package(
       name: "WuhuRunner",
       dependencies: [
         "WuhuCore",
+        .product(name: "Fetch", package: "wuhu-fetch"),
         .product(name: "Mux", package: "wuhu-yamux"),
         .product(name: "MuxWebSocket", package: "wuhu-yamux"),
+        .product(name: "Serve", package: "wuhu-serve"),
+        .product(name: "ServeNIO", package: "wuhu-serve"),
+        .product(name: "ServeRouting", package: "wuhu-serve"),
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "Yams", package: "Yams"),
@@ -171,6 +177,15 @@ let package = Package(
       name: "WuhuServerTests",
       dependencies: [
         "WuhuServer",
+      ],
+    ),
+    .testTarget(
+      name: "WuhuRunnerTests",
+      dependencies: [
+        "WuhuRunner",
+        "WuhuCore",
+        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
+        .product(name: "ServeTesting", package: "wuhu-serve"),
       ],
     ),
     .testTarget(
