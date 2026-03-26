@@ -32,7 +32,10 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.9.0"),
-    .package(url: "https://github.com/sideeffect-io/AsyncExtensions.git", exact: "0.5.5"),
+    .package(
+      url: "https://github.com/sideeffect-io/AsyncExtensions.git",
+      revision: "b97d381f6156e8c34b718bddfb9481f957a07edc"
+    ),
     .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
     .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
