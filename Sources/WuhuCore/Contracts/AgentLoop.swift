@@ -1,5 +1,11 @@
+import AsyncExtensions
 import Foundation
 import WuhuAI
+
+private struct DurableSnapshot<State: Sendable>: Sendable {
+  var version: Int
+  var state: State
+}
 
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
 ///
@@ -23,10 +29,9 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  private var publishedState: B.State
   private var inflight: [B.StreamAction]?
   private var liveVersion: Int = 0
-  private let durableCondition = AsyncCondition<Int>(0)
+  private let durableSnapshots: AsyncCurrentValueSubject<DurableSnapshot<B.State>>
 
   // MARK: Lifecycle
 
@@ -49,7 +54,7 @@ public actor AgentLoop<B: AgentBehavior> {
   public init(behavior: B, initialState: B.State) {
     self.behavior = behavior
     state = initialState
-    publishedState = initialState
+    durableSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState))
   }
 
   // MARK: - Observation
@@ -62,15 +67,12 @@ public actor AgentLoop<B: AgentBehavior> {
     continuation.onTermination = { [weak self] _ in
       Task { [weak self] in await self?.removeObserver(id) }
     }
-    return AgentLoopObservation(state: publishedState, inflight: inflight, events: stream)
+    return AgentLoopObservation(state: durableSnapshots.value.state, inflight: inflight, events: stream)
   }
 
-  public func currentStateSnapshot() async -> (state: B.State, hasPendingFlush: Bool) {
-    let durableVersion = await durableCondition.current()
-    return (
-      state: state,
-      hasPendingFlush: durableVersion < liveVersion,
-    )
+  public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
+    let durable = durableSnapshots.value
+    return (state: state, hasPendingFlush: durable.version < liveVersion)
   }
 
   private func removeObserver(_ id: UUID) {
@@ -154,7 +156,6 @@ public actor AgentLoop<B: AgentBehavior> {
     flushContinuation.finish()
     workSignal = nil
     flushSignal = nil
-    await durableCondition.failAll(with: terminalError ?? CancellationError())
 
     if let terminalError {
       throw terminalError
@@ -162,13 +163,12 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func flushIfNeeded() async throws {
-    while let diff = behavior.diff(from: publishedState, to: state) {
-      let oldState = publishedState
+    while let diff = behavior.diff(from: durableSnapshots.value.state, to: state) {
+      let oldState = durableSnapshots.value.state
       let newState = state
       let targetVersion = liveVersion
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
-      publishedState = durableState
-      await durableCondition.set(targetVersion)
+      durableSnapshots.send(.init(version: targetVersion, state: durableState))
       emit(.stateUpdated(durableState))
     }
   }
@@ -338,12 +338,16 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private func waitUntilDurableCurrentVersion() async throws {
     let targetVersion = liveVersion
-    let durableVersion = await durableCondition.current()
-    guard durableVersion < targetVersion else { return }
+    guard durableSnapshots.value.version < targetVersion else { return }
 
     hasPendingFlushSignal = true
     flushSignal?.yield(())
-    try await durableCondition.waitUntil(atLeast: targetVersion)
+    for await snapshot in durableSnapshots {
+      if snapshot.version >= targetVersion {
+        return
+      }
+    }
+    throw CancellationError()
   }
 
   // MARK: - Emit
