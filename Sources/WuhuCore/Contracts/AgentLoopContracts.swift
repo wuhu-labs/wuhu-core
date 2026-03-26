@@ -33,8 +33,8 @@ public protocol AgentBehavior: Sendable {
   associatedtype ExternalAction: Sendable
 
   /// The result of executing a tool. Opaque to the loop — it just
-  /// passes the value from ``executeToolCall(_:state:)`` to
-  /// ``toolDidExecute(_:result:state:)``.
+  /// passes the value from ``startToolCall(_:state:)`` to
+  /// ``persistToolResult(_:for:state:)``.
   ///
   /// `Hashable` is required so the loop can detect consecutive
   /// identical tool results (see ``ToolCallRepetitionTracker``).
@@ -97,14 +97,25 @@ public protocol AgentBehavior: Sendable {
 
   // MARK: Tool Lifecycle
 
-  /// Mark that a tool call is about to execute in the in-memory state.
-  func toolWillExecute(
+  /// Returns the next tool call that should execute for the current state.
+  ///
+  /// This is a pure query over durable state. The loop can therefore resume
+  /// pending or started work after restart without depending on a transient
+  /// in-memory inference result.
+  func nextToolCall(state: State) -> ToolCall?
+
+  /// Start (or resume) a tool call by mutating in-memory bookkeeping and
+  /// returning an error-free task handle for the actual work.
+  ///
+  /// The loop persists the mutated state before awaiting the task's value.
+  func startToolCall(
     _ call: ToolCall,
     state: inout State,
-  )
+  ) -> Task<ToolResult, Never>
 
-  /// Execute a tool call. Runs outside the serialized path (parallel).
-  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult
+  /// Build the tool result that should be persisted when execution is blocked
+  /// by generic loop policy (for example repetition protection).
+  func blockedToolResult(for call: ToolCall) -> ToolResult
 
   /// Append supplementary text to a tool result.
   ///
@@ -113,16 +124,9 @@ public protocol AgentBehavior: Sendable {
   func appendText(_ text: String, to result: ToolResult) -> ToolResult
 
   /// Save a tool result into the in-memory state.
-  func toolDidExecute(
-    _ call: ToolCall,
-    result: ToolResult,
-    state: inout State,
-  )
-
-  /// Save an error result for a tool call into the in-memory state.
-  func toolDidFail(
-    _ call: ToolCall,
-    error: any Error,
+  func persistToolResult(
+    _ result: ToolResult,
+    for call: ToolCall,
     state: inout State,
   )
 
@@ -133,18 +137,6 @@ public protocol AgentBehavior: Sendable {
 
   /// Perform compaction and return the next in-memory state.
   func performCompaction(state: State) async throws -> State
-
-  // MARK: Crash Recovery
-
-  /// Tool call IDs stuck in `.started` from a previous crash.
-  func staleToolCallIDs(in state: State) -> [String]
-
-  /// Inject an error result for a crash-interrupted tool call into the
-  /// in-memory state.
-  func recoverStaleToolCall(
-    id: String,
-    state: inout State,
-  )
 
   // MARK: Cold Start
 

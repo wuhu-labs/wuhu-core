@@ -17,6 +17,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private(set) var state: B.State {
     didSet {
       guard state != oldValue else { return }
+      liveVersion += 1
       hasPendingFlushSignal = true
       flushSignal?.yield(())
     }
@@ -24,6 +25,8 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private var publishedState: B.State
   private var inflight: [B.StreamAction]?
+  private var liveVersion: Int = 0
+  private let durableCondition = AsyncCondition<Int>(0)
 
   // MARK: Lifecycle
 
@@ -62,10 +65,11 @@ public actor AgentLoop<B: AgentBehavior> {
     return AgentLoopObservation(state: publishedState, inflight: inflight, events: stream)
   }
 
-  public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
-    (
+  public func currentStateSnapshot() async -> (state: B.State, hasPendingFlush: Bool) {
+    let durableVersion = await durableCondition.current()
+    return (
       state: state,
-      hasPendingFlush: behavior.diff(from: publishedState, to: state) != nil,
+      hasPendingFlush: durableVersion < liveVersion,
     )
   }
 
@@ -95,13 +99,6 @@ public actor AgentLoop<B: AgentBehavior> {
   public func start() async throws {
     precondition(!started, "AgentLoop.start() called more than once")
     started = true
-    defer {
-      started = false
-      workSignal?.finish()
-      flushSignal?.finish()
-      workSignal = nil
-      flushSignal = nil
-    }
 
     let (workStream, workContinuation) = AsyncStream<Void>.makeStream(
       bufferingPolicy: .bufferingNewest(1),
@@ -119,32 +116,48 @@ public actor AgentLoop<B: AgentBehavior> {
       flushContinuation.yield(())
     }
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in workStream {
-          try Task.checkCancellation()
-          await consumePendingWorkSignal()
-          try await runUntilIdle()
+    var terminalError: (any Error)?
+    do {
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in workStream {
+            try Task.checkCancellation()
+            await consumePendingWorkSignal()
+            try await runUntilIdle()
+          }
+        }
+
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in flushStream {
+            try Task.checkCancellation()
+            await consumePendingFlushSignal()
+            try await flushIfNeeded()
+          }
+        }
+
+        do {
+          while try await group.next() != nil {}
+        } catch {
+          group.cancelAll()
+          while let _ = try? await group.next() {}
+          throw error
         }
       }
+    } catch {
+      terminalError = error
+    }
 
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in flushStream {
-          try Task.checkCancellation()
-          await consumePendingFlushSignal()
-          try await flushIfNeeded()
-        }
-      }
+    started = false
+    workContinuation.finish()
+    flushContinuation.finish()
+    workSignal = nil
+    flushSignal = nil
+    await durableCondition.failAll(with: terminalError ?? CancellationError())
 
-      do {
-        while try await group.next() != nil {}
-      } catch {
-        group.cancelAll()
-        while let _ = try? await group.next() {}
-        throw error
-      }
+    if let terminalError {
+      throw terminalError
     }
   }
 
@@ -152,23 +165,31 @@ public actor AgentLoop<B: AgentBehavior> {
     while let diff = behavior.diff(from: publishedState, to: state) {
       let oldState = publishedState
       let newState = state
+      let targetVersion = liveVersion
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
       publishedState = durableState
+      await durableCondition.set(targetVersion)
       emit(.stateUpdated(durableState))
     }
   }
 
   // MARK: - Agent Loop
 
-  /// Run the loop until idle: recover → (drain → infer → tools → compact)*
+  /// Run the loop until idle: (drain → infer → execute persisted tools → compact)*
   private func runUntilIdle() async throws {
-    var hasToolResults = recoverStaleToolCalls()
+    var hasToolResults = false
 
-    if !hasToolResults, behavior.needsInference(state: state) {
+    if behavior.needsInference(state: state) {
       hasToolResults = true
     }
 
     while !Task.isCancelled {
+      if let call = behavior.nextToolCall(state: state) {
+        try await executeNextToolCall(call)
+        hasToolResults = true
+        continue
+      }
+
       let drainedInterrupts = behavior.drainInterruptItems(state: &state)
 
       if drainedInterrupts {
@@ -186,14 +207,10 @@ public actor AgentLoop<B: AgentBehavior> {
       let message = try await performInferenceWithRetry(context: context)
       behavior.persistAssistantEntry(message, state: &state)
 
-      let toolCalls = message.content.compactMap { block -> ToolCall? in
-        if case let .toolCall(call) = block { return call }
-        return nil
-      }
-
-      if !toolCalls.isEmpty {
-        try await executeToolCalls(toolCalls)
+      if behavior.nextToolCall(state: state) != nil {
+        try await waitUntilDurableCurrentVersion()
         hasToolResults = true
+        continue
       }
 
       if behavior.shouldCompact(state: state) {
@@ -285,77 +302,48 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  // MARK: - Crash Recovery
-
-  private func recoverStaleToolCalls() -> Bool {
-    let staleIDs = behavior.staleToolCallIDs(in: state)
-    for id in staleIDs {
-      behavior.recoverStaleToolCall(id: id, state: &state)
-    }
-    return !staleIDs.isEmpty
-  }
-
   // MARK: - Tool Execution
 
-  private func executeToolCalls(_ calls: [ToolCall]) async throws {
-    var blocked: [ToolCall] = []
-    var allowed: [ToolCall] = []
-    for call in calls {
-      let argsHash = call.arguments.hashValue
-      let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
-      if count >= ToolCallRepetitionTracker.blockThreshold {
-        blocked.append(call)
-      } else {
-        allowed.append(call)
-      }
+  private func executeNextToolCall(_ call: ToolCall) async throws {
+    let argsHash = call.arguments.hashValue
+    let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
+
+    if count >= ToolCallRepetitionTracker.blockThreshold {
+      let blockedResult = behavior.blockedToolResult(for: call)
+      behavior.persistToolResult(blockedResult, for: call, state: &state)
+      try await waitUntilDurableCurrentVersion()
+      return
     }
 
-    for call in calls {
-      behavior.toolWillExecute(call, state: &state)
-    }
+    let task = behavior.startToolCall(call, state: &state)
+    try await waitUntilDurableCurrentVersion()
 
-    for call in blocked {
-      let error = ToolCallRepetitionError.blocked
-      behavior.toolDidFail(call, error: error, state: &state)
+    let toolResult = await task.value
+    let resultHash = toolResult.hashValue
+    let recordedCount = repetitionTracker.record(
+      toolName: call.name,
+      argsHash: argsHash,
+      resultHash: resultHash,
+    )
+    let finalResult: B.ToolResult = if recordedCount >= ToolCallRepetitionTracker.warningThreshold {
+      behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
+    } else {
+      toolResult
     }
+    behavior.persistToolResult(finalResult, for: call, state: &state)
+    try await waitUntilDurableCurrentVersion()
+  }
 
-    // Tool calls are executed in transcript order so stateful tools can affect
-    // later tools in the same assistant turn.
-    for call in allowed {
-      let result: Result<B.ToolResult, any Error>
-      do {
-        let toolResult = try await behavior.executeToolCall(call, state: state)
-        result = .success(toolResult)
-      } catch {
-        result = .failure(error)
-      }
+  // MARK: - Flush Barriers
 
-      switch result {
-      case let .success(toolResult):
-        let argsHash = call.arguments.hashValue
-        let resultHash = toolResult.hashValue
-        let count = repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: resultHash,
-        )
-        let finalResult: B.ToolResult = if count >= ToolCallRepetitionTracker.warningThreshold {
-          behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
-        } else {
-          toolResult
-        }
-        behavior.toolDidExecute(call, result: finalResult, state: &state)
-      case let .failure(error):
-        let argsHash = call.arguments.hashValue
-        let errorHash = String(describing: error).hashValue
-        repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: errorHash,
-        )
-        behavior.toolDidFail(call, error: error, state: &state)
-      }
-    }
+  private func waitUntilDurableCurrentVersion() async throws {
+    let targetVersion = liveVersion
+    let durableVersion = await durableCondition.current()
+    guard durableVersion < targetVersion else { return }
+
+    hasPendingFlushSignal = true
+    flushSignal?.yield(())
+    try await durableCondition.waitUntil(atLeast: targetVersion)
   }
 
   // MARK: - Emit

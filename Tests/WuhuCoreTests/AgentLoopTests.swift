@@ -141,12 +141,15 @@ private struct FailureCleanupBehavior: AgentBehavior {
     state _: inout FailureCleanupState,
   ) {}
 
-  func toolWillExecute(
-    _: ToolCall,
-    state _: inout FailureCleanupState,
-  ) {}
+  func nextToolCall(state _: FailureCleanupState) -> ToolCall? {
+    nil
+  }
 
-  func executeToolCall(_: ToolCall, state _: FailureCleanupState) async throws -> String {
+  func startToolCall(_: ToolCall, state _: inout FailureCleanupState) -> Task<String, Never> {
+    Task { "" }
+  }
+
+  func blockedToolResult(for _: ToolCall) -> String {
     ""
   }
 
@@ -154,15 +157,9 @@ private struct FailureCleanupBehavior: AgentBehavior {
     result + text
   }
 
-  func toolDidExecute(
-    _: ToolCall,
-    result _: String,
-    state _: inout FailureCleanupState,
-  ) {}
-
-  func toolDidFail(
-    _: ToolCall,
-    error _: any Error,
+  func persistToolResult(
+    _: String,
+    for _: ToolCall,
     state _: inout FailureCleanupState,
   ) {}
 
@@ -173,12 +170,6 @@ private struct FailureCleanupBehavior: AgentBehavior {
   func performCompaction(state: FailureCleanupState) async throws -> FailureCleanupState {
     state
   }
-
-  func staleToolCallIDs(in _: FailureCleanupState) -> [String] {
-    []
-  }
-
-  func recoverStaleToolCall(id _: String, state _: inout FailureCleanupState) {}
 
   func hasWork(state _: FailureCleanupState) -> Bool {
     false
