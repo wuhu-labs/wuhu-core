@@ -195,7 +195,7 @@ public actor LocalRunner: Runner {
     }
 
     // Run startup script if provided
-    if let script = params.startupScript, !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    if let script = params.startupScript, !script.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
       let scriptPath: String = {
         let expanded = ToolPath.expand(script)
         if expanded.hasPrefix("/") { return expanded }
