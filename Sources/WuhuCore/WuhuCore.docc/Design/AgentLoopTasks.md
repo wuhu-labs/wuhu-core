@@ -7,7 +7,6 @@ This design keeps the agentic loop alive while still respecting structured concu
 ## High-Level Model
 
 - The server process creates a single `WuhuService` actor for the lifetime of the daemon.
-- `WuhuService.startAgentLoopManager()` starts long-lived **background listeners** (for example async-bash completion routing).
 - Wuhu starts one long-lived **per-session actor** (`WuhuSessionRuntime`) per session (as needed).
 - `WuhuSessionRuntime` owns a persistent `AgentLoop<WuhuSessionBehavior>` and acts as the session’s execution loop.
 - `POST /v1/sessions/:id/enqueue` should be modeled as a low-latency command that enqueues user input (steer or follow-up) without waiting for agent execution.
@@ -18,9 +17,6 @@ For the target meaning boundary (queues + subscription), see the Session Contrac
 ## Task Hierarchy
 
 At runtime the hierarchy looks like:
-
-- `WuhuService.startAgentLoopManager()`
-  - background listener tasks (for example async-bash completion routing)
 
 For each active session:
 

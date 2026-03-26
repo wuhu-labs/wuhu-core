@@ -24,13 +24,10 @@ public actor WuhuService {
   let store: SQLiteSessionStore
   let blobStore: WuhuBlobStore
   private let retryPolicy: WuhuLLMRetryPolicy
-  private let asyncBashRegistry: WuhuAsyncBashRegistry
   let workspaceRoot: String?
   private let braveSearchAPIKey: String?
-  private let instanceID: String
   private let eventHub = WuhuLiveEventHub()
   private let subscriptionHub = WuhuSessionSubscriptionHub()
-  private var asyncBashRouter: WuhuAsyncBashCompletionRouter?
   public let runnerRegistry: RunnerRegistry
   @Dependency(\.streamFn) private var streamFn
 
@@ -40,7 +37,6 @@ public actor WuhuService {
     store: SQLiteSessionStore,
     blobStore: WuhuBlobStore,
     retryPolicy: WuhuLLMRetryPolicy = .init(),
-    asyncBashRegistry: WuhuAsyncBashRegistry = .shared,
     workspaceRoot: String? = nil,
     braveSearchAPIKey: String? = nil,
     runnerRegistry: RunnerRegistry? = nil,
@@ -48,45 +44,14 @@ public actor WuhuService {
     self.store = store
     self.blobStore = blobStore
     self.retryPolicy = retryPolicy
-    self.asyncBashRegistry = asyncBashRegistry
     self.workspaceRoot = workspaceRoot
     self.braveSearchAPIKey = braveSearchAPIKey
     self.runnerRegistry = runnerRegistry ?? RunnerRegistry()
-    instanceID = UUID().uuidString.lowercased()
   }
 
-  deinit {
-    let router = asyncBashRouter
-    let registry = asyncBashRegistry
-    if let router {
-      Task { await router.stop() }
-    }
-    Task { await registry.stopReapWatchdog() }
-  }
+  deinit {}
 
-  public func startAgentLoopManager() async {
-    await ensureAsyncBashRouter()
-  }
-
-  private func ensureAsyncBashRouter() async {
-    guard asyncBashRouter == nil else { return }
-    let router = WuhuAsyncBashCompletionRouter(
-      registry: asyncBashRegistry,
-      instanceID: instanceID,
-      enqueueSystemJSON: { [weak self] sessionID, jsonText, timestamp in
-        guard let self else { return }
-        do {
-          try await enqueueSystemJSON(sessionID: sessionID, jsonText: jsonText, timestamp: timestamp)
-        } catch {
-          let line = "[WuhuService] ERROR: failed to enqueue async bash completion for session '\(sessionID)': \(String(describing: error))\n"
-          FileHandle.standardError.write(Data(line.utf8))
-        }
-      },
-    )
-    asyncBashRouter = router
-    await router.start()
-    await asyncBashRegistry.startReapWatchdog()
-  }
+  public func startAgentLoopManager() async {}
 
   func runtime(for sessionID: String) -> WuhuSessionRuntime {
     if let existing = runtimes[sessionID] { return existing }
@@ -94,9 +59,7 @@ public actor WuhuService {
       sessionID: .init(rawValue: sessionID),
       store: store,
       runnerRegistry: runnerRegistry,
-      asyncBashRegistry: asyncBashRegistry,
       braveSearchAPIKey: braveSearchAPIKey,
-      ownerID: instanceID,
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
@@ -105,11 +68,6 @@ public actor WuhuService {
     )
     runtimes[sessionID] = runtime
     return runtime
-  }
-
-  private func enqueueSystemJSON(sessionID: String, jsonText: String, timestamp: Date) async throws {
-    let input = SystemUrgentInput(source: .asyncBashCallback, content: .text(jsonText))
-    try await runtime(for: sessionID).enqueueSystem(input: input, enqueuedAt: timestamp)
   }
 
   private func logServiceError(_ message: String, error: Error) {
@@ -689,7 +647,6 @@ enum WuhuContextRenderer {
 
 extension WuhuService: SessionCommanding, SessionSubscribing {
   public func enqueue(sessionID: SessionID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
-    await ensureAsyncBashRouter()
     let sid = sessionID.rawValue
     let runtime = runtime(for: sid)
     await runtime.setToolProvider { [weak self] state in

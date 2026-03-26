@@ -1097,13 +1097,12 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   private func tools(for state: State) async -> [AnyAgentTool] {
-    let codingContext = await runtimeConfig.codingToolContext()
+    let braveSearchAPIKey = await runtimeConfig.codingToolContext()
     let mountResolver = makeMountResolver(state: state)
     let codingTools = WuhuTools.codingAgentTools(
       cwdProvider: { state.session.cwd },
       mountResolver: mountResolver,
-      asyncBash: codingContext.asyncBash,
-      braveSearchAPIKey: codingContext.braveSearchAPIKey,
+      braveSearchAPIKey: braveSearchAPIKey,
     )
     let serviceTools = await runtimeConfig.tools(for: state)
     return codingTools + serviceTools
