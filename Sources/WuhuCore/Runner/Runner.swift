@@ -28,6 +28,46 @@ public struct BashResult: Sendable, Hashable {
   }
 }
 
+/// Durable identity and execution parameters for a resumable bash task.
+public struct BashTaskRequest: Sendable, Hashable, Codable {
+  public var taskID: String
+  public var runnerID: RunnerID
+  public var command: String
+  public var cwd: String
+  public var timeout: Double?
+
+  public init(
+    taskID: String,
+    runnerID: RunnerID,
+    command: String,
+    cwd: String,
+    timeout: Double? = nil,
+  ) {
+    self.taskID = taskID
+    self.runnerID = runnerID
+    self.command = command
+    self.cwd = cwd
+    self.timeout = timeout
+  }
+}
+
+public typealias BashStreamCursor = Int
+
+public enum BashStreamPayload: Sendable, Hashable {
+  case output(String)
+  case finished(BashResult)
+}
+
+public struct BashStreamEvent: Sendable, Hashable {
+  public var cursor: BashStreamCursor
+  public var payload: BashStreamPayload
+
+  public init(cursor: BashStreamCursor, payload: BashStreamPayload) {
+    self.cursor = cursor
+    self.payload = payload
+  }
+}
+
 /// File existence check result.
 public enum FileExistence: String, Sendable, Hashable, Codable {
   case notFound
@@ -168,6 +208,10 @@ public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
   /// -- Process execution --
+  func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws
+  func streamBash(taskID: String, after cursor: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error>
+  func ackBash(taskID: String, through cursor: BashStreamCursor) async throws
+  func killBash(taskID: String) async throws
   func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult
 
   // -- File I/O --
@@ -186,6 +230,23 @@ public protocol Runner: Actor, Sendable {
 
   /// -- Workspace materialization --
   func materialize(params: MaterializeRequest) async throws -> MaterializeResponse
+}
+
+public extension Runner {
+  func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
+    let taskID = UUID().uuidString.lowercased()
+    try await startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+
+    let stream = try await streamBash(taskID: taskID, after: nil)
+    for try await event in stream {
+      try await ackBash(taskID: taskID, through: event.cursor)
+      if case let .finished(result) = event.payload {
+        return result
+      }
+    }
+
+    throw RunnerError.requestFailed(message: "Bash stream ended without a terminal result")
+  }
 }
 
 // MARK: - Runner errors

@@ -145,8 +145,8 @@ private struct FailureCleanupBehavior: AgentBehavior {
     nil
   }
 
-  func startToolCall(_: ToolCall, state _: inout FailureCleanupState) -> Task<String, Never> {
-    Task { "" }
+  func startToolCall(_: ToolCall, state _: inout FailureCleanupState) -> AgentToolExecutionHandle<String> {
+    .init { "" }
   }
 
   func blockedToolResult(for _: ToolCall) -> String {

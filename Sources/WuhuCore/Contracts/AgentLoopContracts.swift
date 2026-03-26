@@ -106,13 +106,13 @@ public protocol AgentBehavior: Sendable {
   func nextToolCall(state: State) -> ToolCall?
 
   /// Start (or resume) a tool call by mutating in-memory bookkeeping and
-  /// returning an error-free task handle for the actual work.
+  /// returning a lazy error-free handle for the actual work.
   ///
-  /// The loop persists the mutated state before awaiting the task's value.
+  /// The loop persists the mutated state before invoking the handle.
   func startToolCall(
     _ call: ToolCall,
     state: inout State,
-  ) -> Task<ToolResult, Never>
+  ) -> AgentToolExecutionHandle<ToolResult>
 
   /// Build the tool result that should be persisted when execution is blocked
   /// by generic loop policy (for example repetition protection).
@@ -175,6 +175,14 @@ public enum ToolCallStatus: String, Sendable, Hashable, Codable {
   case started
   case completed
   case errored
+}
+
+public struct AgentToolExecutionHandle<Result: Sendable>: Sendable {
+  public let run: @Sendable () async -> Result
+
+  public init(run: @escaping @Sendable () async -> Result) {
+    self.run = run
+  }
 }
 
 // MARK: - Stream Sink

@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import Testing
 import WuhuAI
@@ -37,6 +38,43 @@ struct ContractSessionCoreTests {
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let behavior = WuhuSessionBehavior(sessionID: .init(rawValue: sessionID), store: store, runtimeConfig: config, blobStore: blobStore, streamFn: streamFn)
     return (behavior, config)
+  }
+
+  private func inMemoryRunnerLocator(_ runner: InMemoryRunner) -> RunnerLocator {
+    .init { runnerID in
+      guard runnerID == runner.id else {
+        throw MountResolutionError.runnerUnavailable(runnerID: runnerID)
+      }
+      return RunnerHandle(
+        id: runner.id,
+        readText: { path in try await runner.readString(path: path, encoding: .utf8) },
+        readData: { path in try await runner.readData(path: path) },
+        writeText: { path, content, createDirs in
+          try await runner.writeString(path: path, content: content, createIntermediateDirectories: createDirs, encoding: .utf8)
+        },
+        writeData: { path, data, createDirs in
+          try await runner.writeData(path: path, data: data, createIntermediateDirectories: createDirs)
+        },
+        listDirectory: { path in try await runner.listDirectory(path: path) },
+        find: { params in try await runner.find(params: params) },
+        grep: { params in try await runner.grep(params: params) },
+        startBash: { taskID, cwd, command, timeout in
+          try await runner.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+        },
+        streamBash: { taskID, after in
+          try await runner.streamBash(taskID: taskID, after: after)
+        },
+        ackBash: { taskID, through in
+          try await runner.ackBash(taskID: taskID, through: through)
+        },
+        killBash: { taskID in
+          try await runner.killBash(taskID: taskID)
+        },
+        runBash: { cwd, command, timeout in
+          try await runner.runBash(command: command, cwd: cwd, timeout: timeout)
+        },
+      )
+    }
   }
 
   private func makeStateAwareBehavior(
@@ -86,9 +124,9 @@ struct ContractSessionCoreTests {
     _ behavior: WuhuSessionBehavior,
     _ state: WuhuSessionLoopState,
     call: ToolCall,
-  ) async throws -> (state: WuhuSessionLoopState, task: Task<AgentToolResult, Never>) {
+  ) async throws -> (state: WuhuSessionLoopState, execution: AgentToolExecutionHandle<AgentToolResult>) {
     var next = state
-    let task = behavior.startToolCall(call, state: &next)
+    let execution = behavior.startToolCall(call, state: &next)
     let durable = if let diff = behavior.diff(from: state, to: next) {
       try await behavior.persist(diff, from: state, to: next)
     } else {
@@ -96,7 +134,7 @@ struct ContractSessionCoreTests {
     }
     let reloaded = try await behavior.loadState()
     #expect(durable == reloaded)
-    return (reloaded, task)
+    return (reloaded, execution)
   }
 
   private func runBehaviorTurn(
@@ -116,7 +154,7 @@ struct ContractSessionCoreTests {
     while let call = behavior.nextToolCall(state: state) {
       let started = try await startToolAndAssertInvariant(behavior, state, call: call)
       state = started.state
-      let result = await started.task.value
+      let result = await started.execution.run()
 
       state = try await applyAndAssertInvariant(behavior, state) { state in
         behavior.persistToolResult(result, for: call, state: &state)
@@ -199,7 +237,7 @@ struct ContractSessionCoreTests {
     let next = behavior.nextToolCall(state: state)
     #expect(next?.id == "t1")
 
-    let repairedResult = await behavior.startToolCall(call, state: &state).value
+    let repairedResult = await behavior.startToolCall(call, state: &state).run()
     state = try await applyAndAssertInvariant(behavior, state) { state in
       behavior.persistToolResult(repairedResult, for: call, state: &state)
     }
@@ -209,6 +247,65 @@ struct ContractSessionCoreTests {
       guard case let .toolResult(t) = m else { return false }
       return t.toolCallId == "t1" && t.isError == true
     })
+  }
+
+  @Test func ioInvariant_bashCrashRecoveryResumesRunnerTask() async throws {
+    let store = try makeStore()
+    let session = try await makeSession(store: store)
+    let (behavior, _) = await makeBehavior(sessionID: session.id, store: store)
+    let runner = InMemoryRunner()
+    await runner.seedDirectory(path: "/tmp")
+    await runner.stubBash(
+      pattern: "echo resumed",
+      result: BashResult(exitCode: 0, output: "resumed\n", timedOut: false, terminated: false),
+    )
+
+    try await withDependencies {
+      $0.runnerLocator = inMemoryRunnerLocator(runner)
+    } operation: {
+      var state = try await behavior.loadState()
+
+      let call = ToolCall(
+        id: "bash-1",
+        name: "bash",
+        arguments: .object(["command": .string("echo resumed")]),
+      )
+      let assistantWithTool = AssistantMessage(
+        provider: .openai,
+        model: "mock",
+        content: [.toolCall(call)],
+        stopReason: .toolUse,
+      )
+
+      state = try await applyAndAssertInvariant(behavior, state) { state in
+        behavior.persistAssistantEntry(assistantWithTool, state: &state)
+      }
+
+      let started = try await startToolAndAssertInvariant(behavior, state, call: call)
+      state = started.state
+      #expect(state.toolCallStatus["bash-1"] == .started)
+      #expect(state.entries.contains { entry in
+        guard case let .toolExecution(execution) = entry.payload else { return false }
+        return execution.phase == .start && execution.toolCallId == "bash-1"
+      })
+
+      let resumedResult = await behavior.startToolCall(call, state: &state).run()
+      state = try await applyAndAssertInvariant(behavior, state) { state in
+        behavior.persistToolResult(resumedResult, for: call, state: &state)
+      }
+
+      #expect(state.toolCallStatus["bash-1"] == .completed)
+      #expect(await runner.bashStartCount(taskID: "bash-1") == 1)
+      #expect(state.entries.contains { entry in
+        guard case let .toolExecution(execution) = entry.payload else { return false }
+        return execution.phase == .end && execution.toolCallId == "bash-1" && execution.isError == false
+      })
+      #expect(state.entries.contains { entry in
+        guard case let .message(message) = entry.payload else { return false }
+        guard case let .toolResult(result) = message else { return false }
+        return result.toolCallId == "bash-1" && result.isError == false
+      })
+    }
   }
 
   @Test func ioInvariant_drainInterruptOrdersSystemBeforeSteerByTimestamp() async throws {
