@@ -2,8 +2,11 @@ import Fetch
 import Foundation
 import WuhuAPI
 
-public actor HTTPRunnerClient: Runner {
-  public nonisolated let id: RunnerID
+public struct HTTPRunnerClient: Sendable {
+  public var runnerID: RunnerID {
+    .remote(name: runnerName)
+  }
+
   public let runnerName: String
 
   private let baseURL: URL
@@ -22,7 +25,6 @@ public actor HTTPRunnerClient: Runner {
 
     let resolvedName = name ?? baseURL.host ?? "http-runner"
     runnerName = resolvedName
-    id = .remote(name: resolvedName)
   }
 
   public func read(
@@ -42,6 +44,14 @@ public actor HTTPRunnerClient: Runner {
     )
   }
 
+  public func readText(
+    path: String,
+    offset: Int? = nil,
+    limit: Int? = nil
+  ) async throws -> String {
+    try await self.read(path: path, offset: offset, limit: limit).content
+  }
+
   public func write(
     path: String,
     content: String,
@@ -59,6 +69,18 @@ public actor HTTPRunnerClient: Runner {
     )
   }
 
+  public func writeText(
+    path: String,
+    content: String,
+    createDirectories: Bool = true
+  ) async throws {
+    _ = try await self.write(
+      path: path,
+      content: content,
+      createDirectories: createDirectories
+    )
+  }
+
   public func list(
     path: String? = nil,
     limit: Int? = nil
@@ -72,6 +94,13 @@ public actor HTTPRunnerClient: Runner {
       ),
       as: HTTPRunnerV1.LsResponse.self
     )
+  }
+
+  public func listDirectory(
+    path: String,
+    limit: Int? = nil
+  ) async throws -> [DirectoryEntry] {
+    try await self.list(path: path, limit: limit).entries
   }
 
   public func edit(
@@ -91,61 +120,35 @@ public actor HTTPRunnerClient: Runner {
     )
   }
 
-  public func runBash(command _: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    throw Self.unsupported("bash")
-  }
-
-  public func readData(path _: String) async throws -> Data {
-    throw Self.unsupported("readData")
-  }
-
-  public func readString(path: String, encoding _: String.Encoding) async throws -> String {
-    try await self.read(path: path).content
-  }
-
-  public func writeData(path _: String, data _: Data, createIntermediateDirectories _: Bool) async throws {
-    throw Self.unsupported("writeData")
-  }
-
-  public func writeString(
-    path: String,
-    content: String,
-    createIntermediateDirectories: Bool,
-    encoding _: String.Encoding
-  ) async throws {
-    _ = try await self.write(
-      path: path,
-      content: content,
-      createDirectories: createIntermediateDirectories
+  public func runnerHandle() -> RunnerHandle {
+    let client = self
+    return RunnerHandle(
+      id: self.runnerID,
+      readText: { path in
+        try await client.readText(path: path)
+      },
+      readData: { _ in
+        throw Self.unsupported("readData")
+      },
+      writeText: { path, content, createDirs in
+        try await client.writeText(path: path, content: content, createDirectories: createDirs)
+      },
+      writeData: { _, _, _ in
+        throw Self.unsupported("writeData")
+      },
+      listDirectory: { path in
+        try await client.listDirectory(path: path)
+      },
+      find: { _ in
+        throw Self.unsupported("find")
+      },
+      grep: { _ in
+        throw Self.unsupported("grep")
+      },
+      runBash: { _, _, _ in
+        throw Self.unsupported("bash")
+      }
     )
-  }
-
-  public func exists(path _: String) async throws -> FileExistence {
-    throw Self.unsupported("exists")
-  }
-
-  public func listDirectory(path: String) async throws -> [DirectoryEntry] {
-    try await self.list(path: path).entries
-  }
-
-  public func enumerateDirectory(root _: String) async throws -> [EnumeratedEntry] {
-    throw Self.unsupported("enumerateDirectory")
-  }
-
-  public func createDirectory(path _: String, withIntermediateDirectories _: Bool) async throws {
-    throw Self.unsupported("createDirectory")
-  }
-
-  public func find(params _: FindParams) async throws -> FindResult {
-    throw Self.unsupported("find")
-  }
-
-  public func grep(params _: GrepParams) async throws -> GrepResult {
-    throw Self.unsupported("grep")
-  }
-
-  public func materialize(params _: MaterializeRequest) async throws -> MaterializeResponse {
-    throw Self.unsupported("materialize")
   }
 
   private func postJSON<ResponseBody: Decodable & Sendable>(

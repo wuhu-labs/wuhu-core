@@ -9,7 +9,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
   public init() {}
 
   public static func handler(
-    runner: any Runner,
+    runner: RunnerHandle,
     name _: String = "local"
   ) -> Handler {
     var router = Router()
@@ -38,7 +38,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           )
         }
 
-        let raw = try await runner.readString(path: resolvedPath, encoding: .utf8)
+        let raw = try await runner.readText(resolvedPath)
         let normalized = normalizeToLF(raw)
         let allLines = normalized.isEmpty
           ? []
@@ -105,12 +105,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
         let payload = try await decodeJSONBody(HTTPRunnerV1.WriteRequest.self, from: request)
         let resolvedPath = try resolveAbsolutePath(path: payload.path, basePath: payload.basePath)
 
-        try await runner.writeString(
-          path: resolvedPath,
-          content: payload.content,
-          createIntermediateDirectories: payload.createDirectories,
-          encoding: .utf8
-        )
+        try await runner.writeText(resolvedPath, payload.content, payload.createDirectories)
 
         return jsonResponse(
           HTTPRunnerV1.WriteResponse(
@@ -137,7 +132,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           )
         }
 
-        let entries = try await runner.listDirectory(path: resolvedPath)
+        let entries = try await runner.listDirectory(resolvedPath)
           .sorted { lhs, rhs in
             lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
           }
@@ -165,7 +160,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
         let payload = try await decodeJSONBody(HTTPRunnerV1.EditRequest.self, from: request)
         let resolvedPath = try resolveAbsolutePath(path: payload.path, basePath: payload.basePath)
 
-        let rawData = try await runner.readData(path: resolvedPath)
+        let rawData = try await runner.readData(resolvedPath)
         let raw = String(decoding: rawData, as: UTF8.self)
         let (bom, contentWithoutBom) = stripBom(raw)
         let originalEnding = detectLineEnding(contentWithoutBom)
@@ -210,12 +205,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
           .count - 1
 
         let final = bom + restoreLineEndings(updatedContent, ending: originalEnding)
-        try await runner.writeString(
-          path: resolvedPath,
-          content: final,
-          createIntermediateDirectories: false,
-          encoding: .utf8
-        )
+        try await runner.writeText(resolvedPath, final, false)
 
         return jsonResponse(
           HTTPRunnerV1.EditResponse(
@@ -234,10 +224,17 @@ public struct WuhuHTTPRunnerServer: Sendable {
     return router.handler
   }
 
+  public static func handler(
+    runner: any Runner,
+    name: String = "local"
+  ) -> Handler {
+    self.handler(runner: .wrapping(runner), name: name)
+  }
+
   public static func listen(
     host: String = "127.0.0.1",
     port: Int,
-    runner: any Runner = LocalRunner(),
+    runner: RunnerHandle,
     name: String = "local",
     options: ServeOptions = .init()
   ) async throws -> ServeNIOListener {
@@ -246,6 +243,22 @@ public struct WuhuHTTPRunnerServer: Sendable {
       port: port,
       options: options,
       handler: self.handler(runner: runner, name: name)
+    )
+  }
+
+  public static func listen(
+    host: String = "127.0.0.1",
+    port: Int,
+    runner: any Runner = LocalRunner(),
+    name: String = "local",
+    options: ServeOptions = .init()
+  ) async throws -> ServeNIOListener {
+    try await self.listen(
+      host: host,
+      port: port,
+      runner: .wrapping(runner),
+      name: name,
+      options: options
     )
   }
 
@@ -261,7 +274,7 @@ public struct WuhuHTTPRunnerServer: Sendable {
     let listener = try await Self.listen(
       host: host,
       port: port,
-      runner: LocalRunner(),
+      runner: .wrapping(LocalRunner()),
       name: config.name
     )
 

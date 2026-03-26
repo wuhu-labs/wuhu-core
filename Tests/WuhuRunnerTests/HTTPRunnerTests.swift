@@ -19,7 +19,7 @@ struct HTTPRunnerHandlerTests {
     try "one\ntwo\nthree\n".write(to: sourceFile, atomically: true, encoding: .utf8)
 
     let response: HTTPRunnerV1.ReadResponse = try await invokeJSON(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/read",
       payload: HTTPRunnerV1.ReadRequest(
         path: "Sources/App.swift",
@@ -48,7 +48,7 @@ struct HTTPRunnerHandlerTests {
     try "omega".write(to: root.appendingPathComponent("Z.txt"), atomically: true, encoding: .utf8)
 
     let response: HTTPRunnerV1.LsResponse = try await invokeJSON(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/ls",
       payload: HTTPRunnerV1.LsRequest(
         path: ".",
@@ -74,7 +74,7 @@ struct HTTPRunnerHandlerTests {
     try Data(original.utf8).write(to: fileURL)
 
     let response: HTTPRunnerV1.EditResponse = try await invokeJSON(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/edit",
       payload: HTTPRunnerV1.EditRequest(
         path: "notes.txt",
@@ -96,7 +96,7 @@ struct HTTPRunnerHandlerTests {
 
   @Test func relativePathWithoutBasePathReturnsStructuredError() async throws {
     let response = try await invokeResponse(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/read",
       payload: HTTPRunnerV1.ReadRequest(path: "notes.txt"),
       method: .post
@@ -120,7 +120,7 @@ struct HTTPRunnerRawHTTPTests {
       createDirectories: true
     )
     let wire = try await roundTripRawHTTP(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/write",
       payload: payload
     )
@@ -153,7 +153,7 @@ struct HTTPRunnerRawHTTPTests {
     ]
 
     let wire = try await roundTripChunkedRawHTTP(
-      handler: WuhuHTTPRunnerServer.handler(runner: LocalRunner()),
+      handler: WuhuHTTPRunnerServer.handler(runner: .wrapping(LocalRunner())),
       path: "/v1/fs/edit",
       bodyChunks: chunks
     )
@@ -176,7 +176,7 @@ struct HTTPRunnerIntegrationTests {
     let listener = try await WuhuHTTPRunnerServer.listen(
       host: "127.0.0.1",
       port: 0,
-      runner: LocalRunner(),
+      runner: .wrapping(LocalRunner()),
       name: "test-runner"
     )
 
@@ -187,23 +187,51 @@ struct HTTPRunnerIntegrationTests {
         name: "test-runner",
         basePath: root.path
       )
+      let runner = client.runnerHandle()
 
-      try await client.writeString(
-        path: "notes.txt",
-        content: "one\ntwo\nthree\n",
-        createIntermediateDirectories: true,
-        encoding: .utf8
-      )
+      try await runner.writeText("notes.txt", "one\ntwo\nthree\n", true)
 
       let read = try await client.read(path: "notes.txt", offset: 2, limit: 1)
       let edit = try await client.edit(path: "notes.txt", oldText: "two\n", newText: "TWO\n")
-      let listing = try await client.list(path: ".", limit: 10)
+      let listing = try await runner.listDirectory(".")
       let finalContent = try String(contentsOf: root.appendingPathComponent("notes.txt"), encoding: .utf8)
 
       #expect(read.content == "two")
       #expect(edit.firstChangedLine == 2)
-      #expect(listing.entries.map(\.name) == ["notes.txt"])
+      #expect(listing.map(\.name) == ["notes.txt"])
       #expect(finalContent == "one\nTWO\nthree\n")
+    } catch {
+      await listener.close()
+      throw error
+    }
+
+    await listener.close()
+  }
+
+  @Test func runnerLocatorBuildsHTTPBackedHandle() async throws {
+    let root = try makeTempDirectory(prefix: "HTTPRunnerIntegrationTests")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let listener = try await WuhuHTTPRunnerServer.listen(
+      host: "127.0.0.1",
+      port: 0,
+      runner: .wrapping(LocalRunner()),
+      name: "test-runner"
+    )
+
+    do {
+      let port = try #require(listener.localAddress?.port)
+      let locator = RunnerLocator.http(
+        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+        name: "test-runner",
+        basePath: root.path
+      )
+      let runner = try await locator.resolve(.remote(name: "test-runner"))
+
+      try await runner.writeText("hello.txt", "hello", true)
+      let text = try await runner.readText("hello.txt")
+
+      #expect(text == "hello")
     } catch {
       await listener.close()
       throw error

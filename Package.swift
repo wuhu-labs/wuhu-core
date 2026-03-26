@@ -19,7 +19,7 @@ let package = Package(
     .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", revision: "b38f1f45091890b9df0401d4ffcf1c015251f23d"),
+    .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.5.1"),
     .package(url: "https://github.com/wuhu-labs/wuhu-fetch.git", exact: "0.2.0"),
     .package(url: "https://github.com/wuhu-labs/wuhu-serve.git", revision: "cab564da8ce634a34c2462efe1bb9df9c6d423c7"),
     .package(url: "https://github.com/wuhu-labs/wuhu-workspace-engine.git", exact: "0.1.3"),
