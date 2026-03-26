@@ -44,7 +44,7 @@ All other participants are **parties**. A party can be a human, another LLM, or 
 
     system-reminder 26/2/17 14:57
 
-    async task xxx has finished execution. use xxx tool to get more info
+    task xxx has finished execution. use xxx tool to get more info
 
 There is no special casing for single-party vs multi-party sessions. Every message carries a header from the start. The canonical machine learns the format in-context.
 
@@ -54,7 +54,7 @@ See: ``Author``, ``ParticipantID``, ``ParticipantKind``
 
 Three input lanes can influence the next model request:
 
-1. **`system`** — runtime injections (async bash callbacks, task notifications). Applied at the steer checkpoint. Not cancelable.
+1. **`system`** — runtime injections (task notifications, channel updates). Applied at the steer checkpoint. Not cancelable.
 2. **`steer`** — urgent corrections from parties. Applied at the steer checkpoint. Cancelable.
 3. **`followUp`** — next-turn input from parties. Applied at the follow-up checkpoint. Cancelable.
 
@@ -65,7 +65,7 @@ Three input lanes can influence the next model request:
 - `steer` and `followUp` support enqueue and cancel by the client.
 - `system` is not cancelable — once enqueued, it will be materialized.
 
-The system lane and user lanes have distinct pending item and journal types because they differ in nature: system items have a machine source (e.g., `asyncBashCallback`), while user items have a party author.
+The system lane and user lanes have distinct pending item and journal types because they differ in nature: system items have a machine source (for example task notifications), while user items have a party author.
 
 See: ``SystemUrgentInput``, ``UserQueueLane``, ``QueuedUserMessage``
 
@@ -191,7 +191,7 @@ Drain lanes eagerly. If accumulated input from all lanes cannot fit even after c
 
 The system lane and user lanes use different author representations:
 
-- **System lane**: items carry a source tag (e.g., `.asyncBashCallback`, `.asyncTaskNotification`), not an `Author`.
+- **System lane**: items carry a source tag (for example `.asyncTaskNotification`), not an `Author`.
 - **User lanes** (steer, follow-up): items carry an `Author`, which is `.participant(id, kind: .human | .bot)` or `.unknown`. The `.system` case of `Author` does not appear on user queue items.
 
 Transcript entries carry a full `Author` since they can originate from any source.
