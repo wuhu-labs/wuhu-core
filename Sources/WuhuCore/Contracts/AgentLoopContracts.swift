@@ -220,3 +220,6 @@ public struct AgentLoopObservedState<State: Sendable, StreamAction: Sendable>: S
     self.inflight = inflight
   }
 }
+
+public typealias AgentLoopObservation<State: Sendable, StreamAction: Sendable> =
+  AnyAsyncSequence<AgentLoopObservedState<State, StreamAction>>

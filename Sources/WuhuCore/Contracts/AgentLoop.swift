@@ -13,6 +13,11 @@ private struct StreamingSnapshot<Action: Sendable>: Sendable {
   var actions: [Action]?
 }
 
+private enum ObservationInput<State: Sendable, Action: Sendable>: Sendable {
+  case published(PublishedSnapshot<State>)
+  case streaming(StreamingSnapshot<Action>)
+}
+
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
 ///
 /// Owns a live in-memory state, orchestrates the
@@ -36,9 +41,9 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private var liveVersion: Int = 0
+  private var activeInferenceID: UUID?
   private let publishedSnapshots: AsyncCurrentValueSubject<PublishedSnapshot<B.State>>
   private let streamingSnapshots: AsyncCurrentValueSubject<StreamingSnapshot<B.StreamAction>>
-  private let observationSnapshots: AsyncCurrentValueSubject<AgentLoopObservedState<B.State, B.StreamAction>>
 
   // MARK: Lifecycle
 
@@ -59,14 +64,42 @@ public actor AgentLoop<B: AgentBehavior> {
     state = initialState
     publishedSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState, inferenceID: nil))
     streamingSnapshots = AsyncCurrentValueSubject(.init(inferenceID: nil, actions: nil))
-    observationSnapshots = AsyncCurrentValueSubject(.init(state: initialState, inflightID: nil, inflight: nil))
   }
 
   // MARK: - Observation
 
   /// Observe the loop's current published snapshot, gap-free.
-  public func observe() -> AsyncCurrentValueSubject<AgentLoopObservedState<B.State, B.StreamAction>> {
-    observationSnapshots
+  public func observe() -> AgentLoopObservation<B.State, B.StreamAction> {
+    let initialPublished = publishedSnapshots.value
+    let initialStreaming = streamingSnapshots.value
+    let initialObserved = Self.makeObservedState(
+      published: initialPublished,
+      streaming: initialStreaming,
+    )
+
+    let publishedEvents = publishedSnapshots
+      .dropFirst(1)
+      .map { ObservationInput<B.State, B.StreamAction>.published($0) }
+      .eraseToAnyAsyncSequence()
+    let streamingEvents = streamingSnapshots
+      .dropFirst(1)
+      .map { ObservationInput<B.State, B.StreamAction>.streaming($0) }
+      .eraseToAnyAsyncSequence()
+
+    return merge(publishedEvents, streamingEvents)
+      .scan((initialPublished, initialStreaming)) { state, input in
+        switch input {
+        case let .published(published):
+          (published, state.1)
+        case let .streaming(streaming):
+          (state.0, streaming)
+        }
+      }
+      .map { published, streaming in
+        Self.makeObservedState(published: published, streaming: streaming)
+      }
+      .prepend(initialObserved)
+      .eraseToAnyAsyncSequence()
   }
 
   public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
@@ -162,13 +195,13 @@ public actor AgentLoop<B: AgentBehavior> {
       let oldState = publishedSnapshots.value.state
       let newState = state
       let targetVersion = liveVersion
+      let inferenceID = activeInferenceID
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
       publishedSnapshots.send(.init(
         version: targetVersion,
         state: durableState,
-        inferenceID: publishedSnapshots.value.inferenceID,
+        inferenceID: inferenceID,
       ))
-      publishObservedSnapshot()
     }
   }
 
@@ -348,14 +381,16 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func beginInferenceObservation(_ inferenceID: UUID) {
-    let current = publishedSnapshots.value
-    publishedSnapshots.send(.init(
-      version: current.version,
-      state: current.state,
-      inferenceID: inferenceID,
-    ))
+    activeInferenceID = inferenceID
+    if liveVersion == publishedSnapshots.value.version {
+      let current = publishedSnapshots.value
+      publishedSnapshots.send(.init(
+        version: current.version,
+        state: current.state,
+        inferenceID: inferenceID,
+      ))
+    }
     streamingSnapshots.send(.init(inferenceID: inferenceID, actions: []))
-    publishObservedSnapshot()
   }
 
   private func appendInflight(_ delta: B.StreamAction, inferenceID: UUID) {
@@ -364,11 +399,15 @@ public actor AgentLoop<B: AgentBehavior> {
     var actions = current.actions ?? []
     actions.append(delta)
     streamingSnapshots.send(.init(inferenceID: inferenceID, actions: actions))
-    publishObservedSnapshot()
   }
 
   private func endInferenceObservation(_ inferenceID: UUID) {
-    if publishedSnapshots.value.inferenceID == inferenceID {
+    if activeInferenceID == inferenceID {
+      activeInferenceID = nil
+    }
+    if liveVersion == publishedSnapshots.value.version,
+       publishedSnapshots.value.inferenceID == inferenceID
+    {
       let current = publishedSnapshots.value
       publishedSnapshots.send(.init(
         version: current.version,
@@ -379,22 +418,22 @@ public actor AgentLoop<B: AgentBehavior> {
     if streamingSnapshots.value.inferenceID == inferenceID {
       streamingSnapshots.send(.init(inferenceID: nil, actions: nil))
     }
-    publishObservedSnapshot()
   }
 
-  private func publishObservedSnapshot() {
-    let published = publishedSnapshots.value
-    let streaming = streamingSnapshots.value
+  private static func makeObservedState(
+    published: PublishedSnapshot<B.State>,
+    streaming: StreamingSnapshot<B.StreamAction>,
+  ) -> AgentLoopObservedState<B.State, B.StreamAction> {
     let inflight: [B.StreamAction]? = if published.inferenceID == streaming.inferenceID {
       streaming.actions
     } else {
       nil
     }
-    observationSnapshots.send(.init(
+    return .init(
       state: published.state,
       inflightID: published.inferenceID,
       inflight: inflight,
-    ))
+    )
   }
 
   private func consumePendingWorkSignal() {

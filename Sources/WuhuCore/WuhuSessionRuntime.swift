@@ -53,14 +53,23 @@ actor WuhuSessionRuntime {
     self.loop = loop
 
     let observation = await loop.observe()
-    await setInitialObservationState(observation.value)
+    var iterator = observation.makeAsyncIterator()
+    guard let initialObservation = try await iterator.next() else {
+      throw CancellationError()
+    }
+    await setInitialObservationState(initialObservation)
 
     observeTask = Task { [weak self] in
       guard let self else { return }
-      var iterator = observation.makeAsyncIterator()
-      _ = await iterator.next()
-      while let snapshot = await iterator.next() {
-        await handleObservationSnapshot(snapshot)
+      do {
+        while let snapshot = try await iterator.next() {
+          await handleObservationSnapshot(snapshot)
+        }
+      } catch {
+        if !(error is CancellationError) {
+          let line = "[WuhuSessionRuntime] observation failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
+          FileHandle.standardError.write(Data(line.utf8))
+        }
       }
     }
 
