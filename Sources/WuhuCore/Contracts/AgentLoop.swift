@@ -26,7 +26,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private var publishedState: B.State
   private var inflight: [B.StreamAction]?
   private var liveVersion: Int = 0
-  private var durableWaiters = MonotonicWaiters<Int>(current: 0)
+  private let durableCondition = AsyncCondition<Int>(0)
 
   // MARK: Lifecycle
 
@@ -65,10 +65,11 @@ public actor AgentLoop<B: AgentBehavior> {
     return AgentLoopObservation(state: publishedState, inflight: inflight, events: stream)
   }
 
-  public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
-    (
+  public func currentStateSnapshot() async -> (state: B.State, hasPendingFlush: Bool) {
+    let durableVersion = await durableCondition.current()
+    return (
       state: state,
-      hasPendingFlush: durableWaiters.current < liveVersion,
+      hasPendingFlush: durableVersion < liveVersion,
     )
   }
 
@@ -98,14 +99,6 @@ public actor AgentLoop<B: AgentBehavior> {
   public func start() async throws {
     precondition(!started, "AgentLoop.start() called more than once")
     started = true
-    defer {
-      started = false
-      durableWaiters.failAll(with: CancellationError())
-      workSignal?.finish()
-      flushSignal?.finish()
-      workSignal = nil
-      flushSignal = nil
-    }
 
     let (workStream, workContinuation) = AsyncStream<Void>.makeStream(
       bufferingPolicy: .bufferingNewest(1),
@@ -123,32 +116,48 @@ public actor AgentLoop<B: AgentBehavior> {
       flushContinuation.yield(())
     }
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in workStream {
-          try Task.checkCancellation()
-          await consumePendingWorkSignal()
-          try await runUntilIdle()
+    var terminalError: (any Error)?
+    do {
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in workStream {
+            try Task.checkCancellation()
+            await consumePendingWorkSignal()
+            try await runUntilIdle()
+          }
+        }
+
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in flushStream {
+            try Task.checkCancellation()
+            await consumePendingFlushSignal()
+            try await flushIfNeeded()
+          }
+        }
+
+        do {
+          while try await group.next() != nil {}
+        } catch {
+          group.cancelAll()
+          while let _ = try? await group.next() {}
+          throw error
         }
       }
+    } catch {
+      terminalError = error
+    }
 
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in flushStream {
-          try Task.checkCancellation()
-          await consumePendingFlushSignal()
-          try await flushIfNeeded()
-        }
-      }
+    started = false
+    workContinuation.finish()
+    flushContinuation.finish()
+    workSignal = nil
+    flushSignal = nil
+    await durableCondition.failAll(with: terminalError ?? CancellationError())
 
-      do {
-        while try await group.next() != nil {}
-      } catch {
-        group.cancelAll()
-        while let _ = try? await group.next() {}
-        throw error
-      }
+    if let terminalError {
+      throw terminalError
     }
   }
 
@@ -159,7 +168,7 @@ public actor AgentLoop<B: AgentBehavior> {
       let targetVersion = liveVersion
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
       publishedState = durableState
-      durableWaiters.advance(to: targetVersion)
+      await durableCondition.set(targetVersion)
       emit(.stateUpdated(durableState))
     }
   }
@@ -329,27 +338,12 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private func waitUntilDurableCurrentVersion() async throws {
     let targetVersion = liveVersion
-    guard durableWaiters.current < targetVersion else { return }
+    let durableVersion = await durableCondition.current()
+    guard durableVersion < targetVersion else { return }
 
-    let waiterID = UUID()
-    try await withTaskCancellationHandler {
-      try await withCheckedThrowingContinuation { continuation in
-        let registered = durableWaiters.register(
-          id: waiterID,
-          until: targetVersion,
-          continuation: continuation,
-        )
-        guard registered else { return }
-        hasPendingFlushSignal = true
-        flushSignal?.yield(())
-      }
-    } onCancel: {
-      Task { await self.cancelFlushWaiter(waiterID, error: CancellationError()) }
-    }
-  }
-
-  private func cancelFlushWaiter(_ id: UUID, error: any Error) {
-    durableWaiters.cancel(id: id, error: error)
+    hasPendingFlushSignal = true
+    flushSignal?.yield(())
+    try await durableCondition.waitUntil(atLeast: targetVersion)
   }
 
   // MARK: - Emit
