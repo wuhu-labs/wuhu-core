@@ -1,3 +1,4 @@
+import AsyncExtensions
 import Foundation
 import WuhuAI
 
@@ -192,50 +193,33 @@ public struct AgentStreamSink<Action: Sendable>: Sendable {
   }
 }
 
-// MARK: - Loop Events
-
-/// Events emitted by the agent loop for observation.
-///
-/// State updates are emitted only after the new state has been persisted.
-/// Stream events are ephemeral and do not advance the durable state.
-public enum AgentLoopEvent<State: Sendable, StreamAction: Sendable>: Sendable {
-  /// The durable state changed.
-  case stateUpdated(State)
-
-  /// Inference streaming has begun.
-  case streamBegan
-
-  /// An ephemeral streaming delta.
-  case streamDelta(StreamAction)
-
-  /// Inference streaming has ended.
-  case streamEnded
-}
-
 // MARK: - Observation
 
-/// Gap-free observation of the agent loop's state and events.
+/// Gap-free observation of the agent loop's current published state.
 ///
-/// Returned by ``AgentLoop/observe()``. The state snapshot and event
-/// stream are registered atomically — no events are missed between
-/// the snapshot and the first event on the stream.
-public struct AgentLoopObservation<B: AgentBehavior>: Sendable {
-  /// Current committed state at the time of observation.
-  public var state: B.State
+/// Observers see one coherent snapshot containing the latest published state
+/// plus any currently active inference deltas that belong to the same
+/// published inference epoch.
+public struct AgentLoopObservedState<State: Sendable, StreamAction: Sendable>: Sendable {
+  /// Latest published session state.
+  public var state: State
 
-  /// Accumulated stream deltas if inference is in progress, nil otherwise.
-  public var inflight: [B.StreamAction]?
+  /// Active inference identifier if streaming is in progress.
+  public var inflightID: UUID?
 
-  /// Live event stream from the point of observation.
-  public var events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>
+  /// Accumulated stream deltas for the active inference, nil otherwise.
+  public var inflight: [StreamAction]?
 
   public init(
-    state: B.State,
-    inflight: [B.StreamAction]?,
-    events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>,
+    state: State,
+    inflightID: UUID?,
+    inflight: [StreamAction]?,
   ) {
     self.state = state
+    self.inflightID = inflightID
     self.inflight = inflight
-    self.events = events
   }
 }
+
+public typealias AgentLoopObservation<State: Sendable, StreamAction: Sendable> =
+  AnyAsyncSequence<AgentLoopObservedState<State, StreamAction>>
