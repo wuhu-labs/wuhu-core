@@ -57,15 +57,8 @@ struct WuhuCLI: AsyncParsableCommand {
     @Option(help: "Path to runner config YAML (default: ~/.wuhu/runner.yml).")
     var config: String?
 
-    @Flag(help: "Run the temporary HTTP runner instead of the mux/WebSocket runner.")
-    var http: Bool = false
-
     func run() async throws {
-      if http {
-        try await WuhuHTTPRunnerServer().run(configPath: config)
-      } else {
-        try await WuhuMuxRunnerServer().run(configPath: config)
-      }
+      try await WuhuHTTPRunnerServer().run(configPath: config)
     }
   }
 

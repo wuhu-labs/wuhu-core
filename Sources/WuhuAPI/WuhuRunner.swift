@@ -4,7 +4,7 @@ import Foundation
 public struct WuhuRunnerInfo: Sendable, Hashable, Codable {
   /// Runner name (e.g. "local", "origin-runner", "macbook-pro").
   public var name: String
-  /// How the runner was registered: "built-in", "declared", or "incoming".
+  /// How the runner was registered: "built-in" or "declared".
   public var source: String
   /// Whether the runner is currently connected and available for dispatch.
   public var isConnected: Bool

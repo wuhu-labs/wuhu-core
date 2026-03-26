@@ -508,7 +508,7 @@ extension WuhuService {
 
     let tool = Tool(
       name: WuhuAgentToolNames.listRunners,
-      description: "List all registered runners with their connection status. Shows built-in, declared (from server config), and incoming (connected to server) runners.",
+      description: "List all registered runners with their connection status. Shows the built-in local runner and any declared remote runners from server config.",
       parameters: schema,
     )
 

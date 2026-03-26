@@ -6,10 +6,8 @@ public struct RunnerInfo: Sendable, Hashable {
   public enum Source: String, Sendable, Hashable {
     /// Built-in local runner.
     case builtIn = "built-in"
-    /// Declared in server config (server connects out).
+    /// Declared in server config.
     case declared
-    /// Connected in via WebSocket (runner connects to server).
-    case incoming
   }
 
   public var name: String
@@ -23,23 +21,14 @@ public struct RunnerInfo: Sendable, Hashable {
   }
 }
 
-/// Server-side registry of live runners.
-/// Always contains a local runner. Remote runners are registered/removed
-/// as WebSocket connections come and go.
-///
-/// Tracks two categories of remote runners:
-/// - **Declared** runners from server config (server connects out to them).
-/// - **Incoming** runners that connect in via the server's WebSocket endpoint.
-///
-/// When a declared and incoming runner share the same name, the declared one
-/// takes priority for dispatch.
+/// Server-side registry of available runners.
+/// Always contains a local runner. Remote runners declared in server config
+/// are registered as client-backed implementations of `Runner`.
 public actor RunnerRegistry {
   private var runners: [String: any Runner] = [:]
   /// Names declared in server config. These always appear in `listAll`,
   /// even when disconnected.
   private var declaredNames: Set<String> = []
-  /// Names of runners that connected in (not declared in config).
-  private var incomingNames: Set<String> = []
 
   public init() {
     let local = LocalRunner()
@@ -61,29 +50,12 @@ public actor RunnerRegistry {
     runners[key] = runner
   }
 
-  /// Register an incoming runner (connected via the server's WS endpoint).
-  /// If a declared runner with the same name is already connected, the
-  /// incoming one is rejected (returns false).
-  @discardableResult
-  public func registerIncoming(_ runner: any Runner, name: String) -> Bool {
-    if declaredNames.contains(name), runners[name] != nil {
-      // Declared runner already connected — reject incoming with same name.
-      return false
-    }
-    runners[name] = runner
-    if !declaredNames.contains(name) {
-      incomingNames.insert(name)
-    }
-    return true
-  }
-
   /// Remove a runner by its ID.
   public func remove(_ id: RunnerID) {
     let key = runnerKey(id)
     // Never remove the local runner
     guard key != "local" else { return }
     runners.removeValue(forKey: key)
-    incomingNames.remove(key)
   }
 
   /// Get a runner by its RunnerID.
@@ -103,8 +75,7 @@ public actor RunnerRegistry {
   }
 
   /// List all runners with status information.
-  /// Includes: local (always), all declared runners (connected or not),
-  /// and all incoming runners (only while connected).
+  /// Includes: local (always) and all declared runners.
   public func listAll() -> [RunnerInfo] {
     var result: [RunnerInfo] = []
 
@@ -118,17 +89,6 @@ public actor RunnerRegistry {
         source: .declared,
         isConnected: runners[name] != nil,
       ))
-    }
-
-    // Incoming runners — only listed while connected
-    for name in incomingNames.sorted() {
-      if runners[name] != nil {
-        result.append(RunnerInfo(
-          name: name,
-          source: .incoming,
-          isConnected: true,
-        ))
-      }
     }
 
     return result

@@ -4,7 +4,6 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import HummingbirdCore
-import HummingbirdWebSocket
 import Logging
 import NIOCore
 import OTel
@@ -106,19 +105,11 @@ public struct WuhuServer: Sendable {
       await runnerRegistry.declareConfigured(runners.map(\.name))
     }
 
-    // Runner tasks are retained to keep the connections alive for the server lifetime.
-    // They auto-cancel when the process exits.
-    var _runnerTasks: [Task<Void, Never>] = []
     if let runners = config.runners, !runners.isEmpty {
-      let muxRunners = runners.map { r -> (name: String, host: String, port: Int) in
-        let (h, p) = Self.parseHostPort(r.address, defaultPort: 5532)
-        return (name: r.name, host: h, port: p)
+      for runner in runners {
+        let baseURL = try Self.remoteRunnerURL(runner.address)
+        await runnerRegistry.register(HTTPRemoteRunner(baseURL: baseURL, name: runner.name))
       }
-      _runnerTasks = WuhuMuxRunnerConnector.connectAll(
-        runners: muxRunners,
-        registry: runnerRegistry,
-        logger: logger,
-      )
     }
 
     // Start runner connection tasks for configured outbound runners
@@ -1010,19 +1001,8 @@ public struct WuhuServer: Sendable {
       return runners.map { WuhuRunnerInfo(name: $0.name, source: $0.source.rawValue, isConnected: $0.isConnected) }
     }
 
-    // WebSocket router for incoming runner connections
-    let wsRouter = WuhuMuxRunnerAcceptor.webSocketRouter(
-      registry: runnerRegistry,
-      logger: logger,
-    )
-
-    // Configure WebSocket with larger max frame size (1MB) to handle large RPC payloads.
-    // TODO: Fix wuhu-yamux WebSocketConnection to chunk writes instead of requiring this.
-    let wsConfig = WebSocketServerConfiguration(maxFrameSize: 1 << 20)
-
     let app = Application(
       router: router,
-      server: .http1WebSocketUpgrade(webSocketRouter: wsRouter, configuration: wsConfig),
       configuration: .init(address: .hostname(host, port: port)),
       logger: logger,
     )
@@ -1038,34 +1018,19 @@ public struct WuhuServer: Sendable {
     } else {
       try await app.runService()
     }
-
-    // Cancel runner connection tasks on shutdown
-    for task in _runnerTasks {
-      task.cancel()
-    }
   }
 
-  /// Parse "host:port" from a runner address string.
-  static func parseHostPort(_ address: String, defaultPort: Int) -> (String, Int) {
-    // Strip protocol prefixes if present
-    var addr = address
-    for prefix in ["ws://", "wss://", "http://", "https://"] {
-      if addr.hasPrefix(prefix) {
-        addr = String(addr.dropFirst(prefix.count))
-        break
-      }
+  static func remoteRunnerURL(_ address: String) throws -> URL {
+    let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      throw RunnerError.requestFailed(message: "Runner address must not be empty")
     }
-    // Strip path
-    if let slashIdx = addr.firstIndex(of: "/") {
-      addr = String(addr[addr.startIndex ..< slashIdx])
+
+    let raw = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+    guard let url = URL(string: raw), url.scheme != nil, url.host != nil else {
+      throw RunnerError.requestFailed(message: "Invalid runner address: \(address)")
     }
-    // Split host:port
-    if let colonIdx = addr.lastIndex(of: ":"),
-       let port = Int(addr[addr.index(after: colonIdx)...])
-    {
-      return (String(addr[addr.startIndex ..< colonIdx]), port)
-    }
-    return (addr, defaultPort)
+    return url
   }
 }
 

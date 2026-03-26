@@ -4,7 +4,7 @@ import WuhuAI
 // MARK: - Runner result types
 
 /// Result of a bash command execution.
-public struct BashResult: Sendable, Hashable {
+public struct BashResult: Sendable, Hashable, Codable {
   public var exitCode: Int32
   public var output: String
   public var timedOut: Bool
@@ -56,6 +56,39 @@ public typealias BashStreamCursor = Int
 public enum BashStreamPayload: Sendable, Hashable, Codable {
   case output(String)
   case finished(BashResult)
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case output
+    case result
+  }
+
+  private enum Kind: String, Codable {
+    case output
+    case finished
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch try container.decode(Kind.self, forKey: .kind) {
+    case .output:
+      self = try .output(container.decode(String.self, forKey: .output))
+    case .finished:
+      self = try .finished(container.decode(BashResult.self, forKey: .result))
+    }
+  }
+
+  public func encode(to encoder: any Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    switch self {
+    case let .output(output):
+      try container.encode(Kind.output, forKey: .kind)
+      try container.encode(output, forKey: .output)
+    case let .finished(result):
+      try container.encode(Kind.finished, forKey: .kind)
+      try container.encode(result, forKey: .result)
+    }
+  }
 }
 
 public struct BashStreamEvent: Sendable, Hashable, Codable {
@@ -197,13 +230,53 @@ public struct GrepResult: Sendable, Hashable, Codable {
   }
 }
 
+public struct MaterializeRequest: Sendable, Hashable, Codable {
+  public var templatePath: String
+  public var destinationPath: String
+  public var startupScript: String?
+
+  public init(templatePath: String, destinationPath: String, startupScript: String? = nil) {
+    self.templatePath = templatePath
+    self.destinationPath = destinationPath
+    self.startupScript = startupScript
+  }
+}
+
+public struct MaterializeResponse: Sendable, Hashable, Codable {
+  public var workspacePath: String
+
+  public init(workspacePath: String) {
+    self.workspacePath = workspacePath
+  }
+}
+
+public struct RunnerWireError: Error, Sendable, Hashable, Codable, CustomStringConvertible {
+  public var message: String
+
+  public init(_ message: String) {
+    self.message = message
+  }
+
+  public var description: String {
+    message
+  }
+
+  public init(from decoder: any Decoder) throws {
+    message = try decoder.singleValueContainer().decode(String.self)
+  }
+
+  public func encode(to encoder: any Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(message)
+  }
+}
+
 // MARK: - Runner protocol
 
 /// Minimal execution proxy for filesystem operations and process execution.
 ///
 /// `LocalRunner` implements this directly on the local machine.
-/// `MuxRunnerClient` implements this by forwarding calls over a
-/// mux session to a remote runner process.
+/// Remote runners can implement the same protocol over HTTP or other transports.
 public protocol Runner: Actor, Sendable {
   nonisolated var id: RunnerID { get }
 
