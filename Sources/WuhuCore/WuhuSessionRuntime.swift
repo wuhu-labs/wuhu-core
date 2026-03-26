@@ -20,6 +20,7 @@ actor WuhuSessionRuntime {
 
   private var streaming = false
   private var inflightText = ""
+  private var inflightID: UUID?
   private var observedState: WuhuSessionLoopState = .empty
   private var hasAcceptedInMemoryWork = false
 
@@ -52,12 +53,14 @@ actor WuhuSessionRuntime {
     self.loop = loop
 
     let observation = await loop.observe()
-    await setInitialObservationState(observation)
+    await setInitialObservationState(observation.value)
 
     observeTask = Task { [weak self] in
       guard let self else { return }
-      for await event in observation.events {
-        await handleLoopEvent(event)
+      var iterator = observation.makeAsyncIterator()
+      _ = await iterator.next()
+      while let snapshot = await iterator.next() {
+        await handleObservationSnapshot(snapshot)
       }
     }
 
@@ -180,6 +183,7 @@ actor WuhuSessionRuntime {
     loop = nil
     streaming = false
     inflightText = ""
+    inflightID = nil
     observedState = .empty
     hasAcceptedInMemoryWork = false
   }
@@ -194,30 +198,30 @@ actor WuhuSessionRuntime {
     throw CancellationError()
   }
 
-  private func setInitialObservationState(_ observation: AgentLoopObservation<WuhuSessionBehavior>) async {
+  private func setInitialObservationState(_ observation: AgentLoopObservedState<WuhuSessionLoopState, WuhuSessionStreamAction>) async {
     observedState = observation.state
+    inflightID = observation.inflightID
     streaming = observation.inflight != nil
-
-    if let actions = observation.inflight {
-      inflightText = actions.map { action in
-        switch action {
-        case let .assistantTextDelta(text): text
-        }
-      }.joined()
-    } else {
-      inflightText = ""
-    }
+    inflightText = joinedInflightText(from: observation.inflight)
   }
 
-  private func handleLoopEvent(_ event: AgentLoopEvent<WuhuSessionLoopState, WuhuSessionStreamAction>) async {
-    switch event {
-    case let .stateUpdated(nextState):
+  private func handleObservationSnapshot(_ snapshot: AgentLoopObservedState<WuhuSessionLoopState, WuhuSessionStreamAction>) async {
+    let previousState = observedState
+    let previousStreaming = streaming
+    let previousInflightID = inflightID
+    let previousInflightText = inflightText
+
+    let nextState = snapshot.state
+    let nextInflightID = snapshot.inflightID
+    let nextStreaming = snapshot.inflight != nil
+    let nextInflightText = joinedInflightText(from: snapshot.inflight)
+
+    if previousState != nextState {
       let wasIdle = isIdle(state: observedState)
-      let oldState = observedState
       observedState = nextState
       hasAcceptedInMemoryWork = false
 
-      if let diff = behavior.diff(from: oldState, to: nextState) {
+      if let diff = behavior.diff(from: previousState, to: nextState) {
         await publish(diff: diff, nextState: nextState)
       }
 
@@ -231,24 +235,62 @@ actor WuhuSessionRuntime {
           try? await self?.applyPendingModelIfPossible()
         }
       }
+    } else {
+      observedState = nextState
+    }
 
-    case .streamBegan:
-      streaming = true
-      inflightText = ""
-      await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamBegan)
-
-    case let .streamDelta(delta):
-      switch delta {
-      case let .assistantTextDelta(text):
-        inflightText += text
-        await eventHub.publish(sessionID: sessionID.rawValue, event: .assistantTextDelta(text))
-        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamDelta(text))
+    if previousInflightID != nextInflightID {
+      if previousStreaming {
+        streaming = false
+        inflightText = ""
+        inflightID = nil
+        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
       }
 
-    case .streamEnded:
+      if nextStreaming {
+        streaming = true
+        inflightText = ""
+        inflightID = nextInflightID
+        await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamBegan)
+        if !nextInflightText.isEmpty {
+          await eventHub.publish(sessionID: sessionID.rawValue, event: .assistantTextDelta(nextInflightText))
+          await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamDelta(nextInflightText))
+          inflightText = nextInflightText
+        }
+      } else if previousStreaming {
+        let snapshot = if let loop {
+          await loop.currentStateSnapshot()
+        } else {
+          (state: observedState, hasPendingFlush: false)
+        }
+        let nowIdle = !snapshot.hasPendingFlush && isIdle(state: snapshot.state)
+        if nowIdle {
+          await eventHub.publish(sessionID: sessionID.rawValue, event: .idle)
+          if let onIdle {
+            Task { await onIdle(sessionID.rawValue) }
+          }
+        }
+      }
+    } else if nextStreaming {
+      streaming = true
+      inflightID = nextInflightID
+      if nextInflightText != previousInflightText {
+        let delta: String = if nextInflightText.hasPrefix(previousInflightText) {
+          String(nextInflightText.dropFirst(previousInflightText.count))
+        } else {
+          nextInflightText
+        }
+        if !delta.isEmpty {
+          await eventHub.publish(sessionID: sessionID.rawValue, event: .assistantTextDelta(delta))
+          await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamDelta(delta))
+        }
+      }
+      inflightText = nextInflightText
+    } else if previousStreaming {
       let wasIdle = isIdle(state: observedState)
       streaming = false
       inflightText = ""
+      inflightID = nil
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .streamEnded)
       let snapshot = if let loop {
         await loop.currentStateSnapshot()
@@ -263,6 +305,15 @@ actor WuhuSessionRuntime {
         }
       }
     }
+  }
+
+  private func joinedInflightText(from inflight: [WuhuSessionStreamAction]?) -> String {
+    guard let inflight else { return "" }
+    return inflight.map { action in
+      switch action {
+      case let .assistantTextDelta(text): text
+      }
+    }.joined()
   }
 
   private func isIdle(state: WuhuSessionLoopState) -> Bool {

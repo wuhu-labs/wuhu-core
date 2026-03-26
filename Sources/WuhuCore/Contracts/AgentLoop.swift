@@ -2,9 +2,15 @@ import AsyncExtensions
 import Foundation
 import WuhuAI
 
-private struct DurableSnapshot<State: Sendable>: Sendable {
+private struct PublishedSnapshot<State: Sendable>: Sendable {
   var version: Int
   var state: State
+  var inferenceID: UUID?
+}
+
+private struct StreamingSnapshot<Action: Sendable>: Sendable {
+  var inferenceID: UUID?
+  var actions: [Action]?
 }
 
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
@@ -29,9 +35,10 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  private var inflight: [B.StreamAction]?
   private var liveVersion: Int = 0
-  private let durableSnapshots: AsyncCurrentValueSubject<DurableSnapshot<B.State>>
+  private let publishedSnapshots: AsyncCurrentValueSubject<PublishedSnapshot<B.State>>
+  private let streamingSnapshots: AsyncCurrentValueSubject<StreamingSnapshot<B.StreamAction>>
+  private let observationSnapshots: AsyncCurrentValueSubject<AgentLoopObservedState<B.State, B.StreamAction>>
 
   // MARK: Lifecycle
 
@@ -40,10 +47,6 @@ public actor AgentLoop<B: AgentBehavior> {
   private var flushSignal: AsyncStream<Void>.Continuation?
   private var hasPendingWorkSignal = false
   private var hasPendingFlushSignal = false
-
-  // MARK: Observation
-
-  private var observers: [UUID: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.Continuation] = [:]
 
   // MARK: Tool Call Repetition
 
@@ -54,29 +57,21 @@ public actor AgentLoop<B: AgentBehavior> {
   public init(behavior: B, initialState: B.State) {
     self.behavior = behavior
     state = initialState
-    durableSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState))
+    publishedSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState, inferenceID: nil))
+    streamingSnapshots = AsyncCurrentValueSubject(.init(inferenceID: nil, actions: nil))
+    observationSnapshots = AsyncCurrentValueSubject(.init(state: initialState, inflightID: nil, inflight: nil))
   }
 
   // MARK: - Observation
 
-  /// Observe the loop's durable state and events, gap-free.
-  public func observe() -> AgentLoopObservation<B> {
-    let id = UUID()
-    let (stream, continuation) = AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.makeStream()
-    observers[id] = continuation
-    continuation.onTermination = { [weak self] _ in
-      Task { [weak self] in await self?.removeObserver(id) }
-    }
-    return AgentLoopObservation(state: durableSnapshots.value.state, inflight: inflight, events: stream)
+  /// Observe the loop's current published snapshot, gap-free.
+  public func observe() -> AsyncCurrentValueSubject<AgentLoopObservedState<B.State, B.StreamAction>> {
+    observationSnapshots
   }
 
   public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
-    let durable = durableSnapshots.value
-    return (state: state, hasPendingFlush: durable.version < liveVersion)
-  }
-
-  private func removeObserver(_ id: UUID) {
-    observers.removeValue(forKey: id)
+    let published = publishedSnapshots.value
+    return (state: state, hasPendingFlush: published.version < liveVersion)
   }
 
   // MARK: - External Actions
@@ -163,13 +158,17 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func flushIfNeeded() async throws {
-    while let diff = behavior.diff(from: durableSnapshots.value.state, to: state) {
-      let oldState = durableSnapshots.value.state
+    while let diff = behavior.diff(from: publishedSnapshots.value.state, to: state) {
+      let oldState = publishedSnapshots.value.state
       let newState = state
       let targetVersion = liveVersion
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
-      durableSnapshots.send(.init(version: targetVersion, state: durableState))
-      emit(.stateUpdated(durableState))
+      publishedSnapshots.send(.init(
+        version: targetVersion,
+        state: durableState,
+        inferenceID: publishedSnapshots.value.inferenceID,
+      ))
+      publishObservedSnapshot()
     }
   }
 
@@ -273,12 +272,11 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func performInference(context: Context) async throws -> AssistantMessage {
-    emit(.streamBegan)
-    inflight = []
+    let inferenceID = UUID()
+    beginInferenceObservation(inferenceID)
 
     defer {
-      inflight = nil
-      emit(.streamEnded)
+      endInferenceObservation(inferenceID)
     }
 
     let (deltaStream, deltaContinuation) = AsyncStream<B.StreamAction>.makeStream()
@@ -291,8 +289,7 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       for await delta in deltaStream {
-        inflight?.append(delta)
-        emit(.streamDelta(delta))
+        appendInflight(delta, inferenceID: inferenceID)
       }
 
       guard let message = try await group.next() ?? nil else {
@@ -338,11 +335,11 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private func waitUntilDurableCurrentVersion() async throws {
     let targetVersion = liveVersion
-    guard durableSnapshots.value.version < targetVersion else { return }
+    guard publishedSnapshots.value.version < targetVersion else { return }
 
     hasPendingFlushSignal = true
     flushSignal?.yield(())
-    for await snapshot in durableSnapshots {
+    for await snapshot in publishedSnapshots {
       if snapshot.version >= targetVersion {
         return
       }
@@ -350,12 +347,54 @@ public actor AgentLoop<B: AgentBehavior> {
     throw CancellationError()
   }
 
-  // MARK: - Emit
+  private func beginInferenceObservation(_ inferenceID: UUID) {
+    let current = publishedSnapshots.value
+    publishedSnapshots.send(.init(
+      version: current.version,
+      state: current.state,
+      inferenceID: inferenceID,
+    ))
+    streamingSnapshots.send(.init(inferenceID: inferenceID, actions: []))
+    publishObservedSnapshot()
+  }
 
-  private func emit(_ event: AgentLoopEvent<B.State, B.StreamAction>) {
-    for (_, continuation) in observers {
-      continuation.yield(event)
+  private func appendInflight(_ delta: B.StreamAction, inferenceID: UUID) {
+    let current = streamingSnapshots.value
+    guard current.inferenceID == inferenceID else { return }
+    var actions = current.actions ?? []
+    actions.append(delta)
+    streamingSnapshots.send(.init(inferenceID: inferenceID, actions: actions))
+    publishObservedSnapshot()
+  }
+
+  private func endInferenceObservation(_ inferenceID: UUID) {
+    if publishedSnapshots.value.inferenceID == inferenceID {
+      let current = publishedSnapshots.value
+      publishedSnapshots.send(.init(
+        version: current.version,
+        state: current.state,
+        inferenceID: nil,
+      ))
     }
+    if streamingSnapshots.value.inferenceID == inferenceID {
+      streamingSnapshots.send(.init(inferenceID: nil, actions: nil))
+    }
+    publishObservedSnapshot()
+  }
+
+  private func publishObservedSnapshot() {
+    let published = publishedSnapshots.value
+    let streaming = streamingSnapshots.value
+    let inflight: [B.StreamAction]? = if published.inferenceID == streaming.inferenceID {
+      streaming.actions
+    } else {
+      nil
+    }
+    observationSnapshots.send(.init(
+      state: published.state,
+      inflightID: published.inferenceID,
+      inflight: inflight,
+    ))
   }
 
   private func consumePendingWorkSignal() {
