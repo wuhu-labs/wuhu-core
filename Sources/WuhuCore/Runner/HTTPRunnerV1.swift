@@ -179,4 +179,63 @@ public enum HTTPRunnerV1 {
       self.diff = diff
     }
   }
+
+  public struct BashStartRequest: Sendable, Hashable, Codable {
+    public var taskID: String
+    public var command: String
+    public var cwd: String
+    public var timeout: Double?
+
+    public init(
+      taskID: String,
+      command: String,
+      cwd: String,
+      timeout: Double? = nil
+    ) {
+      self.taskID = taskID
+      self.command = command
+      self.cwd = cwd
+      self.timeout = timeout
+    }
+  }
+
+  public struct BashStartResponse: Sendable, Hashable, Codable {
+    public init() {}
+  }
+
+  public struct BashStreamRequest: Sendable, Hashable, Codable {
+    public var taskID: String
+    public var after: BashStreamCursor?
+
+    public init(taskID: String, after: BashStreamCursor? = nil) {
+      self.taskID = taskID
+      self.after = after
+    }
+  }
+
+  public struct BashAckRequest: Sendable, Hashable, Codable {
+    public var taskID: String
+    public var through: BashStreamCursor
+
+    public init(taskID: String, through: BashStreamCursor) {
+      self.taskID = taskID
+      self.through = through
+    }
+  }
+
+  public struct BashAckResponse: Sendable, Hashable, Codable {
+    public init() {}
+  }
+
+  public struct BashKillRequest: Sendable, Hashable, Codable {
+    public var taskID: String
+
+    public init(taskID: String) {
+      self.taskID = taskID
+    }
+  }
+
+  public struct BashKillResponse: Sendable, Hashable, Codable {
+    public init() {}
+  }
 }

@@ -1,6 +1,8 @@
 import Fetch
+import FetchSSE
 import Foundation
 import WuhuAPI
+import WuhuCoreClient
 
 public struct HTTPRunnerClient: Sendable {
   public var runnerID: RunnerID {
@@ -120,6 +122,82 @@ public struct HTTPRunnerClient: Sendable {
     )
   }
 
+  public func startBash(
+    taskID: String,
+    command: String,
+    cwd: String,
+    timeout: TimeInterval?
+  ) async throws {
+    _ = try await self.postJSON(
+      endpoint: "/v1/bash/start",
+      payload: HTTPRunnerV1.BashStartRequest(
+        taskID: taskID,
+        command: command,
+        cwd: cwd,
+        timeout: timeout
+      ),
+      as: HTTPRunnerV1.BashStartResponse.self
+    )
+  }
+
+  public func streamBash(
+    taskID: String,
+    after cursor: BashStreamCursor? = nil
+  ) async throws -> AsyncThrowingStream<BashStreamEvent, Error> {
+    var request = Request(
+      url: try self.endpointURL("/v1/bash/stream"),
+      method: .post
+    )
+    request.body = try Body.json(
+      HTTPRunnerV1.BashStreamRequest(taskID: taskID, after: cursor),
+      encoder: WuhuJSON.encoder
+    )
+    request.setHeader("application/json", for: "Content-Type")
+    request.setHeader("text/event-stream", for: "Accept")
+
+    let response = try await self.fetch(request)
+    try await Self.validate(response)
+
+    return AsyncThrowingStream { continuation in
+      let task = Task {
+        do {
+          for try await message in response.sse() {
+            guard let data = message.data.data(using: .utf8) else { continue }
+            let event = try WuhuJSON.decoder.decode(BashStreamEvent.self, from: data)
+            continuation.yield(event)
+          }
+          continuation.finish()
+        } catch {
+          if Task.isCancelled {
+            continuation.finish()
+          } else {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
+
+      continuation.onTermination = { _ in
+        task.cancel()
+      }
+    }
+  }
+
+  public func ackBash(taskID: String, through cursor: BashStreamCursor) async throws {
+    _ = try await self.postJSON(
+      endpoint: "/v1/bash/ack",
+      payload: HTTPRunnerV1.BashAckRequest(taskID: taskID, through: cursor),
+      as: HTTPRunnerV1.BashAckResponse.self
+    )
+  }
+
+  public func killBash(taskID: String) async throws {
+    _ = try await self.postJSON(
+      endpoint: "/v1/bash/kill",
+      payload: HTTPRunnerV1.BashKillRequest(taskID: taskID),
+      as: HTTPRunnerV1.BashKillResponse.self
+    )
+  }
+
   public func runnerHandle() -> RunnerHandle {
     let client = self
     return RunnerHandle(
@@ -145,8 +223,29 @@ public struct HTTPRunnerClient: Sendable {
       grep: { _ in
         throw Self.unsupported("grep")
       },
-      runBash: { _, _, _ in
-        throw Self.unsupported("bash")
+      startBash: { taskID, cwd, command, timeout in
+        try await client.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+      },
+      streamBash: { taskID, after in
+        try await client.streamBash(taskID: taskID, after: after)
+      },
+      ackBash: { taskID, through in
+        try await client.ackBash(taskID: taskID, through: through)
+      },
+      killBash: { taskID in
+        try await client.killBash(taskID: taskID)
+      },
+      runBash: { cwd, command, timeout in
+        let taskID = UUID().uuidString.lowercased()
+        try await client.startBash(taskID: taskID, command: command, cwd: cwd, timeout: timeout)
+        let stream = try await client.streamBash(taskID: taskID, after: nil)
+        for try await event in stream {
+          try await client.ackBash(taskID: taskID, through: event.cursor)
+          if case let .finished(result) = event.payload {
+            return result
+          }
+        }
+        throw RunnerError.requestFailed(message: "Bash stream ended without a terminal result")
       }
     )
   }
@@ -163,14 +262,7 @@ public struct HTTPRunnerClient: Sendable {
     request.body = try Body.json(payload, encoder: WuhuJSON.encoder)
 
     let response = try await self.fetch(request)
-
-    guard (200 ..< 300).contains(response.status.code) else {
-      if let errorResponse = try? await response.body.json(HTTPRunnerV1.ErrorResponse.self, decoder: WuhuJSON.decoder) {
-        throw RunnerError.requestFailed(message: errorResponse.error.message)
-      }
-      let text = (try? await response.text()) ?? "HTTP \(response.status.code)"
-      throw RunnerError.requestFailed(message: text)
-    }
+    try await Self.validate(response)
 
     return try await response.body.json(ResponseBody.self, decoder: WuhuJSON.decoder)
   }
@@ -192,5 +284,15 @@ public struct HTTPRunnerClient: Sendable {
 
   private static func unsupported(_ operation: String) -> RunnerError {
     RunnerError.requestFailed(message: "HTTP runner v1 does not support \(operation)")
+  }
+
+  private static func validate(_ response: Response) async throws {
+    guard (200 ..< 300).contains(response.status.code) else {
+      if let errorResponse = try? await response.body.json(HTTPRunnerV1.ErrorResponse.self, decoder: WuhuJSON.decoder) {
+        throw RunnerError.requestFailed(message: errorResponse.error.message)
+      }
+      let text = (try? await response.text()) ?? "HTTP \(response.status.code)"
+      throw RunnerError.requestFailed(message: text)
+    }
   }
 }

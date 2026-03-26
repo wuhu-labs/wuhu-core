@@ -7,12 +7,102 @@ import Foundation
 public actor LocalRunner: Runner {
   public nonisolated let id: RunnerID = .local
 
+  private struct ManagedBashTask: Sendable {
+    let request: BashTaskRequest
+    var state: State
+    var lastAckedCursor: BashStreamCursor?
+
+    enum State: Sendable {
+      case running(Task<BashResult, Error>)
+      case finished(Result<BashResult, RunnerWireError>)
+    }
+  }
+
+  private var bashTasks: [String: ManagedBashTask] = [:]
+
   public init() {}
 
   // MARK: - Process execution
 
-  public func runBash(command: String, cwd: String, timeout: TimeInterval?) async throws -> BashResult {
-    try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+  public func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws {
+    let request = BashTaskRequest(taskID: taskID, runnerID: id, command: command, cwd: cwd, timeout: timeout)
+    if let existing = bashTasks[taskID] {
+      guard existing.request == request else {
+        throw RunnerError.requestFailed(
+          message: "Bash task '\(taskID)' already exists with different parameters",
+        )
+      }
+      return
+    }
+
+    let task = Task {
+      try await LocalBash.run(command: command, cwd: cwd, timeoutSeconds: timeout)
+    }
+    bashTasks[taskID] = .init(request: request, state: .running(task), lastAckedCursor: nil)
+  }
+
+  public func streamBash(taskID: String, after cursor: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error> {
+    guard let existing = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+
+    switch existing.state {
+    case let .finished(result):
+      return AsyncThrowingStream { continuation in
+        if (cursor ?? 0) < 1 {
+          switch result {
+          case let .success(value):
+            continuation.yield(.init(cursor: 1, payload: .finished(value)))
+          case let .failure(error):
+            continuation.finish(throwing: RunnerError.requestFailed(message: error.message))
+            return
+          }
+        }
+        continuation.finish()
+      }
+
+    case let .running(task):
+      let afterCursor = cursor
+      return AsyncThrowingStream { continuation in
+        Task {
+          do {
+            let result = try await task.value
+            await recordFinishedBash(result: .success(result), taskID: taskID)
+            if (afterCursor ?? 0) < 1 {
+              continuation.yield(.init(cursor: 1, payload: .finished(result)))
+            }
+            continuation.finish()
+          } catch {
+            let wireError = RunnerWireError(String(describing: error))
+            await recordFinishedBash(result: .failure(wireError), taskID: taskID)
+            continuation.finish(throwing: RunnerError.requestFailed(message: wireError.message))
+          }
+        }
+      }
+    }
+  }
+
+  public func ackBash(taskID: String, through cursor: BashStreamCursor) async throws {
+    guard var existing = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    existing.lastAckedCursor = max(existing.lastAckedCursor ?? 0, cursor)
+    bashTasks[taskID] = existing
+  }
+
+  public func killBash(taskID: String) async throws {
+    guard let existing = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    if case let .running(task) = existing.state {
+      task.cancel()
+    }
+  }
+
+  private func recordFinishedBash(result: Result<BashResult, RunnerWireError>, taskID: String) async {
+    guard var existing = bashTasks[taskID] else { return }
+    existing.state = .finished(result)
+    bashTasks[taskID] = existing
   }
 
   // MARK: - File I/O

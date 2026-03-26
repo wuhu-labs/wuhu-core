@@ -221,6 +221,38 @@ public struct WuhuHTTPRunnerServer: Sendable {
       }
     }
 
+    router.post("/v1/bash/start") { request, _ in
+      await respond {
+        let payload = try await decodeJSONBody(HTTPRunnerV1.BashStartRequest.self, from: request)
+        try await runner.startBash(payload.taskID, payload.cwd, payload.command, payload.timeout)
+        return jsonResponse(HTTPRunnerV1.BashStartResponse())
+      }
+    }
+
+    router.post("/v1/bash/stream") { request, _ in
+      await respond {
+        let payload = try await decodeJSONBody(HTTPRunnerV1.BashStreamRequest.self, from: request)
+        let stream = try await runner.streamBash(payload.taskID, payload.after)
+        return sseResponse(stream)
+      }
+    }
+
+    router.post("/v1/bash/ack") { request, _ in
+      await respond {
+        let payload = try await decodeJSONBody(HTTPRunnerV1.BashAckRequest.self, from: request)
+        try await runner.ackBash(payload.taskID, payload.through)
+        return jsonResponse(HTTPRunnerV1.BashAckResponse())
+      }
+    }
+
+    router.post("/v1/bash/kill") { request, _ in
+      await respond {
+        let payload = try await decodeJSONBody(HTTPRunnerV1.BashKillRequest.self, from: request)
+        try await runner.killBash(payload.taskID)
+        return jsonResponse(HTTPRunnerV1.BashKillResponse())
+      }
+    }
+
     return router.handler
   }
 
@@ -322,6 +354,43 @@ private func respond(
       )
     )
   }
+}
+
+private func sseResponse(_ stream: AsyncThrowingStream<BashStreamEvent, Error>) -> Response {
+  var headers = Headers()
+  headers[.contentType] = "text/event-stream"
+
+  let body = Body.stream(contentType: "text/event-stream") {
+    AsyncThrowingStream<Bytes, Error> { continuation in
+      let task = Task {
+        do {
+          for try await event in stream {
+            let data = try WuhuJSON.encoder.encode(event)
+            continuation.yield(Array(serializeSSEData(String(decoding: data, as: UTF8.self)).utf8))
+          }
+          continuation.finish()
+        } catch {
+          if Task.isCancelled {
+            continuation.finish()
+          } else {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
+
+      continuation.onTermination = { _ in
+        task.cancel()
+      }
+    }
+  }
+
+  return Response(status: .ok, headers: headers, body: body)
+}
+
+private func serializeSSEData(_ data: String) -> String {
+  let lines = data.split(separator: "\n", omittingEmptySubsequences: false)
+  let encodedLines = lines.isEmpty ? ["data:"] : lines.map { "data: \($0)" }
+  return encodedLines.joined(separator: "\n") + "\n\n"
 }
 
 private func mapRunnerError(_ error: RunnerError) -> HTTPRunnerRouteError {

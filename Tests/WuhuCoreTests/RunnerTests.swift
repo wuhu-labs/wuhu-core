@@ -12,11 +12,19 @@ import WuhuAPI
 actor InMemoryRunner: Runner {
   nonisolated let id: RunnerID
 
+  private struct ManagedBashTask {
+    let request: BashTaskRequest
+    var result: Result<BashResult, RunnerWireError>?
+    var lastAckedCursor: BashStreamCursor?
+  }
+
   private var files: [String: Data] = [:]
   private var directories: Set<String> = ["/"]
 
   /// Bash commands and their scripted responses.
   private var bashResponses: [(pattern: String, result: BashResult)] = []
+  private var bashTasks: [String: ManagedBashTask] = [:]
+  private var bashStartCounts: [String: Int] = [:]
 
   init(id: RunnerID = .local) {
     self.id = id
@@ -60,14 +68,62 @@ actor InMemoryRunner: Runner {
     files[path].map { String(decoding: $0, as: UTF8.self) }
   }
 
+  func bashStartCount(taskID: String) -> Int {
+    bashStartCounts[taskID, default: 0]
+  }
+
   // MARK: - Runner protocol
 
-  func runBash(command: String, cwd _: String, timeout _: TimeInterval?) async throws -> BashResult {
-    for (pattern, result) in bashResponses {
-      if command.contains(pattern) { return result }
+  func startBash(taskID: String, command: String, cwd: String, timeout: TimeInterval?) async throws {
+    let request = BashTaskRequest(taskID: taskID, runnerID: id, command: command, cwd: cwd, timeout: timeout)
+    if let existing = bashTasks[taskID] {
+      guard existing.request == request else {
+        throw RunnerError.requestFailed(message: "Bash task '\(taskID)' already exists with different parameters")
+      }
+      return
     }
-    // Default: return empty success
-    return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+
+    bashStartCounts[taskID, default: 0] += 1
+    let result: BashResult = {
+      for (pattern, result) in bashResponses {
+        if command.contains(pattern) { return result }
+      }
+      return BashResult(exitCode: 0, output: "", timedOut: false, terminated: false)
+    }()
+    bashTasks[taskID] = .init(request: request, result: .success(result), lastAckedCursor: nil)
+  }
+
+  func streamBash(taskID: String, after cursor: BashStreamCursor?) async throws -> AsyncThrowingStream<BashStreamEvent, Error> {
+    guard let task = bashTasks[taskID], let result = task.result else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+
+    return AsyncThrowingStream { continuation in
+      if (cursor ?? 0) < 1 {
+        switch result {
+        case let .success(value):
+          continuation.yield(.init(cursor: 1, payload: .finished(value)))
+        case let .failure(error):
+          continuation.finish(throwing: RunnerError.requestFailed(message: error.message))
+          return
+        }
+      }
+      continuation.finish()
+    }
+  }
+
+  func ackBash(taskID: String, through cursor: BashStreamCursor) async throws {
+    guard var task = bashTasks[taskID] else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
+    task.lastAckedCursor = max(task.lastAckedCursor ?? 0, cursor)
+    bashTasks[taskID] = task
+  }
+
+  func killBash(taskID: String) async throws {
+    guard bashTasks[taskID] != nil else {
+      throw RunnerError.requestFailed(message: "Unknown bash task: \(taskID)")
+    }
   }
 
   func readData(path: String) async throws -> Data {

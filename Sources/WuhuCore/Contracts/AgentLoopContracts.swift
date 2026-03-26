@@ -1,3 +1,4 @@
+import AsyncExtensions
 import Foundation
 import WuhuAI
 
@@ -33,8 +34,8 @@ public protocol AgentBehavior: Sendable {
   associatedtype ExternalAction: Sendable
 
   /// The result of executing a tool. Opaque to the loop — it just
-  /// passes the value from ``executeToolCall(_:state:)`` to
-  /// ``toolDidExecute(_:result:state:)``.
+  /// passes the value from ``startToolCall(_:state:)`` to
+  /// ``persistToolResult(_:for:state:)``.
   ///
   /// `Hashable` is required so the loop can detect consecutive
   /// identical tool results (see ``ToolCallRepetitionTracker``).
@@ -97,14 +98,25 @@ public protocol AgentBehavior: Sendable {
 
   // MARK: Tool Lifecycle
 
-  /// Mark that a tool call is about to execute in the in-memory state.
-  func toolWillExecute(
+  /// Returns the next tool call that should execute for the current state.
+  ///
+  /// This is a pure query over durable state. The loop can therefore resume
+  /// pending or started work after restart without depending on a transient
+  /// in-memory inference result.
+  func nextToolCall(state: State) -> ToolCall?
+
+  /// Start (or resume) a tool call by mutating in-memory bookkeeping and
+  /// returning a lazy error-free handle for the actual work.
+  ///
+  /// The loop persists the mutated state before invoking the handle.
+  func startToolCall(
     _ call: ToolCall,
     state: inout State,
-  )
+  ) -> AgentToolExecutionHandle<ToolResult>
 
-  /// Execute a tool call. Runs outside the serialized path (parallel).
-  func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult
+  /// Build the tool result that should be persisted when execution is blocked
+  /// by generic loop policy (for example repetition protection).
+  func blockedToolResult(for call: ToolCall) -> ToolResult
 
   /// Append supplementary text to a tool result.
   ///
@@ -113,16 +125,9 @@ public protocol AgentBehavior: Sendable {
   func appendText(_ text: String, to result: ToolResult) -> ToolResult
 
   /// Save a tool result into the in-memory state.
-  func toolDidExecute(
-    _ call: ToolCall,
-    result: ToolResult,
-    state: inout State,
-  )
-
-  /// Save an error result for a tool call into the in-memory state.
-  func toolDidFail(
-    _ call: ToolCall,
-    error: any Error,
+  func persistToolResult(
+    _ result: ToolResult,
+    for call: ToolCall,
     state: inout State,
   )
 
@@ -133,18 +138,6 @@ public protocol AgentBehavior: Sendable {
 
   /// Perform compaction and return the next in-memory state.
   func performCompaction(state: State) async throws -> State
-
-  // MARK: Crash Recovery
-
-  /// Tool call IDs stuck in `.started` from a previous crash.
-  func staleToolCallIDs(in state: State) -> [String]
-
-  /// Inject an error result for a crash-interrupted tool call into the
-  /// in-memory state.
-  func recoverStaleToolCall(
-    id: String,
-    state: inout State,
-  )
 
   // MARK: Cold Start
 
@@ -184,6 +177,14 @@ public enum ToolCallStatus: String, Sendable, Hashable, Codable {
   case errored
 }
 
+public struct AgentToolExecutionHandle<Result: Sendable>: Sendable {
+  public let run: @Sendable () async -> Result
+
+  public init(run: @escaping @Sendable () async -> Result) {
+    self.run = run
+  }
+}
+
 // MARK: - Stream Sink
 
 /// Push-based sink for streaming inference deltas into the loop's
@@ -200,50 +201,33 @@ public struct AgentStreamSink<Action: Sendable>: Sendable {
   }
 }
 
-// MARK: - Loop Events
-
-/// Events emitted by the agent loop for observation.
-///
-/// State updates are emitted only after the new state has been persisted.
-/// Stream events are ephemeral and do not advance the durable state.
-public enum AgentLoopEvent<State: Sendable, StreamAction: Sendable>: Sendable {
-  /// The durable state changed.
-  case stateUpdated(State)
-
-  /// Inference streaming has begun.
-  case streamBegan
-
-  /// An ephemeral streaming delta.
-  case streamDelta(StreamAction)
-
-  /// Inference streaming has ended.
-  case streamEnded
-}
-
 // MARK: - Observation
 
-/// Gap-free observation of the agent loop's state and events.
+/// Gap-free observation of the agent loop's current published state.
 ///
-/// Returned by ``AgentLoop/observe()``. The state snapshot and event
-/// stream are registered atomically — no events are missed between
-/// the snapshot and the first event on the stream.
-public struct AgentLoopObservation<B: AgentBehavior>: Sendable {
-  /// Current committed state at the time of observation.
-  public var state: B.State
+/// Observers see one coherent snapshot containing the latest published state
+/// plus any currently active inference deltas that belong to the same
+/// published inference epoch.
+public struct AgentLoopObservedState<State: Sendable, StreamAction: Sendable>: Sendable {
+  /// Latest published session state.
+  public var state: State
 
-  /// Accumulated stream deltas if inference is in progress, nil otherwise.
-  public var inflight: [B.StreamAction]?
+  /// Active inference identifier if streaming is in progress.
+  public var inflightID: UUID?
 
-  /// Live event stream from the point of observation.
-  public var events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>
+  /// Accumulated stream deltas for the active inference, nil otherwise.
+  public var inflight: [StreamAction]?
 
   public init(
-    state: B.State,
-    inflight: [B.StreamAction]?,
-    events: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>,
+    state: State,
+    inflightID: UUID?,
+    inflight: [StreamAction]?,
   ) {
     self.state = state
+    self.inflightID = inflightID
     self.inflight = inflight
-    self.events = events
   }
 }
+
+public typealias AgentLoopObservation<State: Sendable, StreamAction: Sendable> =
+  AnyAsyncSequence<AgentLoopObservedState<State, StreamAction>>

@@ -239,6 +239,88 @@ struct HTTPRunnerIntegrationTests {
 
     await listener.close()
   }
+
+  @Test func bashStreamsTerminalResultOverTCP() async throws {
+    let root = try makeTempDirectory(prefix: "HTTPRunnerIntegrationTests")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let listener = try await WuhuHTTPRunnerServer.listen(
+      host: "127.0.0.1",
+      port: 0,
+      runner: .wrapping(LocalRunner()),
+      name: "test-runner"
+    )
+
+    do {
+      let port = try #require(listener.localAddress?.port)
+      let client = HTTPRunnerClient(
+        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+        name: "test-runner"
+      )
+
+      try await client.startBash(
+        taskID: "bash-1",
+        command: "printf 'hello\\n'",
+        cwd: root.path,
+        timeout: nil
+      )
+
+      let stream = try await client.streamBash(taskID: "bash-1", after: nil)
+      var events: [BashStreamEvent] = []
+      for try await event in stream {
+        events.append(event)
+        try await client.ackBash(taskID: "bash-1", through: event.cursor)
+      }
+
+      #expect(events.count == 1)
+      guard let event = events.first else {
+        Issue.record("Expected one bash stream event")
+        return
+      }
+      #expect(event.cursor == 1)
+
+      guard case let .finished(result) = event.payload else {
+        Issue.record("Expected terminal bash event")
+        return
+      }
+      #expect(result.exitCode == 0)
+      #expect(result.output == "hello\n")
+    } catch {
+      await listener.close()
+      throw error
+    }
+
+    await listener.close()
+  }
+
+  @Test func runnerHandleRunBashUsesHTTPStreamingContract() async throws {
+    let root = try makeTempDirectory(prefix: "HTTPRunnerIntegrationTests")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let listener = try await WuhuHTTPRunnerServer.listen(
+      host: "127.0.0.1",
+      port: 0,
+      runner: .wrapping(LocalRunner()),
+      name: "test-runner"
+    )
+
+    do {
+      let port = try #require(listener.localAddress?.port)
+      let runner = RunnerHandle.http(
+        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+        name: "test-runner"
+      )
+
+      let result = try await runner.runBash(root.path, "printf 'runner\\n'", nil)
+      #expect(result.exitCode == 0)
+      #expect(result.output == "runner\n")
+    } catch {
+      await listener.close()
+      throw error
+    }
+
+    await listener.close()
+  }
 }
 
 private func invokeResponse(

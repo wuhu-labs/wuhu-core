@@ -57,11 +57,15 @@ Prereqs:
 Common commands (repo root):
 
 ```bash
-swift test
+swift build --quiet
+swift test --quiet
 swift run wuhu --help
 swift run wuhu openai "Say hello"
 swift run wuhu anthropic "Say hello"
 ```
+
+For routine validation, prefer `swift build --quiet` and `swift test --quiet`.
+They still surface warnings/errors, but drastically reduce noisy successful output.
 
 Formatting:
 

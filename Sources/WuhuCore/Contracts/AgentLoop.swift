@@ -1,5 +1,18 @@
+import AsyncAlgorithms
+import AsyncExtensions
 import Foundation
 import WuhuAI
+
+private struct PublishedSnapshot<State: Sendable>: Sendable {
+  var version: Int
+  var state: State
+  var inferenceID: UUID?
+}
+
+private struct StreamingSnapshot<Action: Sendable>: Sendable {
+  var inferenceID: UUID?
+  var actions: [Action]?
+}
 
 /// Generic agent loop runtime, parameterized by an ``AgentBehavior``.
 ///
@@ -17,13 +30,16 @@ public actor AgentLoop<B: AgentBehavior> {
   private(set) var state: B.State {
     didSet {
       guard state != oldValue else { return }
+      liveVersion += 1
       hasPendingFlushSignal = true
       flushSignal?.yield(())
     }
   }
 
-  private var publishedState: B.State
-  private var inflight: [B.StreamAction]?
+  private var liveVersion: Int = 0
+  private var activeInferenceID: UUID?
+  private let publishedSnapshots: AsyncCurrentValueSubject<PublishedSnapshot<B.State>>
+  private let streamingSnapshots: AsyncCurrentValueSubject<StreamingSnapshot<B.StreamAction>>
 
   // MARK: Lifecycle
 
@@ -32,10 +48,6 @@ public actor AgentLoop<B: AgentBehavior> {
   private var flushSignal: AsyncStream<Void>.Continuation?
   private var hasPendingWorkSignal = false
   private var hasPendingFlushSignal = false
-
-  // MARK: Observation
-
-  private var observers: [UUID: AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.Continuation] = [:]
 
   // MARK: Tool Call Repetition
 
@@ -46,31 +58,24 @@ public actor AgentLoop<B: AgentBehavior> {
   public init(behavior: B, initialState: B.State) {
     self.behavior = behavior
     state = initialState
-    publishedState = initialState
+    publishedSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState, inferenceID: nil))
+    streamingSnapshots = AsyncCurrentValueSubject(.init(inferenceID: nil, actions: nil))
   }
 
   // MARK: - Observation
 
-  /// Observe the loop's durable state and events, gap-free.
-  public func observe() -> AgentLoopObservation<B> {
-    let id = UUID()
-    let (stream, continuation) = AsyncStream<AgentLoopEvent<B.State, B.StreamAction>>.makeStream()
-    observers[id] = continuation
-    continuation.onTermination = { [weak self] _ in
-      Task { [weak self] in await self?.removeObserver(id) }
-    }
-    return AgentLoopObservation(state: publishedState, inflight: inflight, events: stream)
+  /// Observe the loop's current published snapshot, gap-free.
+  public func observe() -> AgentLoopObservation<B.State, B.StreamAction> {
+    combineLatest(publishedSnapshots, streamingSnapshots)
+      .map { published, streaming in
+        Self.makeObservedState(published: published, streaming: streaming)
+      }
+      .eraseToAnyAsyncSequence()
   }
 
   public func currentStateSnapshot() -> (state: B.State, hasPendingFlush: Bool) {
-    (
-      state: state,
-      hasPendingFlush: behavior.diff(from: publishedState, to: state) != nil,
-    )
-  }
-
-  private func removeObserver(_ id: UUID) {
-    observers.removeValue(forKey: id)
+    let published = publishedSnapshots.value
+    return (state: state, hasPendingFlush: published.version < liveVersion)
   }
 
   // MARK: - External Actions
@@ -95,13 +100,6 @@ public actor AgentLoop<B: AgentBehavior> {
   public func start() async throws {
     precondition(!started, "AgentLoop.start() called more than once")
     started = true
-    defer {
-      started = false
-      workSignal?.finish()
-      flushSignal?.finish()
-      workSignal = nil
-      flushSignal = nil
-    }
 
     let (workStream, workContinuation) = AsyncStream<Void>.makeStream(
       bufferingPolicy: .bufferingNewest(1),
@@ -119,56 +117,82 @@ public actor AgentLoop<B: AgentBehavior> {
       flushContinuation.yield(())
     }
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in workStream {
-          try Task.checkCancellation()
-          await consumePendingWorkSignal()
-          try await runUntilIdle()
+    var terminalError: (any Error)?
+    do {
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in workStream {
+            try Task.checkCancellation()
+            await consumePendingWorkSignal()
+            try await runUntilIdle()
+          }
+        }
+
+        group.addTask { [weak self] in
+          guard let self else { return }
+          for await _ in flushStream {
+            try Task.checkCancellation()
+            await consumePendingFlushSignal()
+            try await flushIfNeeded()
+          }
+        }
+
+        do {
+          while try await group.next() != nil {}
+        } catch {
+          group.cancelAll()
+          while let _ = try? await group.next() {}
+          throw error
         }
       }
+    } catch {
+      terminalError = error
+    }
 
-      group.addTask { [weak self] in
-        guard let self else { return }
-        for await _ in flushStream {
-          try Task.checkCancellation()
-          await consumePendingFlushSignal()
-          try await flushIfNeeded()
-        }
-      }
+    started = false
+    workContinuation.finish()
+    flushContinuation.finish()
+    workSignal = nil
+    flushSignal = nil
 
-      do {
-        while try await group.next() != nil {}
-      } catch {
-        group.cancelAll()
-        while let _ = try? await group.next() {}
-        throw error
-      }
+    if let terminalError {
+      throw terminalError
     }
   }
 
   private func flushIfNeeded() async throws {
-    while let diff = behavior.diff(from: publishedState, to: state) {
-      let oldState = publishedState
+    while let diff = behavior.diff(from: publishedSnapshots.value.state, to: state) {
+      let oldState = publishedSnapshots.value.state
       let newState = state
+      let targetVersion = liveVersion
+      let inferenceID = activeInferenceID
       let durableState = try await behavior.persist(diff, from: oldState, to: newState)
-      publishedState = durableState
-      emit(.stateUpdated(durableState))
+      publishedSnapshots.send(.init(
+        version: targetVersion,
+        state: durableState,
+        inferenceID: inferenceID,
+      ))
     }
   }
 
   // MARK: - Agent Loop
 
-  /// Run the loop until idle: recover → (drain → infer → tools → compact)*
+  /// Run the loop until idle: (drain → infer → execute persisted tools → compact)*
   private func runUntilIdle() async throws {
-    var hasToolResults = recoverStaleToolCalls()
+    var hasToolResults = false
 
-    if !hasToolResults, behavior.needsInference(state: state) {
+    if behavior.needsInference(state: state) {
       hasToolResults = true
     }
 
     while !Task.isCancelled {
+      if let call = behavior.nextToolCall(state: state) {
+        try await executeNextToolCall(call)
+        hasToolResults = true
+        continue
+      }
+
       let drainedInterrupts = behavior.drainInterruptItems(state: &state)
 
       if drainedInterrupts {
@@ -186,14 +210,10 @@ public actor AgentLoop<B: AgentBehavior> {
       let message = try await performInferenceWithRetry(context: context)
       behavior.persistAssistantEntry(message, state: &state)
 
-      let toolCalls = message.content.compactMap { block -> ToolCall? in
-        if case let .toolCall(call) = block { return call }
-        return nil
-      }
-
-      if !toolCalls.isEmpty {
-        try await executeToolCalls(toolCalls)
+      if behavior.nextToolCall(state: state) != nil {
+        try await waitUntilDurableCurrentVersion()
         hasToolResults = true
+        continue
       }
 
       if behavior.shouldCompact(state: state) {
@@ -256,12 +276,11 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   private func performInference(context: Context) async throws -> AssistantMessage {
-    emit(.streamBegan)
-    inflight = []
+    let inferenceID = UUID()
+    beginInferenceObservation(inferenceID)
 
     defer {
-      inflight = nil
-      emit(.streamEnded)
+      endInferenceObservation(inferenceID)
     }
 
     let (deltaStream, deltaContinuation) = AsyncStream<B.StreamAction>.makeStream()
@@ -274,8 +293,7 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       for await delta in deltaStream {
-        inflight?.append(delta)
-        emit(.streamDelta(delta))
+        appendInflight(delta, inferenceID: inferenceID)
       }
 
       guard let message = try await group.next() ?? nil else {
@@ -285,85 +303,108 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  // MARK: - Crash Recovery
-
-  private func recoverStaleToolCalls() -> Bool {
-    let staleIDs = behavior.staleToolCallIDs(in: state)
-    for id in staleIDs {
-      behavior.recoverStaleToolCall(id: id, state: &state)
-    }
-    return !staleIDs.isEmpty
-  }
-
   // MARK: - Tool Execution
 
-  private func executeToolCalls(_ calls: [ToolCall]) async throws {
-    var blocked: [ToolCall] = []
-    var allowed: [ToolCall] = []
-    for call in calls {
-      let argsHash = call.arguments.hashValue
-      let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
-      if count >= ToolCallRepetitionTracker.blockThreshold {
-        blocked.append(call)
-      } else {
-        allowed.append(call)
-      }
+  private func executeNextToolCall(_ call: ToolCall) async throws {
+    let argsHash = call.arguments.hashValue
+    let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
+
+    if count >= ToolCallRepetitionTracker.blockThreshold {
+      let blockedResult = behavior.blockedToolResult(for: call)
+      behavior.persistToolResult(blockedResult, for: call, state: &state)
+      try await waitUntilDurableCurrentVersion()
+      return
     }
 
-    for call in calls {
-      behavior.toolWillExecute(call, state: &state)
+    let execution = behavior.startToolCall(call, state: &state)
+    try await waitUntilDurableCurrentVersion()
+
+    let toolResult = await execution.run()
+    let resultHash = toolResult.hashValue
+    let recordedCount = repetitionTracker.record(
+      toolName: call.name,
+      argsHash: argsHash,
+      resultHash: resultHash,
+    )
+    let finalResult: B.ToolResult = if recordedCount >= ToolCallRepetitionTracker.warningThreshold {
+      behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
+    } else {
+      toolResult
     }
+    behavior.persistToolResult(finalResult, for: call, state: &state)
+    try await waitUntilDurableCurrentVersion()
+  }
 
-    for call in blocked {
-      let error = ToolCallRepetitionError.blocked
-      behavior.toolDidFail(call, error: error, state: &state)
+  // MARK: - Flush Barriers
+
+  private func waitUntilDurableCurrentVersion() async throws {
+    let targetVersion = liveVersion
+    guard publishedSnapshots.value.version < targetVersion else { return }
+
+    hasPendingFlushSignal = true
+    flushSignal?.yield(())
+    for await snapshot in publishedSnapshots {
+      if snapshot.version >= targetVersion {
+        return
+      }
     }
+    throw CancellationError()
+  }
 
-    // Tool calls are executed in transcript order so stateful tools can affect
-    // later tools in the same assistant turn.
-    for call in allowed {
-      let result: Result<B.ToolResult, any Error>
-      do {
-        let toolResult = try await behavior.executeToolCall(call, state: state)
-        result = .success(toolResult)
-      } catch {
-        result = .failure(error)
-      }
+  private func beginInferenceObservation(_ inferenceID: UUID) {
+    activeInferenceID = inferenceID
+    if liveVersion == publishedSnapshots.value.version {
+      let current = publishedSnapshots.value
+      publishedSnapshots.send(.init(
+        version: current.version,
+        state: current.state,
+        inferenceID: inferenceID,
+      ))
+    }
+    streamingSnapshots.send(.init(inferenceID: inferenceID, actions: []))
+  }
 
-      switch result {
-      case let .success(toolResult):
-        let argsHash = call.arguments.hashValue
-        let resultHash = toolResult.hashValue
-        let count = repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: resultHash,
-        )
-        let finalResult: B.ToolResult = if count >= ToolCallRepetitionTracker.warningThreshold {
-          behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
-        } else {
-          toolResult
-        }
-        behavior.toolDidExecute(call, result: finalResult, state: &state)
-      case let .failure(error):
-        let argsHash = call.arguments.hashValue
-        let errorHash = String(describing: error).hashValue
-        repetitionTracker.record(
-          toolName: call.name,
-          argsHash: argsHash,
-          resultHash: errorHash,
-        )
-        behavior.toolDidFail(call, error: error, state: &state)
-      }
+  private func appendInflight(_ delta: B.StreamAction, inferenceID: UUID) {
+    let current = streamingSnapshots.value
+    guard current.inferenceID == inferenceID else { return }
+    var actions = current.actions ?? []
+    actions.append(delta)
+    streamingSnapshots.send(.init(inferenceID: inferenceID, actions: actions))
+  }
+
+  private func endInferenceObservation(_ inferenceID: UUID) {
+    if activeInferenceID == inferenceID {
+      activeInferenceID = nil
+    }
+    if liveVersion == publishedSnapshots.value.version,
+       publishedSnapshots.value.inferenceID == inferenceID
+    {
+      let current = publishedSnapshots.value
+      publishedSnapshots.send(.init(
+        version: current.version,
+        state: current.state,
+        inferenceID: nil,
+      ))
+    }
+    if streamingSnapshots.value.inferenceID == inferenceID {
+      streamingSnapshots.send(.init(inferenceID: nil, actions: nil))
     }
   }
 
-  // MARK: - Emit
-
-  private func emit(_ event: AgentLoopEvent<B.State, B.StreamAction>) {
-    for (_, continuation) in observers {
-      continuation.yield(event)
+  private static func makeObservedState(
+    published: PublishedSnapshot<B.State>,
+    streaming: StreamingSnapshot<B.StreamAction>,
+  ) -> AgentLoopObservedState<B.State, B.StreamAction> {
+    let inflight: [B.StreamAction]? = if published.inferenceID == streaming.inferenceID {
+      streaming.actions
+    } else {
+      nil
     }
+    return .init(
+      state: published.state,
+      inflightID: published.inferenceID,
+      inflight: inflight,
+    )
   }
 
   private func consumePendingWorkSignal() {
