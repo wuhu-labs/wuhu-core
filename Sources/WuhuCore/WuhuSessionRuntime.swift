@@ -27,9 +27,7 @@ actor WuhuSessionRuntime {
     sessionID: SessionID,
     store: SQLiteSessionStore,
     runnerRegistry: RunnerRegistry,
-    asyncBashRegistry: WuhuAsyncBashRegistry,
     braveSearchAPIKey: String?,
-    ownerID: String,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
@@ -42,14 +40,7 @@ actor WuhuSessionRuntime {
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
-    runtimeConfig = WuhuSessionRuntimeConfig(
-      asyncBash: .init(
-        registry: asyncBashRegistry,
-        sessionID: sessionID.rawValue,
-        ownerID: ownerID,
-      ),
-      braveSearchAPIKey: braveSearchAPIKey,
-    )
+    runtimeConfig = WuhuSessionRuntimeConfig(braveSearchAPIKey: braveSearchAPIKey)
     behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore, streamFn: streamFn)
   }
 

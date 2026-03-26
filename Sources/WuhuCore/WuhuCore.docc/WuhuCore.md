@@ -19,7 +19,6 @@ See: <doc:SQLiteSchema>
 - `SQLiteSessionStore` is an `actor` that wraps a `GRDB.DatabaseQueue`.
 - `WuhuService` is an `actor` that:
   - owns an in-process live event hub (`WuhuLiveEventHub`)
-  - starts long-lived background listeners (for example async-bash completion routing)
   - routes API calls to a per-session `WuhuSessionRuntime`
 - `WuhuSessionRuntime` is a per-session `actor` that:
   - owns a long-lived `AgentLoop<WuhuSessionBehavior>`
@@ -43,7 +42,6 @@ All implementation in this project is LLM-generated. Contract documents and the 
 - <doc:SQLiteSchema>
 - <doc:SessionFollow>
 - <doc:AgentLoopTasks>
-- <doc:AsyncBash>
 - <doc:ContextFiles>
 - <doc:ServerClient>
 - <doc:ServerRunner>
