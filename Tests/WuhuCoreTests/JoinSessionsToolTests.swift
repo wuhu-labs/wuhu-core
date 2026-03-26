@@ -74,11 +74,9 @@ struct JoinSessionsToolTests {
 
   /// Build the join_sessions tool for a given parent session, using the real WuhuService.
   private func getJoinSessionsTool(service: WuhuService, parentSession: WuhuSession) async -> AnyAgentTool? {
-    let baseTools = WuhuTools.codingAgentTools(cwdProvider: { "/tmp" })
     let allTools = await service.agentToolset(
       currentSessionID: parentSession.id,
       hasPrimaryMount: false,
-      baseTools: baseTools,
     )
     return allTools.first { $0.tool.name == "join_sessions" }
   }

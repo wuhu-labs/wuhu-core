@@ -23,11 +23,8 @@ extension WuhuService {
   func agentToolset(
     currentSessionID: String,
     hasPrimaryMount: Bool,
-    baseTools: [AnyAgentTool],
   ) -> [AnyAgentTool] {
-    var tools = baseTools
-    tools.append(contentsOf: agentManagementTools(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount))
-    return tools
+    agentManagementTools(currentSessionID: currentSessionID, hasPrimaryMount: hasPrimaryMount)
   }
 
   private func agentManagementTools(currentSessionID: String, hasPrimaryMount: Bool) -> [AnyAgentTool] {

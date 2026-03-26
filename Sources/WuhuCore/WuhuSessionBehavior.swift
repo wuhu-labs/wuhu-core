@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import WuhuAI
 import WuhuAPI
@@ -326,7 +327,7 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
     let session = try await store.getSession(id: sessionID.rawValue)
-    let tools = await runtimeConfig.tools(for: stateForToolCatalog(session: session))
+    let tools = await tools(for: stateForToolCatalog(session: session))
 
     let resolved = WuhuModelCatalog.resolveAlias(session.model)
     let provider = session.provider.piProvider
@@ -384,7 +385,7 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func executeToolCall(_ call: ToolCall, state: State) async throws -> ToolResult {
-    let tools = await runtimeConfig.tools(for: state)
+    let tools = await tools(for: state)
     guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
       throw WuhuAIError.unsupported("Unknown tool: \(call.name)")
     }
@@ -1093,6 +1094,45 @@ struct WuhuSessionBehavior: AgentBehavior {
       steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
       followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
     )
+  }
+
+  private func tools(for state: State) async -> [AnyAgentTool] {
+    let codingContext = await runtimeConfig.codingToolContext()
+    let mountResolver = makeMountResolver(state: state)
+    let codingTools = WuhuTools.codingAgentTools(
+      cwdProvider: { state.session.cwd },
+      mountResolver: mountResolver,
+      asyncBash: codingContext.asyncBash,
+      braveSearchAPIKey: codingContext.braveSearchAPIKey,
+    )
+    let serviceTools = await runtimeConfig.tools(for: state)
+    return codingTools + serviceTools
+  }
+
+  private func makeMountResolver(state: State) -> MountResolver {
+    @Dependency(\.runnerLocator) var runnerLocator
+    return { rawName in
+      let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+      if let mountName, !mountName.isEmpty {
+        guard let mount = state.mounts.mount(named: mountName) else {
+          throw MountResolutionError.mountNotFound(name: mountName)
+        }
+        let runner = try await runnerLocator.resolve(mount.runnerID)
+        return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+      }
+
+      if let mount = state.mounts.primaryMount {
+        let runner = try await runnerLocator.resolve(mount.runnerID)
+        return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
+      }
+
+      guard let cwd = state.session.cwd else {
+        throw MountResolutionError.noCwd
+      }
+      let runner = try await runnerLocator.resolve(.local)
+      return ResolvedMount(runner: runner, cwd: cwd)
+    }
   }
 }
 

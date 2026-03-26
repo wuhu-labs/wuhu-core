@@ -47,47 +47,11 @@ struct ContractSessionCoreTests {
     let config = WuhuSessionRuntimeConfig()
     let blobStore = WuhuBlobStore(rootDirectory: NSTemporaryDirectory() + "wuhu-test-blobs-\(UUID().uuidString)")
     let service = WuhuService(store: store, blobStore: blobStore)
-    let runnerRegistry = RunnerRegistry()
 
     await config.setToolProvider { [service] state in
-      let mountResolver: MountResolver = { mountName in
-        let trimmed = mountName?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let trimmed, !trimmed.isEmpty {
-          guard let mount = state.mounts.mount(named: trimmed) else {
-            throw MountResolutionError.mountNotFound(name: trimmed)
-          }
-          guard let runner = await runnerRegistry.get(mount.runnerID) else {
-            throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-          }
-          return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-        }
-
-        if let mount = state.mounts.primaryMount {
-          guard let runner = await runnerRegistry.get(mount.runnerID) else {
-            throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-          }
-          return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-        }
-
-        guard let cwd = state.session.cwd else {
-          throw MountResolutionError.noCwd
-        }
-        guard let runner = await runnerRegistry.get(.local) else {
-          throw MountResolutionError.runnerUnavailable(runnerID: .local)
-        }
-        return ResolvedMount(runner: runner, cwd: cwd)
-      }
-
-      let baseTools = WuhuTools.codingAgentTools(
-        cwdProvider: { state.session.cwd },
-        mountResolver: mountResolver,
-      )
-
       return await service.agentToolset(
         currentSessionID: state.session.id,
         hasPrimaryMount: state.mounts.primaryMount != nil,
-        baseTools: baseTools,
       )
     }
 

@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 import WuhuAI
 import WuhuAPI
@@ -26,6 +27,9 @@ actor WuhuSessionRuntime {
     sessionID: SessionID,
     store: SQLiteSessionStore,
     runnerRegistry: RunnerRegistry,
+    asyncBashRegistry: WuhuAsyncBashRegistry,
+    braveSearchAPIKey: String?,
+    ownerID: String,
     eventHub: WuhuLiveEventHub,
     subscriptionHub: WuhuSessionSubscriptionHub,
     blobStore: WuhuBlobStore,
@@ -38,7 +42,14 @@ actor WuhuSessionRuntime {
     self.eventHub = eventHub
     self.subscriptionHub = subscriptionHub
     self.onIdle = onIdle
-    runtimeConfig = WuhuSessionRuntimeConfig()
+    runtimeConfig = WuhuSessionRuntimeConfig(
+      asyncBash: .init(
+        registry: asyncBashRegistry,
+        sessionID: sessionID.rawValue,
+        ownerID: ownerID,
+      ),
+      braveSearchAPIKey: braveSearchAPIKey,
+    )
     behavior = WuhuSessionBehavior(sessionID: sessionID, store: store, runtimeConfig: runtimeConfig, blobStore: blobStore, streamFn: streamFn)
   }
 
@@ -59,10 +70,14 @@ actor WuhuSessionRuntime {
       }
     }
 
-    startTask = Task { [loop, sessionID = sessionID.rawValue] in
+    startTask = Task { [loop, sessionID = sessionID.rawValue, runnerRegistry] in
       while !Task.isCancelled {
         do {
-          try await loop.start()
+          try await withDependencies {
+            $0.runnerLocator = .live(registry: runnerRegistry)
+          } operation: {
+            try await loop.start()
+          }
           return
         } catch is CancellationError {
           return

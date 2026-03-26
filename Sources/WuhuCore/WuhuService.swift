@@ -94,6 +94,9 @@ public actor WuhuService {
       sessionID: .init(rawValue: sessionID),
       store: store,
       runnerRegistry: runnerRegistry,
+      asyncBashRegistry: asyncBashRegistry,
+      braveSearchAPIKey: braveSearchAPIKey,
+      ownerID: instanceID,
       eventHub: eventHub,
       subscriptionHub: subscriptionHub,
       blobStore: blobStore,
@@ -687,27 +690,14 @@ enum WuhuContextRenderer {
 extension WuhuService: SessionCommanding, SessionSubscribing {
   public func enqueue(sessionID: SessionID, message: QueuedUserMessage, lane: UserQueueLane) async throws -> QueueItemID {
     await ensureAsyncBashRouter()
-    let asyncBash = WuhuAsyncBashToolContext(registry: asyncBashRegistry, sessionID: sessionID.rawValue, ownerID: instanceID)
     let sid = sessionID.rawValue
     let runtime = runtime(for: sid)
     await runtime.setToolProvider { [weak self] state in
       guard let self else { return [] }
 
-      let mountResolver: MountResolver = { [runnerRegistry = self.runnerRegistry] mountName in
-        try await Self.resolveMount(named: mountName, in: state, runnerRegistry: runnerRegistry)
-      }
-
-      let baseTools = WuhuTools.codingAgentTools(
-        cwdProvider: { state.session.cwd },
-        mountResolver: mountResolver,
-        asyncBash: asyncBash,
-        braveSearchAPIKey: braveSearchAPIKey,
-      )
-
       return await agentToolset(
         currentSessionID: state.session.id,
         hasPrimaryMount: state.mounts.primaryMount != nil,
-        baseTools: baseTools,
       )
     }
     try await runtime.ensureStarted()
@@ -822,40 +812,5 @@ extension WuhuService: SessionCommanding, SessionSubscribing {
       steer: steer,
       followUp: followUp,
     )
-  }
-}
-
-private extension WuhuService {
-  static func resolveMount(
-    named rawName: String?,
-    in state: WuhuSessionLoopState,
-    runnerRegistry: RunnerRegistry,
-  ) async throws -> ResolvedMount {
-    let mountName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-    if let mountName, !mountName.isEmpty {
-      guard let mount = state.mounts.mount(named: mountName) else {
-        throw MountResolutionError.mountNotFound(name: mountName)
-      }
-      guard let runner = await runnerRegistry.get(mount.runnerID) else {
-        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-      }
-      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-    }
-
-    if let mount = state.mounts.primaryMount {
-      guard let runner = await runnerRegistry.get(mount.runnerID) else {
-        throw MountResolutionError.runnerUnavailable(runnerID: mount.runnerID)
-      }
-      return ResolvedMount(runner: runner, cwd: mount.path, mount: mount)
-    }
-
-    guard let cwd = state.session.cwd else {
-      throw MountResolutionError.noCwd
-    }
-    guard let runner = await runnerRegistry.get(.local) else {
-      throw MountResolutionError.runnerUnavailable(runnerID: .local)
-    }
-    return ResolvedMount(runner: runner, cwd: cwd)
   }
 }
