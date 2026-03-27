@@ -1,14 +1,5 @@
 import WuhuAI
 
-public func inferWithRetry<Context, StreamAction>(
-  context: Context,
-  stream: AgentStreamSink<StreamAction>,
-  infer: @Sendable (Context, AgentStreamSink<StreamAction>) async throws -> AssistantMessage
-) -> AssistantMessage {
-
-  fatalError()
-}
-
 
 // this is a dump ground
 

@@ -424,7 +424,9 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func blockedToolResult(for call: ToolCall) -> ToolResult {
-    makeToolErrorResult(call: call, errorDescription: "\(ToolCallRepetitionError.blocked)")
+
+//    makeToolErrorResult(call: call, errorDescription: "\(ToolCallRepetitionError.blocked)")
+    makeToolErrorResult(call: call, errorDescription: "Tool call blocked")
   }
 
   func appendText(_ text: String, to result: AgentToolResult) -> AgentToolResult {

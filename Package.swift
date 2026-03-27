@@ -4,8 +4,8 @@ import PackageDescription
 let package = Package(
   name: "wuhu-core",
   platforms: [
-    .macOS(.v14),
-    .iOS(.v16),
+    .macOS(.v15),
+    .iOS(.v18),
   ],
   products: [
     .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
@@ -37,6 +37,7 @@ let package = Package(
     ),
     .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.1.0"),
     .package(url: "https://github.com/apple/swift-distributed-tracing.git", from: "1.2.0"),
+    .package(url: "https://github.com/apple/swift-log.git", from: "1.10.0"),
     .package(url: "https://github.com/swift-otel/swift-otel.git", from: "1.0.0"),
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
   ],
@@ -73,6 +74,7 @@ let package = Package(
         .product(name: "WuhuAI", package: "wuhu-ai"),
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "AsyncExtensions", package: "AsyncExtensions"),
+        .product(name: "Logging", package: "swift-log"),
       ],
     ),
     .target(
