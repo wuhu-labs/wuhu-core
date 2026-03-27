@@ -31,8 +31,7 @@ public actor AgentLoop<B: AgentBehavior> {
     didSet {
       guard state != oldValue else { return }
       liveVersion += 1
-      hasPendingFlushSignal = true
-      flushSignal?.yield(())
+      flushSignal.yield(())
     }
   }
 
@@ -43,11 +42,19 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: Lifecycle
 
-  private var started = false
-  private var workSignal: AsyncStream<Void>.Continuation?
-  private var flushSignal: AsyncStream<Void>.Continuation?
-  private var hasPendingWorkSignal = false
-  private var hasPendingFlushSignal = false
+  private enum Lifecycle {
+    case ready
+    case running
+    case finished
+  }
+
+  private var lifecycle: Lifecycle = .ready
+  private var stopRequested = false
+  private var runningWork = false
+  private let workStream: AsyncStream<Void>
+  private let workSignal: AsyncStream<Void>.Continuation
+  private let flushStream: AsyncStream<Void>
+  private let flushSignal: AsyncStream<Void>.Continuation
 
   // MARK: Tool Call Repetition
 
@@ -56,10 +63,21 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: Init
 
   public init(behavior: B, initialState: B.State) {
+    let (workStream, workSignal) = AsyncStream<Void>.makeStream(
+      bufferingPolicy: .bufferingNewest(1),
+    )
+    let (flushStream, flushSignal) = AsyncStream<Void>.makeStream(
+      bufferingPolicy: .bufferingNewest(1),
+    )
+
     self.behavior = behavior
     state = initialState
     publishedSnapshots = AsyncCurrentValueSubject(.init(version: 0, state: initialState, inferenceID: nil))
     streamingSnapshots = AsyncCurrentValueSubject(.init(inferenceID: nil, actions: nil))
+    self.workStream = workStream
+    self.workSignal = workSignal
+    self.flushStream = flushStream
+    self.flushSignal = flushSignal
   }
 
   // MARK: - Observation
@@ -85,11 +103,18 @@ public actor AgentLoop<B: AgentBehavior> {
   /// The behavior updates the live in-memory state first. The loop persists the
   /// diff to durable storage and only then publishes the new state.
   public func send(_ action: B.ExternalAction) async {
+    guard lifecycle != .finished, !stopRequested else { return }
     let oldState = state
     behavior.handle(action, state: &state)
     guard state != oldState else { return }
-    hasPendingWorkSignal = true
-    workSignal?.yield(())
+    workSignal.yield(())
+  }
+
+  public func requestStop() {
+    guard lifecycle != .finished else { return }
+    stopRequested = true
+    workSignal.yield(())
+    flushSignal.yield(())
   }
 
   // MARK: - Lifecycle
@@ -97,45 +122,28 @@ public actor AgentLoop<B: AgentBehavior> {
   /// Start the agent loop. Blocks until cancelled.
   ///
   /// - Precondition: Must not be called more than once.
-  public func start() async throws {
-    precondition(!started, "AgentLoop.start() called more than once")
-    started = true
-
-    let (workStream, workContinuation) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-    let (flushStream, flushContinuation) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-    workSignal = workContinuation
-    flushSignal = flushContinuation
-
-    if hasPendingWorkSignal || behavior.hasWork(state: state) || behavior.needsInference(state: state) {
-      workContinuation.yield(())
-    }
-    if hasPendingFlushSignal {
-      flushContinuation.yield(())
-    }
+  public func start() async throws -> B.State {
+    precondition(lifecycle == .ready, "AgentLoop.start() called more than once")
+    lifecycle = .running
 
     var terminalError: (any Error)?
     do {
       try await withThrowingTaskGroup(of: Void.self) { group in
         group.addTask { [weak self] in
           guard let self else { return }
-          for await _ in workStream {
-            try Task.checkCancellation()
-            await consumePendingWorkSignal()
-            try await runUntilIdle()
-          }
+          try await workLoop()
         }
 
         group.addTask { [weak self] in
           guard let self else { return }
-          for await _ in flushStream {
-            try Task.checkCancellation()
-            await consumePendingFlushSignal()
-            try await flushIfNeeded()
-          }
+          try await flushLoop()
+        }
+
+        if behavior.hasWork(state: state) || behavior.needsInference(state: state) {
+          workSignal.yield(())
+        }
+        if publishedSnapshots.value.version < liveVersion {
+          flushSignal.yield(())
         }
 
         do {
@@ -150,14 +158,50 @@ public actor AgentLoop<B: AgentBehavior> {
       terminalError = error
     }
 
-    started = false
-    workContinuation.finish()
-    flushContinuation.finish()
-    workSignal = nil
-    flushSignal = nil
+    lifecycle = .finished
+    workSignal.finish()
+    flushSignal.finish()
+    publishedSnapshots.send(.finished)
+    streamingSnapshots.send(.finished)
 
     if let terminalError {
       throw terminalError
+    }
+
+    return publishedSnapshots.value.state
+  }
+
+  private func workLoop() async throws {
+    for await _ in workStream {
+      try Task.checkCancellation()
+
+      if shouldFinishWorkLoop {
+        break
+      }
+
+      runningWork = true
+      do {
+        try await runUntilIdle()
+      } catch {
+        runningWork = false
+        throw error
+      }
+      runningWork = false
+
+      if shouldStopWorkLoop {
+        flushSignal.yield(())
+        break
+      }
+    }
+  }
+
+  private func flushLoop() async throws {
+    for await _ in flushStream {
+      try Task.checkCancellation()
+      try await flushIfNeeded()
+      if shouldFinishFlushLoop {
+        break
+      }
     }
   }
 
@@ -222,8 +266,7 @@ public actor AgentLoop<B: AgentBehavior> {
         if state == baseState {
           state = compactedState
         } else if behavior.shouldCompact(state: state) {
-          hasPendingWorkSignal = true
-          workSignal?.yield(())
+          workSignal.yield(())
         }
       }
     }
@@ -238,11 +281,14 @@ public actor AgentLoop<B: AgentBehavior> {
   private func performInferenceWithRetry(context: Context) async throws -> AssistantMessage {
     var lastError: (any Error)?
     for attempt in 0 ... Self.maxInferenceRetries {
+      if stopRequested {
+        throw CancellationError()
+      }
+
       if attempt > 0 {
         let delay = min(pow(2, Double(attempt - 1)), 60)
         let jitter = delay * Double.random(in: -0.25 ... 0.25)
-        let total = UInt64((delay + jitter) * 1_000_000_000)
-        try await Task.sleep(nanoseconds: total)
+        try await sleepBackoff(seconds: delay + jitter)
       }
 
       do {
@@ -255,6 +301,19 @@ public actor AgentLoop<B: AgentBehavior> {
       }
     }
     throw lastError ?? AgentLoopError.inferenceProducedNoResult
+  }
+
+  private func sleepBackoff(seconds: Double) async throws {
+    var remaining = max(0, seconds)
+    while remaining > 0 {
+      if stopRequested {
+        throw CancellationError()
+      }
+
+      let slice = min(0.1, remaining)
+      try await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
+      remaining -= slice
+    }
   }
 
   private nonisolated static func isTransientError(_ error: any Error) -> Bool {
@@ -341,8 +400,7 @@ public actor AgentLoop<B: AgentBehavior> {
     let targetVersion = liveVersion
     guard publishedSnapshots.value.version < targetVersion else { return }
 
-    hasPendingFlushSignal = true
-    flushSignal?.yield(())
+    flushSignal.yield(())
     for await snapshot in publishedSnapshots {
       if snapshot.version >= targetVersion {
         return
@@ -407,12 +465,21 @@ public actor AgentLoop<B: AgentBehavior> {
     )
   }
 
-  private func consumePendingWorkSignal() {
-    hasPendingWorkSignal = false
+  private var shouldStopWorkLoop: Bool {
+    stopRequested
+      && !runningWork
+      && activeInferenceID == nil
+      && !behavior.hasWork(state: state)
+      && !behavior.needsInference(state: state)
+      && behavior.nextToolCall(state: state) == nil
   }
 
-  private func consumePendingFlushSignal() {
-    hasPendingFlushSignal = false
+  private var shouldFinishWorkLoop: Bool {
+    shouldStopWorkLoop && publishedSnapshots.value.version >= liveVersion
+  }
+
+  private var shouldFinishFlushLoop: Bool {
+    shouldStopWorkLoop && publishedSnapshots.value.version >= liveVersion
   }
 }
 

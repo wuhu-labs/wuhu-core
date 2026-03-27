@@ -15,7 +15,7 @@ actor WuhuSessionRuntime {
   private let behavior: WuhuSessionBehavior
   private var loop: AgentLoop<WuhuSessionBehavior>?
 
-  private var startTask: Task<Void, Never>?
+  private var startTask: Task<WuhuSessionLoopState?, Never>?
   private var observeTask: Task<Void, Never>?
 
   private var streaming = false
@@ -46,50 +46,47 @@ actor WuhuSessionRuntime {
   }
 
   func ensureStarted() async throws {
-    if startTask != nil, loop != nil { return }
+    if startTask != nil { return }
 
     let initialState = try await behavior.loadState()
-    let loop = AgentLoop(behavior: behavior, initialState: initialState)
-    self.loop = loop
+    let loop = try await installLoop(initialState: initialState)
 
-    let observation = await loop.observe()
-    var iterator = observation.makeAsyncIterator()
-    guard let initialObservation = try await iterator.next() else {
-      throw CancellationError()
-    }
-    await setInitialObservationState(initialObservation)
+    startTask = Task { [weak self, loop, sessionID = sessionID.rawValue, runnerRegistry] in
+      guard let self else { return nil }
+      var currentLoop = loop
 
-    observeTask = Task { [weak self] in
-      guard let self else { return }
-      do {
-        while let snapshot = try await iterator.next() {
-          await handleObservationSnapshot(snapshot)
-        }
-      } catch {
-        if !(error is CancellationError) {
-          let line = "[WuhuSessionRuntime] observation failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
-          FileHandle.standardError.write(Data(line.utf8))
-        }
-      }
-    }
-
-    startTask = Task { [loop, sessionID = sessionID.rawValue, runnerRegistry] in
       while !Task.isCancelled {
         do {
-          try await withDependencies {
+          let finalState = try await withDependencies {
             $0.runnerLocator = .live(registry: runnerRegistry)
           } operation: {
-            try await loop.start()
+            try await currentLoop.start()
           }
-          return
+          await finishInstalledLoop()
+          return finalState
         } catch is CancellationError {
-          return
+          await finishInstalledLoop()
+          return nil
         } catch {
           let line = "[WuhuSessionRuntime] loop.start() failed for session '\(sessionID)': \(String(describing: error))\n"
           FileHandle.standardError.write(Data(line.utf8))
+
+          do {
+            let reloadedState = try await behavior.loadState()
+            currentLoop = try await replaceLoop(initialState: reloadedState)
+          } catch {
+            let reloadLine = "[WuhuSessionRuntime] loop restart load failed for session '\(sessionID)': \(String(describing: error))\n"
+            FileHandle.standardError.write(Data(reloadLine.utf8))
+            await finishInstalledLoop()
+            return nil
+          }
+
           try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
       }
+
+      await finishInstalledLoop()
+      return nil
     }
   }
 
@@ -178,22 +175,16 @@ actor WuhuSessionRuntime {
   }
 
   func stop() async {
+    await loop?.requestStop()
+
     let start = startTask
-    let observe = observeTask
-
-    start?.cancel()
-    observe?.cancel()
-
-    _ = await start?.result
-    _ = await observe?.result
+    let finalState = await start?.value ?? nil
 
     startTask = nil
-    observeTask = nil
-    loop = nil
     streaming = false
     inflightText = ""
     inflightID = nil
-    observedState = .empty
+    observedState = finalState ?? .empty
     hasAcceptedInMemoryWork = false
   }
 
@@ -368,5 +359,51 @@ actor WuhuSessionRuntime {
     if diff.statusChanged {
       await subscriptionHub.publish(sessionID: sessionID.rawValue, event: .statusUpdated(nextState.status))
     }
+  }
+
+  private func installLoop(initialState: WuhuSessionLoopState) async throws -> AgentLoop<WuhuSessionBehavior> {
+    let loop = AgentLoop(behavior: behavior, initialState: initialState)
+    self.loop = loop
+
+    let observation = await loop.observe()
+    var iterator = observation.makeAsyncIterator()
+    guard let initialObservation = try await iterator.next() else {
+      throw CancellationError()
+    }
+    await setInitialObservationState(initialObservation)
+
+    observeTask = Task { [weak self] in
+      guard let self else { return }
+      do {
+        while let snapshot = try await iterator.next() {
+          await handleObservationSnapshot(snapshot)
+        }
+      } catch {
+        if !(error is CancellationError) {
+          let line = "[WuhuSessionRuntime] observation failed for session '\(sessionID.rawValue)': \(String(describing: error))\n"
+          FileHandle.standardError.write(Data(line.utf8))
+        }
+      }
+    }
+
+    return loop
+  }
+
+  private func replaceLoop(initialState: WuhuSessionLoopState) async throws -> AgentLoop<WuhuSessionBehavior> {
+    await finishObservationTask()
+    loop = nil
+    return try await installLoop(initialState: initialState)
+  }
+
+  private func finishInstalledLoop() async {
+    await finishObservationTask()
+    loop = nil
+    observeTask = nil
+  }
+
+  private func finishObservationTask() async {
+    let observe = observeTask
+    observeTask = nil
+    _ = await observe?.result
   }
 }
