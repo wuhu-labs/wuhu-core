@@ -41,7 +41,9 @@ Long-running IO — inference and tool execution — runs **outside** serializat
 
 ## Lifecycle
 
-The loop is started once via ``AgentLoop/start()``. It waits for a signal (triggered by ``send(_:)``), runs the loop inline until idle, then returns to waiting. No unstructured tasks — the loop runs within `start()`. Cancelling the start task tears down everything via structured concurrency.
+Each ``AgentLoop`` is single-use. ``AgentLoop/start()`` owns exactly one run lifetime and returns the final durable state when the loop stops. The wrapper layer (for Wuhu, ``WuhuSessionRuntime``) is responsible for constructing a fresh loop instance if it wants to retry after failure.
+
+The loop waits for signals (triggered by ``send(_:)``), runs until idle, then returns to waiting. ``requestStop()`` asks the loop to finish at a safe point and flush pending durable work before `start()` returns.
 
 There are no explicit running/idle markers. The behavior manages a `has_work` flag in the database atomically with other operations (set true on enqueue, set false when queues are empty after the last inference).
 
