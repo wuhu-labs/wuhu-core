@@ -11,6 +11,7 @@ let package = Package(
     .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
     .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
+    .library(name: "AgentLoopModule", targets: ["AgentLoopModule"]),
     .library(name: "WuhuCore", targets: ["WuhuCore"]),
     .library(name: "WuhuClient", targets: ["WuhuClient"]),
     .library(name: "WuhuServer", targets: ["WuhuServer"]),
@@ -67,8 +68,17 @@ let package = Package(
       ],
     ),
     .target(
+      name: "AgentLoopModule",
+      dependencies: [
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+        .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
+        .product(name: "AsyncExtensions", package: "AsyncExtensions"),
+      ],
+    ),
+    .target(
       name: "WuhuCore",
       dependencies: [
+        "AgentLoopModule",
         "WuhuCoreClient",
         "WuhuAPI",
         .product(name: "WuhuAI", package: "wuhu-ai"),
@@ -136,6 +146,12 @@ let package = Package(
       dependencies: [
         "WuhuCore",
         .product(name: "WuhuAI", package: "wuhu-ai"),
+      ],
+    ),
+    .testTarget(
+      name: "AgentLoopTests",
+      dependencies: [
+        "AgentLoopModule",
       ],
     ),
     .testTarget(

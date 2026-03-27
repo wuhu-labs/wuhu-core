@@ -56,10 +56,6 @@ public actor AgentLoop<B: AgentBehavior> {
   private let flushStream: AsyncStream<Void>
   private let flushSignal: AsyncStream<Void>.Continuation
 
-  // MARK: Tool Call Repetition
-
-  private var repetitionTracker = ToolCallRepetitionTracker()
-
   // MARK: Init
 
   public init(behavior: B, initialState: B.State) {
@@ -239,10 +235,6 @@ public actor AgentLoop<B: AgentBehavior> {
 
       let drainedInterrupts = behavior.drainInterruptItems(state: &state)
 
-      if drainedInterrupts {
-        repetitionTracker.reset()
-      }
-
       if !drainedInterrupts, !hasToolResults {
         let drainedTurnItems = behavior.drainTurnItems(state: &state)
         if !drainedTurnItems { break }
@@ -251,7 +243,7 @@ public actor AgentLoop<B: AgentBehavior> {
       hasToolResults = false
 
       let context = behavior.buildContext(state: state)
-      let message = try await performInferenceWithRetry(context: context)
+      let message = try await performInference(context: context)
       behavior.persistAssistantEntry(message, state: &state)
 
       if behavior.nextToolCall(state: state) != nil {
@@ -261,78 +253,12 @@ public actor AgentLoop<B: AgentBehavior> {
       }
 
       if behavior.shouldCompact(state: state) {
-        let baseState = state
-        let compactedState = try await behavior.performCompaction(state: baseState)
-        if state == baseState {
-          state = compactedState
-        } else if behavior.shouldCompact(state: state) {
-          workSignal.yield(())
-        }
+        state = try await behavior.performCompaction(state: state)
       }
     }
   }
 
   // MARK: - Inference (with streaming + retry)
-
-  private static var maxInferenceRetries: Int {
-    10
-  }
-
-  private func performInferenceWithRetry(context: Context) async throws -> AssistantMessage {
-    var lastError: (any Error)?
-    for attempt in 0 ... Self.maxInferenceRetries {
-      if stopRequested {
-        throw CancellationError()
-      }
-
-      if attempt > 0 {
-        let delay = min(pow(2, Double(attempt - 1)), 60)
-        let jitter = delay * Double.random(in: -0.25 ... 0.25)
-        try await sleepBackoff(seconds: delay + jitter)
-      }
-
-      do {
-        return try await performInference(context: context)
-      } catch is CancellationError {
-        throw CancellationError()
-      } catch {
-        lastError = error
-        guard Self.isTransientError(error) else { throw error }
-      }
-    }
-    throw lastError ?? AgentLoopError.inferenceProducedNoResult
-  }
-
-  private func sleepBackoff(seconds: Double) async throws {
-    var remaining = max(0, seconds)
-    while remaining > 0 {
-      if stopRequested {
-        throw CancellationError()
-      }
-
-      let slice = min(0.1, remaining)
-      try await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
-      remaining -= slice
-    }
-  }
-
-  private nonisolated static func isTransientError(_ error: any Error) -> Bool {
-    if let piError = error as? WuhuAIError,
-       case let .httpStatus(code, _) = piError
-    {
-      return code == 429 || code == 500 || code == 502 || code == 503 || code == 529
-    }
-
-    let description = String(describing: error)
-    if description.contains("remoteConnectionClosed")
-      || description.contains("connectTimeout")
-      || description.contains("readTimeout")
-    {
-      return true
-    }
-
-    return false
-  }
 
   private func performInference(context: Context) async throws -> AssistantMessage {
     let inferenceID = UUID()
@@ -345,53 +271,28 @@ public actor AgentLoop<B: AgentBehavior> {
     let (deltaStream, deltaContinuation) = AsyncStream<B.StreamAction>.makeStream()
     let sink = AgentStreamSink<B.StreamAction> { deltaContinuation.yield($0) }
 
-    return try await withThrowingTaskGroup(of: AssistantMessage?.self) { group in
-      group.addTask { [behavior] in
-        defer { deltaContinuation.finish() }
-        return try await behavior.infer(context: context, stream: sink)
+    return try await withThrowingTaskGroup { group in
+      group.addTask {
+        for await delta in deltaStream {
+          await self.appendInflight(delta, inferenceID: inferenceID)
+        }
+      }
+      defer {
+        group.cancelAll()
+        deltaContinuation.finish()
       }
 
-      for await delta in deltaStream {
-        appendInflight(delta, inferenceID: inferenceID)
-      }
-
-      guard let message = try await group.next() ?? nil else {
-        throw AgentLoopError.inferenceProducedNoResult
-      }
-      return message
+      return try await behavior.infer(context: context, stream: sink)
     }
   }
 
   // MARK: - Tool Execution
 
   private func executeNextToolCall(_ call: ToolCall) async throws {
-    let argsHash = call.arguments.hashValue
-    let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
-
-    if count >= ToolCallRepetitionTracker.blockThreshold {
-      let blockedResult = behavior.blockedToolResult(for: call)
-      behavior.persistToolResult(blockedResult, for: call, state: &state)
-      try await waitUntilDurableCurrentVersion()
-      return
-    }
-
     let execution = behavior.startToolCall(call, state: &state)
     try await waitUntilDurableCurrentVersion()
-
     let toolResult = await execution.run()
-    let resultHash = toolResult.hashValue
-    let recordedCount = repetitionTracker.record(
-      toolName: call.name,
-      argsHash: argsHash,
-      resultHash: resultHash,
-    )
-    let finalResult: B.ToolResult = if recordedCount >= ToolCallRepetitionTracker.warningThreshold {
-      behavior.appendText(ToolCallRepetitionTracker.warningText, to: toolResult)
-    } else {
-      toolResult
-    }
-    behavior.persistToolResult(finalResult, for: call, state: &state)
-    try await waitUntilDurableCurrentVersion()
+    behavior.persistToolResult(toolResult, for: call, state: &state)
   }
 
   // MARK: - Flush Barriers
@@ -412,12 +313,7 @@ public actor AgentLoop<B: AgentBehavior> {
   private func beginInferenceObservation(_ inferenceID: UUID) {
     activeInferenceID = inferenceID
     if liveVersion == publishedSnapshots.value.version {
-      let current = publishedSnapshots.value
-      publishedSnapshots.send(.init(
-        version: current.version,
-        state: current.state,
-        inferenceID: inferenceID,
-      ))
+      publishedSnapshots.value.inferenceID = inferenceID
     }
     streamingSnapshots.send(.init(inferenceID: inferenceID, actions: []))
   }
@@ -437,12 +333,7 @@ public actor AgentLoop<B: AgentBehavior> {
     if liveVersion == publishedSnapshots.value.version,
        publishedSnapshots.value.inferenceID == inferenceID
     {
-      let current = publishedSnapshots.value
-      publishedSnapshots.send(.init(
-        version: current.version,
-        state: current.state,
-        inferenceID: nil,
-      ))
+      publishedSnapshots.value.inferenceID = nil
     }
     if streamingSnapshots.value.inferenceID == inferenceID {
       streamingSnapshots.send(.init(inferenceID: nil, actions: nil))
@@ -480,19 +371,5 @@ public actor AgentLoop<B: AgentBehavior> {
 
   private var shouldFinishFlushLoop: Bool {
     shouldStopWorkLoop && publishedSnapshots.value.version >= liveVersion
-  }
-}
-
-// MARK: - Errors
-
-public enum AgentLoopError: Error {
-  case inferenceProducedNoResult
-}
-
-enum ToolCallRepetitionError: Error, CustomStringConvertible {
-  case blocked
-
-  var description: String {
-    ToolCallRepetitionTracker.blockText
   }
 }

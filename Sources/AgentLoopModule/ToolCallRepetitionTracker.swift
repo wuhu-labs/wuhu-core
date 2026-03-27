@@ -14,11 +14,11 @@
 /// - At count ≥ ``blockThreshold`` (5): callers should block execution.
 ///
 /// Call ``reset()`` when a user message arrives (interrupt/steer).
-struct ToolCallRepetitionTracker: Sendable {
+public struct ToolCallRepetitionTracker: Sendable {
   // MARK: - Thresholds
 
-  static let warningThreshold = 3
-  static let blockThreshold = 5
+  public static let warningThreshold = 3
+  public static let blockThreshold = 5
 
   // MARK: - Per-slot state
 
@@ -36,11 +36,13 @@ struct ToolCallRepetitionTracker: Sendable {
 
   // MARK: - API
 
+  public init() {}
+
   /// The current consecutive count for a `(toolName, argsHash)` pair.
   ///
   /// Returns 0 if the pair has never been seen. Use this before execution
   /// to decide whether to block (count ≥ ``blockThreshold``).
-  func preflightCount(toolName: String, argsHash: Int) -> Int {
+  public func preflightCount(toolName: String, argsHash: Int) -> Int {
     let key = SlotKey(toolName: toolName, argsHash: argsHash)
     return slots[key]?.consecutiveCount ?? 0
   }
@@ -51,7 +53,7 @@ struct ToolCallRepetitionTracker: Sendable {
   /// `(toolName, argsHash)` slot, the counter increments. Otherwise
   /// it resets to 1.
   @discardableResult
-  mutating func record(toolName: String, argsHash: Int, resultHash: Int) -> Int {
+  public mutating func record(toolName: String, argsHash: Int, resultHash: Int) -> Int {
     let key = SlotKey(toolName: toolName, argsHash: argsHash)
     if let existing = slots[key], existing.lastResultHash == resultHash {
       slots[key]!.consecutiveCount += 1
@@ -62,15 +64,15 @@ struct ToolCallRepetitionTracker: Sendable {
   }
 
   /// Reset all tracking state (e.g., when a user message arrives).
-  mutating func reset() {
+  public mutating func reset() {
     slots.removeAll()
   }
 
   /// Warning text appended to tool results at the warning threshold.
-  static let warningText =
+  public static let warningText =
     "\n\n[Warning: This tool has returned the same result \(warningThreshold) consecutive times. Consider doing something else or waiting for an external event.]"
 
   /// Error text returned when a tool call is blocked.
-  static let blockText =
+  public static let blockText =
     "[Error: Blocked — this tool has been called \(blockThreshold) consecutive times with identical arguments and results. The loop has been broken to prevent waste. Take a different action.]"
 }
