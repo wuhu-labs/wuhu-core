@@ -39,10 +39,15 @@ public struct SessionTranscript: Equatable, Sendable {
     else { return false }
 
     switch lastItem.content {
-    case .assistant:
+    case .assistant, .interruption:
       return false
     default:
       return true
     }
+  }
+
+  var canDrainFollowUp: Bool {
+    guard case .assistant = items.last?.content, pendingToolCalls.isEmpty else { return false }
+    return true
   }
 }

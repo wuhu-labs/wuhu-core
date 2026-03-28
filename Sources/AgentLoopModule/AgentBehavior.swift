@@ -1,6 +1,11 @@
 import Foundation
 import WuhuAI
 
+public enum AgentContextAction {
+  case inference
+  case drain
+}
+
 /// Domain-specific behavior that drives an ``AgentLoop``.
 ///
 /// The loop keeps a live in-memory state, orchestrates the
@@ -54,7 +59,7 @@ public protocol AgentBehavior: Sendable {
   /// Checked after tool calls are exhausted. Returns `true` when the
   /// transcript ends with content the model has not yet responded to
   /// (e.g. a user message, a tool result, or a failed prior inference).
-  func needsInference(state: State) -> Bool
+  func nextContextAction(state: State) -> AgentContextAction?
 
   /// Whether compaction should run.
   ///

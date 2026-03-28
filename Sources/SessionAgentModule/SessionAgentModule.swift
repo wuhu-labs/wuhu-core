@@ -21,6 +21,28 @@ public struct SessionAgentState: Sendable, Equatable {
   public var metadata: SessionMetadata
   public var transcript: SessionTranscript
 
+  public var steerQueue: SessionQueue<UserQueueItemValue>
+  public var followUpQueue: SessionQueue<UserQueueItemValue>
+
+  public subscript(userQueue lane: UserQueueLane) -> SessionQueue<UserQueueItemValue> {
+    get {
+      switch lane {
+      case .steer:
+        return steerQueue
+      case .followUp:
+        return followUpQueue
+      }
+    }
+    set {
+      switch lane {
+      case .steer:
+        steerQueue = newValue
+      case .followUp:
+        followUpQueue = newValue
+      }
+    }
+  }
+
   public var activity: SessionAgentActivity?
 }
 
@@ -33,14 +55,25 @@ public struct SessionMetadata: Sendable, Equatable {
 
 public enum SessionAgentAction: Sendable {
   case inference(UUID, AutoRetryInference.Action)
-  case interruptByUser(UserInitiation)
   case setMetadata(@Sendable (inout SessionMetadata) -> Void)
+  case user(SessionAgentUserAction)
+}
+
+public struct SessionAgentUserAction: Sendable {
+  public var initiation: UserInitiation
+  public var action: Action
+
+  public enum Action: Sendable {
+    case interrupt
+    case enqueue(UserQueueLane, [ContentBlock])
+    case dequeue(UserQueueLane, UUID)
+  }
 }
 
 // MARK: - Interruption
 
 public enum SessionAgentInterruption: Sendable {
-  case byUser
+  case byUser(UserInitiation)
 }
 
 // MARK: - Tool Result
@@ -68,24 +101,37 @@ public struct SessionAgentBehavior: AgentBehavior {
   public typealias PersistenceDiff = SessionAgentPersistenceDiff
 
   public func handle(_ action: Action, state: inout State) -> Interruption? {
+    let now = date()
+
     switch action {
-    case .interruptByUser(var initiation):
-      switch state.activity {
-      case .inference(let inferenceState):
-        if let partialMessage = inferenceState.partialMessage {
-          state.transcript.items.append(SessionItem(id: inferenceState.inferenceID, content: .assistant(partialMessage)))
-          // We need to order the messages.
-          initiation.timestamp = date()
-          state.transcript.items.append(SessionItem(id: UUID(), content: .interruption(.init(initiation: initiation))))
+    case .user(let userAction):
+      var initiation = userAction.initiation
+      // We need to order the messages.
+      initiation.timestamp = now
 
+      switch userAction.action {
+      case .interrupt:
+        switch state.activity {
+        case .inference(let inferenceState):
+          if let partialMessage = inferenceState.partialMessage {
+            state.transcript.items.append(SessionItem(id: inferenceState.inferenceID, content: .assistant(partialMessage)))
+            state.transcript.items.append(SessionItem(id: UUID(), content: .interruption(.init(initiation: initiation))))
+
+          }
+          state.activity = nil
+
+        default:
+          fatalError("Unimplemented")
         }
-        state.activity = nil
 
-      default:
-        fatalError("Unimplemented")
+        return Interruption.byUser(initiation)
+
+      case let .enqueue(lane, content):
+        state[userQueue: lane].append(.init(id: UUID(), value: .init(initiation: initiation, content: content)))
+
+      case let .dequeue(lane, itemID):
+        state[userQueue: lane].remove(itemWithID: itemID)
       }
-
-      return .byUser
 
     case .setMetadata(let body):
       body(&state.metadata)
@@ -123,8 +169,14 @@ public struct SessionAgentBehavior: AgentBehavior {
     state.transcript.pendingToolCalls.first
   }
 
-  public func needsInference(state: State) -> Bool {
-    state.transcript.needsInference
+  public func nextContextAction(state: SessionAgentState) -> AgentContextAction? {
+    if state.transcript.needsInference {
+      return .inference
+    } else if state.steerQueue.isEmpty && state.followUpQueue.isEmpty {
+      return nil
+    } else {
+      return .drain
+    }
   }
 
   public func shouldCompact(state: State) -> Bool {
@@ -132,7 +184,16 @@ public struct SessionAgentBehavior: AgentBehavior {
   }
 
   public func drainToContext(state: inout State) {
+    let queueItems = if !state.steerQueue.isEmpty {
+      state.steerQueue.pop(max: 20)
+    } else {
+      state.followUpQueue.pop(max: 1)
+    }
 
+    for item in queueItems {
+      let content = SessionUserMessage(initiation: item.value.initiation, content: item.value.content)
+      state.transcript.items.append(.init(id: item.id, content: .user(content)))
+    }
   }
 
   public func buildContext(state: State) -> Context {
@@ -164,9 +225,11 @@ public struct SessionAgentBehavior: AgentBehavior {
     fatalError()
   }
 
-  public func persistAssistantEntry(_ message: AssistantMessage, state: inout State) {}
-  public func persistToolResult(_ result: ToolResult, for call: ToolCall, state: inout State) {}
+  public func diff(from oldState: State, to newState: State) -> PersistenceDiff? {
+    fatalError()
+  }
 
-  public func diff(from oldState: State, to newState: State) -> PersistenceDiff? { nil }
-  public func persist(_ diff: PersistenceDiff) async throws {}
+  public func persist(_ diff: PersistenceDiff) async throws {
+    fatalError()
+  }
 }

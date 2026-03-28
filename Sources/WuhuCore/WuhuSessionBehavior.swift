@@ -327,58 +327,8 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
-    let session = try await store.getSession(id: sessionID.rawValue)
-    let tools = await tools(for: stateForToolCatalog(session: session))
-
-    let resolved = WuhuModelCatalog.resolveAlias(session.model)
-    let provider = session.provider.piProvider
-    let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-    var requestOptions = try await makeRequestOptions(model: apiModel, settings: store.loadSettingsSnapshot(sessionID: sessionID), userModelID: session.model)
-    requestOptions.sessionId = sessionID.rawValue
-    mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
-
-    let effectiveContext = Context(
-      systemPrompt: context.systemPrompt,
-      messages: context.messages,
-      tools: tools.map(\.tool),
-    )
-
-    let events = try await streamFn(apiModel, effectiveContext, requestOptions)
-
-    var partial: AssistantMessage?
-    var final: AssistantMessage?
-    for try await event in events {
-      switch event {
-      case let .start(p):
-        partial = p
-      case let .textDelta(delta, p):
-        stream.yield(.assistantTextDelta(delta))
-        partial = p
-      case let .done(message):
-        final = message
-      }
-    }
-    if let final { return final }
-    if let partial { return partial }
-    throw WuhuAIError.unsupported("No model output")
   }
 
-  func persistAssistantEntry(_ message: AssistantMessage, state: inout State) {
-    _ = appendEntry(
-      createdAt: message.timestamp,
-      payload: .message(.fromPi(.assistant(message))),
-      to: &state,
-    )
-
-    let calls = message.content.compactMap { block -> ToolCall? in
-      if case let .toolCall(call) = block { return call }
-      return nil
-    }
-    for call in calls {
-      state.toolCallStatus[call.id] = .pending
-    }
-    state.status = .init(status: statusForOperationalState(state))
-  }
 
   func nextToolCall(state: State) -> ToolCall? {
     for entry in state.entries {
@@ -421,12 +371,6 @@ struct WuhuSessionBehavior: AgentBehavior {
         return makeToolErrorResult(call: call, errorDescription: "\(error)")
       }
     }
-  }
-
-  func blockedToolResult(for call: ToolCall) -> ToolResult {
-
-//    makeToolErrorResult(call: call, errorDescription: "\(ToolCallRepetitionError.blocked)")
-    makeToolErrorResult(call: call, errorDescription: "Tool call blocked")
   }
 
   func appendText(_ text: String, to result: AgentToolResult) -> AgentToolResult {
@@ -540,29 +484,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     case .idle:
       false
     }
-  }
-
-  func needsInference(state: State) -> Bool {
-    for entry in state.entries.reversed() {
-      switch entry.payload {
-      case let .message(message):
-        switch message {
-        case .toolResult:
-          return true
-        case .user:
-          return true
-        case .assistant:
-          return false
-        case .customMessage:
-          continue
-        case .unknown:
-          continue
-        }
-      default:
-        continue
-      }
-    }
-    return false
   }
 
   private func makeToolErrorResult(call _: ToolCall, errorDescription: String) -> ToolResult {

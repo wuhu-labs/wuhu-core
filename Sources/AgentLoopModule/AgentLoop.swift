@@ -178,14 +178,19 @@ public actor AgentLoop<B: AgentBehavior> {
         continue
       }
 
-      if behavior.needsInference(state: state) {
-        let context = behavior.buildContext(state: state)
-        try await run(behavior.infer(context: context, state: &state))
+      if behavior.shouldCompact(state: state) {
+        try await run(behavior.performCompaction(state: &state))
         continue
       }
 
-      if behavior.shouldCompact(state: state) {
-        try await run(behavior.performCompaction(state: &state))
+      if let action = behavior.nextContextAction(state: state) {
+        switch action {
+        case .inference:
+          let context = behavior.buildContext(state: state)
+          try await run(behavior.infer(context: context, state: &state))
+        case .drain:
+          behavior.drainToContext(state: &state)
+        }
         continue
       }
 

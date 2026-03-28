@@ -42,13 +42,13 @@ public struct SessionItem: Equatable, Identifiable, Sendable {
 public struct UserInitiation: Hashable, Sendable {
   public var user: String
   public var timestamp: Date
-  public var timeZone: TimeZone
+  public var timeZoneOffset: Int
 
   public var timestampString: String {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm"
-    formatter.timeZone = timeZone
-    return formatter.string(from: timestamp)
+    formatter.timeZone = .gmt
+    return formatter.string(from: timestamp.addingTimeInterval(TimeInterval(timeZoneOffset)))
   }
 
   public func toMessageHeader() -> String {
