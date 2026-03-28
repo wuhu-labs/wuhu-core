@@ -184,6 +184,7 @@ public struct SessionAgentBehavior: AgentBehavior {
   }
 
   public func drainToContext(state: inout State) {
+    // TODO: actually we should drain from both system and user and mark if we have more to go. capped at 20 and order by time. we probably want a single pending messages struct
     let queueItems = if !state.steerQueue.isEmpty {
       state.steerQueue.pop(max: 20)
     } else {
