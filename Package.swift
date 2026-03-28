@@ -8,10 +8,11 @@ let package = Package(
     .iOS(.v18),
   ],
   products: [
+    .library(name: "AgentLoopModule", targets: ["AgentLoopModule"]),
+    .library(name: "SessionAgentModule", targets: ["SessionAgentModule"]),
     .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
     .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
-    .library(name: "AgentLoopModule", targets: ["AgentLoopModule"]),
     .library(name: "WuhuCore", targets: ["WuhuCore"]),
     .library(name: "WuhuClient", targets: ["WuhuClient"]),
     .library(name: "WuhuServer", targets: ["WuhuServer"]),
@@ -71,10 +72,20 @@ let package = Package(
     .target(
       name: "AgentLoopModule",
       dependencies: [
-        .product(name: "WuhuAI", package: "wuhu-ai"),
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "AsyncExtensions", package: "AsyncExtensions"),
+        .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "DependenciesMacros", package: "swift-dependencies"),
         .product(name: "Logging", package: "swift-log"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+      ],
+    ),
+    .target(
+      name: "SessionAgentModule",
+      dependencies: [
+        "AgentLoopModule",
+        .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
       ],
     ),
     .target(
@@ -154,6 +165,12 @@ let package = Package(
       name: "AgentLoopTests",
       dependencies: [
         "AgentLoopModule",
+      ],
+    ),
+    .testTarget(
+      name: "SessionAgentTests",
+      dependencies: [
+        "SessionAgentModule",
       ],
     ),
     .testTarget(

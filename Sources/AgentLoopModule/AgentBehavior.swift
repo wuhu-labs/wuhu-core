@@ -1,39 +1,5 @@
 import Foundation
-import Synchronization
 import WuhuAI
-
-public struct DeferredExecutionCoordinator<Action: Sendable, Interruption>: Sendable, ~Copyable {
-  typealias ActionHandler = @Sendable @isolated(any) (_ action: Action) -> Void
-  public typealias CancellationHandler = @Sendable (_ interruption: Interruption?) -> Void
-
-  let onAction: ActionHandler
-  let onCancelStorage: Mutex<CancellationHandler?> = .init(nil)
-
-  init(onAction: @escaping ActionHandler) {
-    self.onAction = onAction
-  }
-
-  public func send(_ action: Action) async {
-    await onAction(action)
-  }
-
-  public func onCancel(body: @escaping CancellationHandler) {
-    onCancelStorage.withLock {
-      assert($0 == nil, "Called onCancel for more than once.")
-      $0 = body
-    }
-  }
-}
-
-public struct DeferredExecution<Action: Sendable, Interruption, Result>: Sendable {
-  public typealias Coordinator = DeferredExecutionCoordinator<Action, Interruption>
-
-  let run: @Sendable (_ coordinator: borrowing Coordinator) async throws -> Result
-
-  public init(run: @escaping @Sendable (_ coordinator: borrowing Coordinator) async throws -> Result) {
-    self.run = run
-  }
-}
 
 /// Domain-specific behavior that drives an ``AgentLoop``.
 ///
@@ -118,7 +84,7 @@ public protocol AgentBehavior: Sendable {
   /// handle. If the process crashes during inference, the loop retries
   /// on restart (inference is the only IO that is not persisted before
   /// returning).
-  func infer(context: Context) -> DeferredExecution<Action, Interruption, AssistantMessage>
+  func infer(context: Context, state: inout State) -> DeferredExecution<Action, Interruption, AssistantMessage>
 
   /// Mutate in-memory bookkeeping for a tool call and return a deferred
   /// execution handle for the actual work.
@@ -133,7 +99,7 @@ public protocol AgentBehavior: Sendable {
   ///
   /// Compaction results should be fed back into the loop via an action
   /// sent through the coordinator.
-  func performCompaction(state: State) -> DeferredExecution<Action, Interruption, Void>
+  func performCompaction(state: inout State) -> DeferredExecution<Action, Interruption, Void>
 
   // MARK: - Persist Results
 
@@ -153,8 +119,17 @@ public protocol AgentBehavior: Sendable {
   // MARK: - Durable Persistence
 
   /// Compute the diff between two state versions for persistence.
+  ///
+  /// The final persistence when the loop is cancelled won't be retryed, detect via Task.isCancelled and handle accordingly.
   func diff(from oldState: State, to newState: State) -> PersistenceDiff?
 
   /// Persist a previously computed diff to durable storage.
   func persist(_ diff: PersistenceDiff) async throws
+
+  /// When enabled, it is your job to do proper backoff. Default to false.
+  var autoRetryFailedPersistence: Bool { get }
+}
+
+extension AgentBehavior {
+  public var autoRetryFailedPersistence: Bool { false }
 }

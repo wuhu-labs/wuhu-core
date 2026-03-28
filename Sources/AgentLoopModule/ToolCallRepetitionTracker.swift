@@ -76,3 +76,40 @@ public struct ToolCallRepetitionTracker: Sendable {
   public static let blockText =
     "[Error: Blocked — this tool has been called \(blockThreshold) consecutive times with identical arguments and results. The loop has been broken to prevent waste. Take a different action.]"
 }
+
+
+
+// this is a dump ground
+
+/*
+ tool call
+
+
+   let argsHash = call.arguments.hashValue
+   let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
+
+   if count >= ToolCallRepetitionTracker.blockThreshold {
+     let blockedResult = behavior.blockedToolResult(for: call)
+     behavior.persistToolResult(blockedResult, for: call, state: &state)
+     try await waitUntilDurableCurrentVersion()
+     return
+   }
+
+ let resultHash = toolResult.hashValue
+ let recordedCount = repetitionTracker.record(
+   toolName: call.name,
+   argsHash: argsHash,
+   resultHash: resultHash,
+ )
+
+
+ public enum ToolCallRepetitionError: Error, CustomStringConvertible {
+   case blocked
+
+   public var description: String {
+     ToolCallRepetitionTracker.blockText
+   }
+ }
+
+
+ */

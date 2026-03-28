@@ -19,13 +19,11 @@ public actor AgentLoop<B: AgentBehavior> {
 
   // MARK: State
 
-  var started: Bool = false
-
   var state: B.State {
     didSet {
       guard state != oldValue else { return }
       liveVersion += 1
-      flushSignal.yield(())
+      flushLoop.nudge()
     }
   }
 
@@ -33,10 +31,8 @@ public actor AgentLoop<B: AgentBehavior> {
   var liveVersion: Int = 0
   var publishedVersion: Int = 0
 
-  let workStream: AsyncStream<Void>
-  let workSignal: AsyncStream<Void>.Continuation
-  let flushStream: AsyncStream<Void>
-  let flushSignal: AsyncStream<Void>.Continuation
+  var workLoop: LoopProcessor!
+  var flushLoop: LoopProcessor!
 
   var currentRunningTask: Task<Void, any Error>? = nil
   let interruptionReason: Mutex<B.Interruption?> = Mutex(nil)
@@ -50,20 +46,9 @@ public actor AgentLoop<B: AgentBehavior> {
   // MARK: Init
 
   public init(behavior: B, initialState: B.State) {
-    let (workStream, workSignal) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-    let (flushStream, flushSignal) = AsyncStream<Void>.makeStream(
-      bufferingPolicy: .bufferingNewest(1),
-    )
-
     self.behavior = behavior
     self.state = initialState
     self.publishedStates = AsyncCurrentValueSubject(initialState)
-    self.workStream = workStream
-    self.workSignal = workSignal
-    self.flushStream = flushStream
-    self.flushSignal = flushSignal
   }
 
   // MARK: - Observation
@@ -82,7 +67,7 @@ public actor AgentLoop<B: AgentBehavior> {
   public func send(_ action: B.Action) {
     guard let interruption = behavior.handle(action, state: &state) else {
       if currentRunningTask == nil, hasWork {
-        workSignal.yield()
+        workLoop.nudge()
       }
       return
     }
@@ -101,8 +86,19 @@ public actor AgentLoop<B: AgentBehavior> {
   ///
   /// - Precondition: Must not be called more than once.
   public func start() async throws {
-    precondition(!started)
-    started = true
+    precondition(workLoop == nil)
+
+    workLoop = LoopProcessor {
+      try await self.startLoop()
+    } onError: { error in
+      logger.error("Work loop error (behavior should not throw): \(String(describing: error))")
+    }
+
+    flushLoop = LoopProcessor {
+      try await self.flushIfNeeded()
+    } onError: { error in
+      logger.error("Flush error, will retry on next state change: \(String(describing: error))")
+    }
 
     defer {
       publishedStates.send(.finished)
@@ -110,37 +106,27 @@ public actor AgentLoop<B: AgentBehavior> {
 
     await withTaskGroup(of: Void.self) { group in
       group.addTask {
-        for await _ in self.workStream {
-          do {
-            try await self.startLoop()
-          } catch is CancellationError {
-          } catch {
-            logger.error("Work loop error (behavior should not throw): \(String(describing: error))")
-          }
-        }
+        await self.workLoop.start()
       }
-
       group.addTask {
-        for await _ in self.flushStream {
-          do {
-            try await self.flushIfNeeded()
-          } catch is CancellationError {
-          } catch {
-            logger.error("Flush error, will retry on next state change: \(String(describing: error))")
-          }
-        }
+        await self.flushLoop.start()
       }
 
       if hasWork {
-        workSignal.yield(())
+        workLoop.nudge()
       }
-      await group.waitForAll()
     }
 
     try await flushIfNeeded()
   }
 
   func flushIfNeeded() async throws {
+    defer {
+      if behavior.autoRetryFailedPersistence, publishedVersion < liveVersion, !Task.isCancelled {
+        flushLoop.nudge()
+      }
+    }
+
     while publishedVersion < liveVersion {
       let oldState = publishedStates.value
       let newState = state
@@ -171,6 +157,11 @@ public actor AgentLoop<B: AgentBehavior> {
     defer {
       interruptionReason.withLock { $0 = nil }
       currentRunningTask = nil
+
+      if hasWork {
+        // This allows behavior to transition, e.g. from inference to compaction by throwing errors.
+        workLoop.nudge()
+      }
     }
 
     try await task.value
@@ -190,13 +181,13 @@ public actor AgentLoop<B: AgentBehavior> {
 
       if behavior.needsInference(state: state) {
         let context = behavior.buildContext(state: state)
-        let message = try await run(behavior.infer(context: context))
+        let message = try await run(behavior.infer(context: context, state: &state))
         behavior.persistAssistantEntry(message, state: &state)
         continue
       }
 
       if behavior.shouldCompact(state: state) {
-        try await run(behavior.performCompaction(state: state))
+        try await run(behavior.performCompaction(state: &state))
         continue
       }
 
@@ -211,15 +202,14 @@ public actor AgentLoop<B: AgentBehavior> {
       Task { await self.send(action) }
     }
 
-    try await self.waitForFlush()
+    if execution.needsPersistence {
+      try await self.waitForFlush()
+    }
     return try await withTaskCancellationHandler {
       try await execution.run(coordinator)
     } onCancel: {
-      coordinator.onCancelStorage.withLock { onCancel in
-        guard let onCancel else { return }
-        let reason = interruptionReason.withLock { $0 }
-        onCancel(reason)
-      }
+      let reason = interruptionReason.withLock { $0 }
+      coordinator.cancel(with: reason)
     }
   }
 
