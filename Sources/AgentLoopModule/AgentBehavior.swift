@@ -84,7 +84,7 @@ public protocol AgentBehavior: Sendable {
   /// handle. If the process crashes during inference, the loop retries
   /// on restart (inference is the only IO that is not persisted before
   /// returning).
-  func infer(context: Context, state: inout State) -> DeferredExecution<Action, Interruption, AssistantMessage>
+  func infer(context: Context, state: inout State) -> DeferredExecution<Action, Interruption>
 
   /// Mutate in-memory bookkeeping for a tool call and return a deferred
   /// execution handle for the actual work.
@@ -93,28 +93,13 @@ public protocol AgentBehavior: Sendable {
   func startToolCall(
     _ call: ToolCall,
     state: inout State,
-  ) -> DeferredExecution<Action, Interruption, ToolResult>
+  ) -> DeferredExecution<Action, Interruption>
 
   /// Return a deferred execution handle for compaction.
   ///
   /// Compaction results should be fed back into the loop via an action
   /// sent through the coordinator.
-  func performCompaction(state: inout State) -> DeferredExecution<Action, Interruption, Void>
-
-  // MARK: - Persist Results
-
-  /// Save the assistant's response into in-memory state.
-  func persistAssistantEntry(
-    _ message: AssistantMessage,
-    state: inout State,
-  )
-
-  /// Save a tool result into in-memory state.
-  func persistToolResult(
-    _ result: ToolResult,
-    for call: ToolCall,
-    state: inout State,
-  )
+  func performCompaction(state: inout State) -> DeferredExecution<Action, Interruption>
 
   // MARK: - Durable Persistence
 

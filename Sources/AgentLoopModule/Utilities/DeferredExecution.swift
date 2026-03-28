@@ -80,15 +80,15 @@ public struct DeferredExecutionCoordinator<Action: Sendable, Interruption>: Send
   }
 }
 
-public struct DeferredExecution<Action: Sendable, Interruption, Result>: Sendable {
+public struct DeferredExecution<Action: Sendable, Interruption>: Sendable {
   public typealias Coordinator = DeferredExecutionCoordinator<Action, Interruption>
 
   let needsPersistence: Bool
-  let run: @Sendable (_ coordinator: Coordinator) async throws -> Result
+  let run: @Sendable (_ coordinator: Coordinator) async throws -> Void
 
   public init(
     needsPersistence: Bool = true,
-    run: @escaping @Sendable (_ coordinator: Coordinator) async throws -> Result
+    run: @escaping @Sendable (_ coordinator: Coordinator) async throws -> Void
   ) {
     self.needsPersistence = needsPersistence
     self.run = run
@@ -97,9 +97,9 @@ public struct DeferredExecution<Action: Sendable, Interruption, Result>: Sendabl
   public func map<ParentAction>(
     needsPersistence: Bool? = nil,
     _ embed: @escaping @Sendable (Action) -> ParentAction
-  ) -> DeferredExecution<ParentAction, Interruption, Result> {
+  ) -> DeferredExecution<ParentAction, Interruption> {
 
-    return DeferredExecution<ParentAction, Interruption, Result>(
+    return DeferredExecution<ParentAction, Interruption>(
       needsPersistence: needsPersistence ?? self.needsPersistence,
       run: { coordinator in
         try await self.run(coordinator.embed(embed))

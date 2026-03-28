@@ -34,7 +34,8 @@ public struct AutoRetryInference: Sendable {
 
   public enum Action: Sendable {
     case inferenceStarted(Int)
-    case textDelta(String)
+    case textDelta(String, AssistantMessage)
+    case inferenceCompleted(AssistantMessage)
   }
 
   @Dependency(InferenceClient.self)
@@ -44,7 +45,7 @@ public struct AutoRetryInference: Sendable {
 
   public func infer<Interruption: Sendable>(
     model: String, context: Context, options: RequestOptions, interruption: Interruption.Type = Interruption.self
-  ) -> DeferredExecution<Action, Interruption, AssistantMessage> {
+  ) -> DeferredExecution<Action, Interruption> {
     .init { coordinator in
       for attempt in 0..<maxInferenceRetries {
         try Task.checkCancellation()
@@ -65,14 +66,14 @@ public struct AutoRetryInference: Sendable {
             case let .start(m):
               message = m
             case let .textDelta(d, m):
-              coordinator.send(.textDelta(d))
+              coordinator.send(.textDelta(d, m))
               message = m
             case let .done(m):
               message = m
             }
           }
           guard let message else { throw InferenceError.noResult }
-          return message
+          coordinator.send(.inferenceCompleted(message))
         } catch {
           if isTransientError(error) {
             continue

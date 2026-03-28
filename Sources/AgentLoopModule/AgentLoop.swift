@@ -172,8 +172,7 @@ public actor AgentLoop<B: AgentBehavior> {
     while !Task.isCancelled {
       if behavior.nextToolCall(state: state) != nil {
         while let call = behavior.nextToolCall(state: state) {
-          let toolResult = try await run(behavior.startToolCall(call, state: &state))
-          behavior.persistToolResult(toolResult, for: call, state: &state)
+          try await run(behavior.startToolCall(call, state: &state))
         }
         behavior.drainToContext(state: &state)
         continue
@@ -181,8 +180,7 @@ public actor AgentLoop<B: AgentBehavior> {
 
       if behavior.needsInference(state: state) {
         let context = behavior.buildContext(state: state)
-        let message = try await run(behavior.infer(context: context, state: &state))
-        behavior.persistAssistantEntry(message, state: &state)
+        try await run(behavior.infer(context: context, state: &state))
         continue
       }
 
@@ -195,9 +193,9 @@ public actor AgentLoop<B: AgentBehavior> {
     }
   }
 
-  func run<R>(
-    _ execution: DeferredExecution<B.Action, B.Interruption, R>
-  ) async throws -> R {
+  func run(
+    _ execution: DeferredExecution<B.Action, B.Interruption>
+  ) async throws {
     let coordinator = DeferredExecutionCoordinator<B.Action, B.Interruption> { action in
       Task { await self.send(action) }
     }
@@ -205,7 +203,7 @@ public actor AgentLoop<B: AgentBehavior> {
     if execution.needsPersistence {
       try await self.waitForFlush()
     }
-    return try await withTaskCancellationHandler {
+    try await withTaskCancellationHandler {
       try await execution.run(coordinator)
     } onCancel: {
       let reason = interruptionReason.withLock { $0 }
