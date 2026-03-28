@@ -39,7 +39,7 @@ public actor AgentLoop<B: AgentBehavior> {
 
   var hasWork: Bool {
     behavior.nextToolCall(state: state) != nil
-    || behavior.needsInference(state: state)
+    || behavior.nextContextAction(state: state) != nil
     || behavior.shouldCompact(state: state)
   }
 

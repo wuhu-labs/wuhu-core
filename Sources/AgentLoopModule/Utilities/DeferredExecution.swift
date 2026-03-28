@@ -106,4 +106,8 @@ public struct DeferredExecution<Action: Sendable, Interruption>: Sendable {
       }
     )
   }
+
+  public static var none: Self {
+    .init { _ in }
+  }
 }

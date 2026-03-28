@@ -185,47 +185,9 @@ struct WuhuSessionBehavior: AgentBehavior {
   }
 
   func nextToolCall(state: State) -> ToolCall? {
-    for entry in state.entries {
-      guard case let .message(message) = entry.payload else { continue }
-      guard case let .assistant(assistant) = message else { continue }
-      for block in assistant.content {
-        guard case let .toolCall(id, name, arguments) = block else { continue }
-        let call = ToolCall(id: id, name: name, arguments: arguments)
-        guard let status = state.toolCallStatus[call.id] else { continue }
-        if status == .pending || status == .started {
-          return call
-        }
-      }
-    }
-    return nil
+    fatalError()
   }
 
-  func startToolCall(_ call: ToolCall, state: inout State) -> AgentToolExecutionHandle<ToolResult> {
-    if call.name == "bash" {
-      return startBashToolCall(call, state: &state)
-    }
-
-    if state.toolCallStatus[call.id] == .started {
-      let repairedResult = staleToolCallResult(call: call)
-      return .init { repairedResult }
-    }
-
-    state.toolCallStatus[call.id] = .started
-    state.status = .init(status: .running)
-
-    let executionState = state
-    return .init { [self] in
-      do {
-        let tools = await tools(for: executionState)
-        guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
-          return makeToolErrorResult(call: call, errorDescription: "Unknown tool: \(call.name)")
-        }
-        return try await tool.execute(toolCallId: call.id, args: call.arguments)
-      } catch {
-        return makeToolErrorResult(call: call, errorDescription: "\(error)")
-      }
-    }
-  }
 
   func persistToolResult(_ result: ToolResult, for call: ToolCall, state: inout State) {
     let now = Date()
@@ -966,10 +928,6 @@ struct WuhuSessionBehavior: AgentBehavior {
           id: session.model,
         ),
       ),
-      status: .init(status: .idle),
-      systemUrgent: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
     )
   }
 

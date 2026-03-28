@@ -85,6 +85,7 @@ let package = Package(
       dependencies: [
         "AgentLoopModule",
         .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "DependenciesMacros", package: "swift-dependencies"),
         .product(name: "WuhuAI", package: "wuhu-ai"),
       ],
     ),

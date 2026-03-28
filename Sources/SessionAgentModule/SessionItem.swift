@@ -7,6 +7,8 @@ public enum SessionItemContent: Equatable, Sendable {
   case user(SessionUserMessage)
   case interruption(SessionInterruptionMessage)
 
+  case mount(SessionMountMessage)
+
   var assistant: AssistantMessage? {
     if case let .assistant(v) = self { v } else { nil }
   }
@@ -35,6 +37,8 @@ public struct SessionItem: Equatable, Identifiable, Sendable {
       return m.initiation.timestamp
     case .interruption(let m):
       return m.initiation.timestamp
+    case .mount(let m):
+      return m.timestamp
     }
   }
 }
@@ -83,6 +87,27 @@ public struct SessionInterruptionMessage: Equatable, Sendable {
   }
 }
 
+public struct SessionMountMessage: Equatable, Sendable {
+  public var mount: Mount
+  public var agentsMD: String?
+  public var timestamp: Date
+
+
+  public func toWuhuAIUserMessage() -> WuhuAI.UserMessage {
+    var text = "Path \(mount.path) at runner \(mount.runner) mounted as \(mount.name)."
+    let content: [ContentBlock]
+
+    if let agentsMD {
+      text.append("\n\nAGENTS.md discovered:\n\n")
+      content = [.text(text), .text(agentsMD)]
+    } else {
+      content = [.text(text)]
+    }
+
+    return .init(content: content, timestamp: timestamp)
+  }
+}
+
 extension SessionItemContent {
   func toWuhuAIMessage() -> WuhuAI.Message? {
     switch self {
@@ -94,6 +119,9 @@ extension SessionItemContent {
       return .user(m.toWuhuAIUserMessage())
     case .interruption(let m):
       return .user(m.toWuhuAIUserMessage())
+    case .mount(let m):
+      return .user(m.toWuhuAIUserMessage())
     }
   }
 }
+
