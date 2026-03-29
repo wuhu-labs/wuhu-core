@@ -103,7 +103,7 @@ public struct SessionAgentBehavior: AgentBehavior {
   public typealias ToolResult = SessionAgentToolResult
   public typealias PersistenceDiff = SessionAgentPersistenceDiff
 
-  public func handle(_ action: Action, state: inout State) -> Interruption? {
+  public func handle(_ action: Action, state: inout State) {
     let now = date()
 
     switch action {
@@ -126,8 +126,7 @@ public struct SessionAgentBehavior: AgentBehavior {
         default:
           fatalError("Unimplemented")
         }
-
-        return Interruption.byUser(initiation)
+        return
 
       case let .enqueue(lane, content):
         state[userQueue: lane].append(.init(id: UUID(), value: .init(initiation: initiation, content: content)))
@@ -144,7 +143,7 @@ public struct SessionAgentBehavior: AgentBehavior {
             inferenceState.inferenceID == inferenceID
       else {
         print("[TO UPDATE LOG] fucked up state")
-        return nil
+        return
       }
 
       switch childAction {
@@ -168,7 +167,7 @@ public struct SessionAgentBehavior: AgentBehavior {
       state.transcript.items.append(SessionItem(id: UUID(), content: .mount(message)))
     }
 
-    return nil
+    return
   }
 
   public func nextToolCall(state: State) -> ToolCall? {
@@ -210,7 +209,7 @@ public struct SessionAgentBehavior: AgentBehavior {
       tools: [])
   }
 
-  public func infer(context: Context, state: inout State) -> DeferredExecution<Action, Interruption> {
+  public func infer(context: Context, state: inout State) -> DeferredExecution<Action> {
     let model = state.metadata.model
 
     precondition(state.activity == nil)
@@ -228,7 +227,7 @@ public struct SessionAgentBehavior: AgentBehavior {
     fatalError()
   }
 
-  public func startToolCall(_ untypedToolCall: ToolCall, state: inout State) -> DeferredExecution<Action, Interruption> {
+  public func startToolCall(_ untypedToolCall: ToolCall, state: inout State) -> DeferredExecution<Action> {
     let toolCall: SessionToolCall
 
     func appendToolError(error: String) {
@@ -346,7 +345,7 @@ public struct SessionAgentBehavior: AgentBehavior {
 //      }
   }
 
-  public func performCompaction(state: inout State) -> DeferredExecution<Action, Interruption> {
+  public func performCompaction(state: inout State) -> DeferredExecution<Action> {
     fatalError()
   }
 

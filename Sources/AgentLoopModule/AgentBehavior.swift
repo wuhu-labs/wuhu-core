@@ -25,9 +25,6 @@ public protocol AgentBehavior: Sendable {
   /// Domain-specific commands sent into the loop from outside.
   associatedtype Action: Sendable
 
-  /// Reason attached to an interruption (e.g. user-initiated stop).
-  associatedtype Interruption: Sendable
-
   /// The result of executing a tool call. Opaque to the loop — it just
   /// passes the value from ``startToolCall(_:state:)`` back to
   /// ``persistToolResult(_:for:state:)``.
@@ -41,9 +38,8 @@ public protocol AgentBehavior: Sendable {
 
   /// Handle a command from outside the loop by mutating in-memory state.
   ///
-  /// Return an ``Interruption`` to cancel the current running task
-  /// (e.g. user clicked stop), or `nil` for normal actions.
-  func handle(_ action: Action, state: inout State) -> Interruption?
+  /// Unlike TCA, we don't throw an Effect here, since we want to maintain a "single-thread" mindset.
+  func handle(_ action: Action, state: inout State)
 
   // MARK: - Scheduling
 
@@ -89,7 +85,7 @@ public protocol AgentBehavior: Sendable {
   /// handle. If the process crashes during inference, the loop retries
   /// on restart (inference is the only IO that is not persisted before
   /// returning).
-  func infer(context: Context, state: inout State) -> DeferredExecution<Action, Interruption>
+  func infer(context: Context, state: inout State) -> DeferredExecution<Action>
 
   /// Mutate in-memory bookkeeping for a tool call and return a deferred
   /// execution handle for the actual work.
@@ -98,13 +94,13 @@ public protocol AgentBehavior: Sendable {
   func startToolCall(
     _ call: ToolCall,
     state: inout State,
-  ) -> DeferredExecution<Action, Interruption>
+  ) -> DeferredExecution<Action>
 
   /// Return a deferred execution handle for compaction.
   ///
   /// Compaction results should be fed back into the loop via an action
   /// sent through the coordinator.
-  func performCompaction(state: inout State) -> DeferredExecution<Action, Interruption>
+  func performCompaction(state: inout State) -> DeferredExecution<Action>
 
   // MARK: - Durable Persistence
 

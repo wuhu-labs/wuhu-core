@@ -45,7 +45,7 @@ public struct AutoRetryInference: Sendable {
 
   public func infer<Interruption: Sendable>(
     model: String, context: Context, options: RequestOptions, interruption: Interruption.Type = Interruption.self
-  ) -> DeferredExecution<Action, Interruption> {
+  ) -> DeferredExecution<Action> {
     .init { coordinator in
       for attempt in 0..<maxInferenceRetries {
         try Task.checkCancellation()

@@ -35,7 +35,6 @@ public actor AgentLoop<B: AgentBehavior> {
   var flushLoop: LoopProcessor!
 
   var currentRunningTask: Task<Void, any Error>? = nil
-  let interruptionReason: Mutex<B.Interruption?> = Mutex(nil)
 
   var hasWork: Bool {
     behavior.nextToolCall(state: state) != nil
@@ -65,18 +64,9 @@ public actor AgentLoop<B: AgentBehavior> {
   /// The behavior updates the live in-memory state first. The loop persists the
   /// diff to durable storage and only then publishes the new state.
   public func send(_ action: B.Action) {
-    guard let interruption = behavior.handle(action, state: &state) else {
-      if currentRunningTask == nil, hasWork {
-        workLoop.nudge()
-      }
-      return
-    }
-
-    guard let currentRunningTask else { return }
-    interruptionReason.withLock {
-      guard $0 == nil else { return }
-      $0 = interruption
-      currentRunningTask.cancel()
+    behavior.handle(action, state: &state)
+    if currentRunningTask == nil, hasWork {
+      workLoop.nudge()
     }
   }
 
@@ -148,14 +138,12 @@ public actor AgentLoop<B: AgentBehavior> {
     precondition(currentRunningTask == nil)
     guard hasWork else { return }
 
-    interruptionReason.withLock { $0 = nil }
     let task = Task {
       try await self.loop()
     }
     currentRunningTask = task
 
     defer {
-      interruptionReason.withLock { $0 = nil }
       currentRunningTask = nil
 
       if hasWork {
@@ -199,21 +187,16 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   func run(
-    _ execution: DeferredExecution<B.Action, B.Interruption>
+    _ execution: DeferredExecution<B.Action>
   ) async throws {
-    let coordinator = DeferredExecutionCoordinator<B.Action, B.Interruption> { action in
+    let coordinator = DeferredExecutionCoordinator<B.Action> { action in
       Task { await self.send(action) }
     }
 
     if execution.needsPersistence {
       try await self.waitForFlush()
     }
-    try await withTaskCancellationHandler {
-      try await execution.run(coordinator)
-    } onCancel: {
-      let reason = interruptionReason.withLock { $0 }
-      coordinator.cancel(with: reason)
-    }
+    try await execution.run(coordinator)
   }
 
   func waitForFlush() async throws {
