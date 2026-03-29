@@ -6,6 +6,46 @@ import WuhuAI
 
 // MARK: - State
 
+
+class Box {
+  var count: Int = 0
+}
+struct Stupid {
+  var box: Box = Box()
+
+  var count: Int {
+    get { box.count }
+     nonmutating set { box.count = newValue }
+  }
+}
+
+func run(stupid: Stupid) async {}
+
+func test() async {
+  let stupid = Stupid()
+  await run(stupid: stupid)
+}
+
+func withStupid(body: @Sendable (Stupid) async throws -> Void) {
+
+}
+
+func tryMe() {
+  withStupid { stupid in
+    async let x = Task {
+      stupid.count += 1
+      return stupid.count
+    }
+
+    async let y = Task {
+      stupid.count += 1
+      return stupid.count
+    }
+
+    await print(x, y)
+  }
+}
+
 public enum SessionAgentActivity: Equatable, Sendable {
   case inference(InferenceActivity)
 

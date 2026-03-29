@@ -9,6 +9,7 @@ let package = Package(
   ],
   products: [
     .library(name: "AgentLoopModule", targets: ["AgentLoopModule"]),
+    .library(name: "FoundationTools", targets: ["FoundationTools"]),
     .library(name: "SessionAgentModule", targets: ["SessionAgentModule"]),
     .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
     .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
