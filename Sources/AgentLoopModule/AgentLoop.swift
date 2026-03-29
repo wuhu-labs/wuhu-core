@@ -34,20 +34,20 @@ public actor AgentLoop<B: AgentBehavior> {
   var workLoop: LoopProcessor!
   var flushLoop: LoopProcessor!
 
-  var currentRunningTask: Task<Void, any Error>? = nil
+  var currentRunningTask: Task<Void, any Error>?
 
   var hasWork: Bool {
     behavior.nextToolCall(state: state) != nil
-    || behavior.nextContextAction(state: state) != nil
-    || behavior.shouldCompact(state: state)
+      || behavior.nextContextAction(state: state) != nil
+      || behavior.shouldCompact(state: state)
   }
 
   // MARK: Init
 
   public init(behavior: B, initialState: B.State) {
     self.behavior = behavior
-    self.state = initialState
-    self.publishedStates = AsyncCurrentValueSubject(initialState)
+    state = initialState
+    publishedStates = AsyncCurrentValueSubject(initialState)
   }
 
   // MARK: - Observation
@@ -187,14 +187,14 @@ public actor AgentLoop<B: AgentBehavior> {
   }
 
   func run(
-    _ execution: DeferredExecution<B.Action>
+    _ execution: DeferredExecution<B.Action>,
   ) async throws {
     let coordinator = DeferredExecutionCoordinator<B.Action> { action in
       Task { await self.send(action) }
     }
 
     if execution.needsPersistence {
-      try await self.waitForFlush()
+      try await waitForFlush()
     }
     try await execution.run(coordinator)
   }

@@ -1,14 +1,13 @@
-public enum ReadTool: FoundationToolProtocol {
+public enum FindTool: FoundationToolProtocol {
   public static var toolName: String {
-    "read"
+    "find"
   }
 
   public struct Arguments: Equatable, Codable, Sendable {
     public var path: String
     public var mount: String?
     public var runner: String?
-    public var offset: Int?
-    public var limit: Int?
+    public var pattern: String
   }
 
   public typealias Result = String
@@ -17,7 +16,7 @@ public enum ReadTool: FoundationToolProtocol {
     let runnerID = try context.resolveRunnerID(mount: arguments.mount, runner: arguments.runner, state: context.state)
     return { _ in
       let runner = try await context.resolveRunner(id: runnerID)
-      return try await runner.handleRead(arguments.path, arguments.offset, arguments.limit)
+      return try await runner.handleFind(arguments.path, arguments.pattern)
     }
   }
 }

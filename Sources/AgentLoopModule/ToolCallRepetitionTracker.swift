@@ -77,13 +77,10 @@ public struct ToolCallRepetitionTracker: Sendable {
     "[Error: Blocked — this tool has been called \(blockThreshold) consecutive times with identical arguments and results. The loop has been broken to prevent waste. Take a different action.]"
 }
 
-
-
 // this is a dump ground
 
 /*
  tool call
-
 
    let argsHash = call.arguments.hashValue
    let count = repetitionTracker.preflightCount(toolName: call.name, argsHash: argsHash)
@@ -102,7 +99,6 @@ public struct ToolCallRepetitionTracker: Sendable {
    resultHash: resultHash,
  )
 
-
  public enum ToolCallRepetitionError: Error, CustomStringConvertible {
    case blocked
 
@@ -110,6 +106,5 @@ public struct ToolCallRepetitionTracker: Sendable {
      ToolCallRepetitionTracker.blockText
    }
  }
-
 
  */

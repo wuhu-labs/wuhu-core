@@ -15,7 +15,6 @@ public enum AgentContextAction {
 /// Implementors provide the state shape, scheduling queries, execution
 /// handles, persistence logic, and external action handling.
 public protocol AgentBehavior: Sendable {
-
   // MARK: - State
 
   /// Full state held by the loop. Opaque to the loop; must be equatable
@@ -116,6 +115,8 @@ public protocol AgentBehavior: Sendable {
   var autoRetryFailedPersistence: Bool { get }
 }
 
-extension AgentBehavior {
-  public var autoRetryFailedPersistence: Bool { false }
+public extension AgentBehavior {
+  var autoRetryFailedPersistence: Bool {
+    false
+  }
 }

@@ -8,12 +8,12 @@ public struct InferenceClient: Sendable {
   public var stream: @Sendable (
     _ model: String,
     _ context: Context,
-    _ options: RequestOptions
+    _ options: RequestOptions,
   ) async throws -> AsyncThrowingStream<AssistantMessageEvent, any Error>
 }
 
 extension InferenceClient: TestDependencyKey {
-  public static let testValue: InferenceClient = InferenceClient()
+  public static let testValue: InferenceClient = .init()
 }
 
 public struct AutoRetryInference: Sendable {
@@ -22,7 +22,7 @@ public struct AutoRetryInference: Sendable {
 
   public init(
     maxInferenceRetries: Int = 5,
-    sleepBackoff: (@Sendable (Int) -> ContinuousClock.Duration)? = nil
+    sleepBackoff: (@Sendable (Int) -> ContinuousClock.Duration)? = nil,
   ) {
     self.maxInferenceRetries = maxInferenceRetries
     self.sleepBackoff = sleepBackoff ?? { attempt in
@@ -44,10 +44,10 @@ public struct AutoRetryInference: Sendable {
   private var clock
 
   public func infer<Interruption: Sendable>(
-    model: String, context: Context, options: RequestOptions, interruption: Interruption.Type = Interruption.self
+    model: String, context: Context, options _: RequestOptions, interruption _: Interruption.Type = Interruption.self,
   ) -> DeferredExecution<Action> {
     .init { coordinator in
-      for attempt in 0..<maxInferenceRetries {
+      for attempt in 0 ..< maxInferenceRetries {
         try Task.checkCancellation()
 
         if attempt > 0 {
