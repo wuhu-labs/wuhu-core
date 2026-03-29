@@ -24,7 +24,7 @@ public struct SessionAgentState: Sendable, Equatable {
   public var steerQueue: SessionQueue<UserQueueItemValue>
   public var followUpQueue: SessionQueue<UserQueueItemValue>
 
-  public var foundationTools: FoundationTools.State
+  public var foundationTools: FoundationTool.State
 
   public subscript(userQueue lane: UserQueueLane) -> SessionQueue<UserQueueItemValue> {
     get {
@@ -60,7 +60,7 @@ public enum SessionAgentAction: Sendable {
   case user(SessionAgentUserAction)
 
   case inference(UUID, AutoRetryInference.Action)
-  case foundationTools(FoundationTools.Action)
+  case foundationTool(FoundationTool.Action)
 }
 
 public struct SessionAgentUserAction: Sendable {
@@ -95,7 +95,7 @@ public struct SessionAgentBehavior: AgentBehavior {
   private var date
 
   public let inference = AutoRetryInference()
-  public let foundationTools = FoundationTools()
+  public let foundationTool = FoundationTool()
 
   public typealias State = SessionAgentState
   public typealias Action = SessionAgentAction
@@ -162,7 +162,7 @@ public struct SessionAgentBehavior: AgentBehavior {
         state.activity = nil
       }
 
-    case let .foundationTools(childAction):
+    case let .foundationTool(childAction):
       switch childAction {
       case let .toolCallDidFinish(result):
         let message = ToolResultMessage(
@@ -176,7 +176,7 @@ public struct SessionAgentBehavior: AgentBehavior {
       default:
         break
       }
-      foundationTools.reduce(action: childAction, state: &state.foundationTools)
+      foundationTool.reduce(action: childAction, state: &state.foundationTools)
     }
   }
 
@@ -235,8 +235,8 @@ public struct SessionAgentBehavior: AgentBehavior {
   }
 
   public func startToolCall(_ toolCall: ToolCall, state: inout State) -> DeferredExecution<Action> {
-    foundationTools.startToolCall(toolCall, state: state.foundationTools)
-      .map(Action.foundationTools)
+    foundationTool.startToolCall(toolCall, state: &state.foundationTools)
+      .map(Action.foundationTool)
   }
 
   public func performCompaction(state _: inout State) -> DeferredExecution<Action> {

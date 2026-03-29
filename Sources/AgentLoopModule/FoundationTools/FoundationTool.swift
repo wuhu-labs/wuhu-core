@@ -44,6 +44,7 @@ public struct FoundationTool: Sendable {
 
   public struct State: Equatable, Sendable {
     public var mounts: [Mount] = []
+    public var startedToolCalls: Set<String> = []
 
     public init() {}
   }
@@ -60,18 +61,25 @@ public struct FoundationTool: Sendable {
     switch action {
     case let .mount(mountResult):
       state.mounts.append(mountResult.mount)
-    default:
-      return
+    case let .toolCallDidFinish(result):
+      state.startedToolCalls.remove(result.toolCallId)
     }
   }
 
   public func startToolCall(
     _ untypedToolCall: ToolCall,
-    state: State,
+    state: inout State,
   ) -> DeferredExecution<Action> {
     let context = FoundationToolContext(state: state, toolCall: untypedToolCall)
     do {
-      return try execute(arguments: Arguments.parse(untypedToolCall), context: context)
+      let parsed = try Arguments.parse(untypedToolCall)
+      if !state.startedToolCalls.contains(untypedToolCall.id) {
+        state.startedToolCalls.insert(untypedToolCall.id)
+      } else if !parsed.isRetryable {
+        throw ExecutionError.toolCallResultLost(untypedToolCall.id)
+      }
+
+      return try execute(arguments: parsed, context: context)
     } catch {
       return .send(.toolCallDidFinish(context.makeToolError(error: error)))
     }
@@ -88,6 +96,15 @@ public struct FoundationTool: Sendable {
     case bash(BashTool.Arguments)
     case mount(MountTool.Arguments)
     case park(ParkTool.Arguments)
+
+    var isRetryable: Bool {
+      switch self {
+      case .read, .ls, .grep, .find:
+        true
+      default:
+        false
+      }
+    }
 
     public static func parse(_ toolCall: ToolCall) throws -> Self {
       let decoder = JSONValueDecoder()
@@ -132,7 +149,7 @@ public struct FoundationTool: Sendable {
     case park(ParkTool.Result)
   }
 
-  func executeTyped<T: FoundationToolProtocol>(
+  func executeBranch<T: FoundationToolProtocol>(
     of _: T.Type = T.self,
     arguments: T.Arguments,
     context: FoundationToolContext,
@@ -152,25 +169,25 @@ public struct FoundationTool: Sendable {
   func execute(arguments: Arguments, context: FoundationToolContext) throws -> DeferredExecution<FoundationTool.Action> {
     switch arguments {
     case let .read(arguments):
-      try executeTyped(of: ReadTool.self, arguments: arguments, context: context, embed: Result.read)
+      try executeBranch(of: ReadTool.self, arguments: arguments, context: context, embed: Result.read)
     case let .write(arguments):
-      try executeTyped(of: WriteTool.self, arguments: arguments, context: context, embed: Result.write)
+      try executeBranch(of: WriteTool.self, arguments: arguments, context: context, embed: Result.write)
     case let .edit(arguments):
-      try executeTyped(of: EditTool.self, arguments: arguments, context: context, embed: Result.edit)
+      try executeBranch(of: EditTool.self, arguments: arguments, context: context, embed: Result.edit)
     case let .ls(arguments):
-      try executeTyped(of: LsTool.self, arguments: arguments, context: context, embed: Result.ls)
+      try executeBranch(of: LsTool.self, arguments: arguments, context: context, embed: Result.ls)
     case let .rm(arguments):
-      try executeTyped(of: RmTool.self, arguments: arguments, context: context, embed: Result.rm)
+      try executeBranch(of: RmTool.self, arguments: arguments, context: context, embed: Result.rm)
     case let .grep(arguments):
-      try executeTyped(of: GrepTool.self, arguments: arguments, context: context, embed: Result.grep)
+      try executeBranch(of: GrepTool.self, arguments: arguments, context: context, embed: Result.grep)
     case let .find(arguments):
-      try executeTyped(of: FindTool.self, arguments: arguments, context: context, embed: Result.find)
+      try executeBranch(of: FindTool.self, arguments: arguments, context: context, embed: Result.find)
     case let .bash(arguments):
-      try executeTyped(of: BashTool.self, arguments: arguments, context: context, embed: Result.bash)
+      try executeBranch(of: BashTool.self, arguments: arguments, context: context, embed: Result.bash)
     case let .mount(arguments):
-      try executeTyped(of: MountTool.self, arguments: arguments, context: context, embed: Result.mount)
+      try executeBranch(of: MountTool.self, arguments: arguments, context: context, embed: Result.mount)
     case let .park(arguments):
-      try executeTyped(of: ParkTool.self, arguments: arguments, context: context, embed: Result.park)
+      try executeBranch(of: ParkTool.self, arguments: arguments, context: context, embed: Result.park)
     }
   }
 
@@ -186,6 +203,7 @@ public struct FoundationTool: Sendable {
 
   public enum ExecutionError: Error, Sendable {
     case runnerNotFound(RunnerID)
+    case toolCallResultLost(String)
   }
 }
 

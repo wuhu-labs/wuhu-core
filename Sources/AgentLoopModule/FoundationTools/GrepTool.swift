@@ -16,8 +16,7 @@ public enum GrepTool: FoundationToolProtocol {
     let runnerID = try context.resolveRunnerID(mount: arguments.mount, runner: arguments.runner, state: context.state)
     return { _ in
       let runner = try await context.resolveRunner(id: runnerID)
-      let files = try await runner.handleGrep(arguments.path, arguments.pattern)
-      return files.joined(separator: "\n")
+      return try await runner.handleGrep(arguments.path, arguments.pattern)
     }
   }
 }
