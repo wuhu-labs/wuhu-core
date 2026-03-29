@@ -7,8 +7,6 @@ public enum SessionItemContent: Equatable, Sendable {
   case user(SessionUserMessage)
   case interruption(SessionInterruptionMessage)
 
-  case mount(SessionMountMessage)
-
   var assistant: AssistantMessage? {
     if case let .assistant(v) = self { v } else { nil }
   }
@@ -29,16 +27,14 @@ public struct SessionItem: Equatable, Identifiable, Sendable {
 
   public var timestamp: Date {
     switch content {
-    case .assistant(let m):
-      return m.timestamp
-    case .toolResult(let m):
-      return m.timestamp
-    case .user(let m):
-      return m.initiation.timestamp
-    case .interruption(let m):
-      return m.initiation.timestamp
-    case .mount(let m):
-      return m.timestamp
+    case let .assistant(m):
+      m.timestamp
+    case let .toolResult(m):
+      m.timestamp
+    case let .user(m):
+      m.initiation.timestamp
+    case let .interruption(m):
+      m.initiation.timestamp
     }
   }
 }
@@ -65,10 +61,10 @@ public struct SessionUserMessage: Equatable, Sendable {
   public var content: [ContentBlock]
 
   public func toWuhuAIUserMessage() -> WuhuAI.UserMessage {
-    var content = self.content
+    var content = content
     let prefix = initiation.toMessageHeader() + "\n\n"
 
-    if case .text(let text) = content.first {
+    if case let .text(text) = content.first {
       content[0] = .text(prefix + text.text)
     } else {
       content.insert(.text(prefix), at: 0)
@@ -87,41 +83,17 @@ public struct SessionInterruptionMessage: Equatable, Sendable {
   }
 }
 
-public struct SessionMountMessage: Equatable, Sendable {
-  public var mount: Mount
-  public var agentsMD: String?
-  public var timestamp: Date
-
-
-  public func toWuhuAIUserMessage() -> WuhuAI.UserMessage {
-    var text = "Path \(mount.path) at runner \(mount.runner) mounted as \(mount.name)."
-    let content: [ContentBlock]
-
-    if let agentsMD {
-      text.append("\n\nAGENTS.md discovered:\n\n")
-      content = [.text(text), .text(agentsMD)]
-    } else {
-      content = [.text(text)]
-    }
-
-    return .init(content: content, timestamp: timestamp)
-  }
-}
-
 extension SessionItemContent {
   func toWuhuAIMessage() -> WuhuAI.Message? {
     switch self {
-    case .assistant(let m):
-      return .assistant(m)
-    case .toolResult(let m):
-      return .toolResult(m)
-    case .user(let m):
-      return .user(m.toWuhuAIUserMessage())
-    case .interruption(let m):
-      return .user(m.toWuhuAIUserMessage())
-    case .mount(let m):
-      return .user(m.toWuhuAIUserMessage())
+    case let .assistant(m):
+      .assistant(m)
+    case let .toolResult(m):
+      .toolResult(m)
+    case let .user(m):
+      .user(m.toWuhuAIUserMessage())
+    case let .interruption(m):
+      .user(m.toWuhuAIUserMessage())
     }
   }
 }
-

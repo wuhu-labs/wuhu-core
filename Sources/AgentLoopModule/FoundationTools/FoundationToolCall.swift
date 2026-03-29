@@ -121,6 +121,7 @@ public enum FoundationToolCall: Equatable, Codable, Sendable {
 
 public struct FoundationToolResult: Equatable, Codable, Sendable {
   public var toolCallId: String
+  public var toolName: String
   public var content: Content
   public var timestamp: Date
 
@@ -136,5 +137,18 @@ public struct FoundationToolResult: Equatable, Codable, Sendable {
     case mount(MountResult)
     case park(String)
     case error(String)
+  }
+
+  public var isError: Bool {
+    switch content {
+    case .error:
+      true
+    default:
+      false
+    }
+  }
+
+  public func toContentBlock() -> [ContentBlock] {
+    fatalError()
   }
 }

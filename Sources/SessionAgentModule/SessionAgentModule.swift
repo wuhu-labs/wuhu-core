@@ -24,6 +24,8 @@ public struct SessionAgentState: Sendable, Equatable {
   public var steerQueue: SessionQueue<UserQueueItemValue>
   public var followUpQueue: SessionQueue<UserQueueItemValue>
 
+  public var foundationTools: FoundationTools.State
+
   public subscript(userQueue lane: UserQueueLane) -> SessionQueue<UserQueueItemValue> {
     get {
       switch lane {
@@ -54,10 +56,11 @@ public struct SessionMetadata: Sendable, Equatable {
 // MARK: - Action
 
 public enum SessionAgentAction: Sendable {
-  case inference(UUID, AutoRetryInference.Action)
   case setMetadata(@Sendable (inout SessionMetadata) -> Void)
   case user(SessionAgentUserAction)
-  case mount(SessionMountMessage)
+
+  case inference(UUID, AutoRetryInference.Action)
+  case foundationTools(FoundationTools.Action)
 }
 
 public struct SessionAgentUserAction: Sendable {
@@ -92,6 +95,7 @@ public struct SessionAgentBehavior: AgentBehavior {
   private var date
 
   public let inference = AutoRetryInference()
+  public let foundationTools = FoundationTools()
 
   public typealias State = SessionAgentState
   public typealias Action = SessionAgentAction
@@ -158,8 +162,21 @@ public struct SessionAgentBehavior: AgentBehavior {
         state.activity = nil
       }
 
-    case let .mount(message):
-      state.transcript.items.append(SessionItem(id: UUID(), content: .mount(message)))
+    case let .foundationTools(childAction):
+      switch childAction {
+      case let .toolCallDidFinish(result):
+        let message = ToolResultMessage(
+          toolCallId: result.toolCallId,
+          toolName: result.toolName,
+          content: result.toContentBlock(),
+          isError: result.isError,
+          timestamp: result.timestamp,
+        )
+        state.transcript.items.append(.init(id: UUID(), content: .toolResult(message)))
+      default:
+        break
+      }
+      foundationTools.reduce(action: childAction, state: &state.foundationTools)
     }
   }
 
@@ -217,96 +234,9 @@ public struct SessionAgentBehavior: AgentBehavior {
     }
   }
 
-  public func startToolCall(_ untypedToolCall: ToolCall, state: inout State) -> DeferredExecution<Action> {
-    let toolCall: SessionToolCall
-
-    func appendToolError(error: String) {
-      let toolResult = ToolResultMessage(
-        toolCallId: untypedToolCall.id,
-        toolName: untypedToolCall.name,
-        content: [.text(error)],
-        isError: true,
-        timestamp: date(),
-      )
-      state.transcript.items.append(.init(id: UUID(), content: .toolResult(toolResult)))
-    }
-
-    do {
-      toolCall = try SessionToolCall.parse(untypedToolCall)
-    } catch {
-      appendToolError(error: "Failed to parse tool call: \(String(describing: error))")
-      return .none
-    }
-
-    switch toolCall {
-    case let .read(readToolCall):
-      fatalError()
-
-    case let .write(writeToolCall):
-      fatalError()
-
-    case let .find(findToolCall):
-      fatalError()
-
-    case let .bash(bashToolCall):
-      fatalError()
-
-    case let .setTitle(tc):
-      state.metadata.title = tc.title
-      return .none
-
-    case let .mount(mount):
-    }
-
-    /*
-     * let's classify tool kinds
-     *
-     * - simple sync state update
-     * - simple async idempotent
-     * - simple async mutating
-     * - simple async mutating + long term
-     * - join
-     */
-
-//    if call.name == "set_title" {
-//      if case .object(let dict) = call.arguments,
-//         let titleUntyped = dict["title"],
-//         case .string(let title) = titleUntyped
-//      {
-//
-//        state.metadata.title = title
-//        return .init { _ in }
-//      }
-//
-//    }
-
-    fatalError()
-
-//
-//      if call.name == "bash" {
-//        return startBashToolCall(call, state: &state)
-//      }
-//
-//      if state.toolCallStatus[call.id] == .started {
-//        let repairedResult = staleToolCallResult(call: call)
-//        return .init { repairedResult }
-//      }
-//
-//      state.toolCallStatus[call.id] = .started
-//      state.status = .init(status: .running)
-//
-//      let executionState = state
-//      return .init { [self] in
-//        do {
-//          let tools = await tools(for: executionState)
-//          guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
-//            return makeToolErrorResult(call: call, errorDescription: "Unknown tool: \(call.name)")
-//          }
-//          return try await tool.execute(toolCallId: call.id, args: call.arguments)
-//        } catch {
-//          return makeToolErrorResult(call: call, errorDescription: "\(error)")
-//        }
-//      }
+  public func startToolCall(_ toolCall: ToolCall, state: inout State) -> DeferredExecution<Action> {
+    foundationTools.startToolCall(toolCall, state: state.foundationTools)
+      .map(Action.foundationTools)
   }
 
   public func performCompaction(state _: inout State) -> DeferredExecution<Action> {

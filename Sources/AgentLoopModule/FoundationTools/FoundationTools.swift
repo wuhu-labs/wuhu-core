@@ -2,20 +2,17 @@ import Dependencies
 import WuhuAI
 
 public struct FoundationTools: Sendable {
+  public init() {}
+
   public struct State: Equatable, Sendable {
     public var mounts: [Mount] = []
+
+    public init() {}
   }
 
   public enum Action: Sendable {
     case mount(MountResult)
     case toolCallDidFinish(FoundationToolResult)
-
-    public static func toolError(_ id: String, _ message: String) -> Action {
-      @Dependency(\.date)
-      var date
-
-      return .toolCallDidFinish(.init(toolCallId: id, content: .error(message), timestamp: date()))
-    }
   }
 
   @Dependency(\.date)
@@ -31,144 +28,143 @@ public struct FoundationTools: Sendable {
   }
 
   public func startToolCall(
-    _ toolCall: FoundationToolCall,
-    toolCallId: String,
+    _ untypedToolCall: ToolCall,
     state: State,
   ) -> DeferredExecution<Action> {
+    let executor = ToolCallExecutor(untypedToolCall: untypedToolCall)
+    return executor.process(state: state)
+  }
+
+  public enum ValidationError: Error, Sendable {
+    case duplicatedMountName(String)
+    case mountNotFound(String)
+    case invalidRunnerID(String)
+  }
+
+  public enum ExecutionError: Error, Sendable {
+    case runnerNotFound(RunnerID)
+  }
+}
+
+struct ToolCallExecutor {
+  var untypedToolCall: ToolCall
+
+  typealias ValidationError = FoundationTools.ValidationError
+  typealias ExecutionError = FoundationTools.ExecutionError
+  typealias State = FoundationTools.State
+  typealias Action = FoundationTools.Action
+
+  @Dependency(\.date)
+  var date
+
+  func makeToolCallResult(content: FoundationToolResult.Content) -> FoundationToolResult {
+    .init(toolCallId: untypedToolCall.id, toolName: untypedToolCall.name, content: content, timestamp: date())
+  }
+
+  func process(state: State) -> DeferredExecution<Action> {
     do {
+      let toolCall = try FoundationToolCall.parse(untypedToolCall)
+
       switch toolCall {
       case let .read(readToolCall):
-        return try handleRead(toolCallId: toolCallId, readToolCall: readToolCall, state: state)
+        return try handle(read: readToolCall, state: state)
       case let .write(writeToolCall):
-        return try handleWrite(toolCallId: toolCallId, writeToolCall: writeToolCall, state: state)
+        return try handle(write: writeToolCall, state: state)
       case let .edit(editToolCall):
-        return try handleEdit(toolCallId: toolCallId, editToolCall: editToolCall, state: state)
+        return try handle(edit: editToolCall, state: state)
       case let .ls(lsToolCall):
-        return try handleLs(toolCallId: toolCallId, lsToolCall: lsToolCall, state: state)
+        return try handle(ls: lsToolCall, state: state)
       case let .rm(rmToolCall):
-        return try handleRm(toolCallId: toolCallId, rmToolCall: rmToolCall, state: state)
+        return try handle(rm: rmToolCall, state: state)
       case let .grep(grepToolCall):
-        return try handleGrep(toolCallId: toolCallId, grepToolCall: grepToolCall, state: state)
+        return try handle(grep: grepToolCall, state: state)
       case let .find(findToolCall):
-        return try handleFind(toolCallId: toolCallId, findToolCall: findToolCall, state: state)
+        return try handle(find: findToolCall, state: state)
       case let .bash(bashToolCall):
-        return try handleBash(toolCallId: toolCallId, bashToolCall: bashToolCall, state: state)
+        return try handle(bash: bashToolCall, state: state)
       case let .mount(mount):
-        return try handleMount(toolCallId: toolCallId, mount: mount, state: state)
+        return try handle(mount: mount, state: state)
       case let .park(parkToolCall):
-        return try handlePark(toolCallId: toolCallId, parkToolCall: parkToolCall, state: state)
+        return try handle(park: parkToolCall, state: state)
       }
     } catch {
-      let toolResult = FoundationToolResult(toolCallId: toolCallId, content: .error(String(describing: error)), timestamp: date())
-      return .send(.toolCallDidFinish(toolResult))
+      return .send(.toolCallDidFinish(makeToolCallResult(content: .error(String(describing: error)))))
     }
   }
 
-  func handleRead(
-    toolCallId: String,
-    readToolCall: FoundationToolCall.ReadToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: readToolCall.mount, runner: readToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(read: FoundationToolCall.ReadToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: read.mount, runner: read.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      let content = try await runner.handleRead(readToolCall.path, readToolCall.offset, readToolCall.limit)
+      let content = try await runner.handleRead(read.path, read.offset, read.limit)
       return .read(content)
     }
   }
 
-  func handleWrite(
-    toolCallId: String,
-    writeToolCall: FoundationToolCall.WriteToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: writeToolCall.mount, runner: writeToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(write: FoundationToolCall.WriteToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: write.mount, runner: write.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      try await runner.handleWrite(writeToolCall.path, writeToolCall.content)
-      return .write(writeToolCall.content)
+      try await runner.handleWrite(write.path, write.content)
+      return .write(write.content)
     }
   }
 
-  func handleEdit(
-    toolCallId: String,
-    editToolCall: FoundationToolCall.EditToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: editToolCall.mount, runner: editToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(edit: FoundationToolCall.EditToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: edit.mount, runner: edit.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      try await runner.handleEdit(editToolCall.path, editToolCall.content)
-      return .edit(editToolCall.content)
+      try await runner.handleEdit(edit.path, edit.content)
+      return .edit(edit.content)
     }
   }
 
-  func handleLs(
-    toolCallId: String,
-    lsToolCall: FoundationToolCall.LsToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: lsToolCall.mount, runner: lsToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(ls: FoundationToolCall.LsToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: ls.mount, runner: ls.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      let files = try await runner.handleLs(lsToolCall.path)
+      let files = try await runner.handleLs(ls.path)
       return .ls(files.joined(separator: "\n"))
     }
   }
 
-  func handleRm(
-    toolCallId: String,
-    rmToolCall: FoundationToolCall.RmToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: rmToolCall.mount, runner: rmToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(rm: FoundationToolCall.RmToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: rm.mount, runner: rm.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      try await runner.handleRm(rmToolCall.path)
-      return .rm(rmToolCall.path)
+      try await runner.handleRm(rm.path)
+      return .rm(rm.path)
     }
   }
 
-  func handleGrep(
-    toolCallId: String,
-    grepToolCall: FoundationToolCall.GrepToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: grepToolCall.mount, runner: grepToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(grep: FoundationToolCall.GrepToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: grep.mount, runner: grep.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      let files = try await runner.handleGrep(grepToolCall.path, grepToolCall.pattern)
+      let files = try await runner.handleGrep(grep.path, grep.pattern)
       return .grep(files.joined(separator: "\n"))
     }
   }
 
-  func handleFind(
-    toolCallId: String,
-    findToolCall: FoundationToolCall.FindToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: findToolCall.mount, runner: findToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(find: FoundationToolCall.FindToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: find.mount, runner: find.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      let files = try await runner.handleFind(findToolCall.path, findToolCall.pattern)
+      let files = try await runner.handleFind(find.path, find.pattern)
       return .find(files.joined(separator: "\n"))
     }
   }
 
-  func handleBash(
-    toolCallId: String,
-    bashToolCall: FoundationToolCall.BashToolCall,
-    state: State,
-  ) throws -> DeferredExecution<Action> {
-    let runnerID = try resolveRunnerID(mount: bashToolCall.mount, runner: bashToolCall.runner, state: state)
-    return run(toolCallId: toolCallId) { _ in
+  func handle(bash: FoundationToolCall.BashToolCall, state: State) throws -> DeferredExecution<Action> {
+    let runnerID = try resolveRunnerID(mount: bash.mount, runner: bash.runner, state: state)
+    return run { _ in
       let runner = try await resolveRunner(id: runnerID)
-      try await runner.handleBash(bashToolCall.command)
-      return .bash(bashToolCall.command)
+      try await runner.handleBash(bash.command)
+      return .bash(bash.command)
     }
   }
 
-  func handleMount(toolCallId: String, mount: Mount, state: State) throws -> DeferredExecution<Action> {
+  func handle(mount: Mount, state: State) throws -> DeferredExecution<Action> {
     let noDuplicates = state.mounts.allSatisfy {
       $0.name != mount.name
     }
@@ -176,7 +172,7 @@ public struct FoundationTools: Sendable {
       throw ValidationError.duplicatedMountName(mount.name)
     }
 
-    return run(toolCallId: toolCallId) { send in
+    return run { send in
       let runner = try await resolveRunner(id: mount.runner)
       let files = try await runner.listDirectory(path: mount.path)
       var agentsMD: String?
@@ -191,11 +187,7 @@ public struct FoundationTools: Sendable {
     }
   }
 
-  func handlePark(
-    toolCallId _: String,
-    parkToolCall _: FoundationToolCall.ParkToolCall,
-    state _: State,
-  ) throws -> DeferredExecution<Action> {
+  func handle(park _: FoundationToolCall.ParkToolCall, state _: State) throws -> DeferredExecution<Action> {
     fatalError()
   }
 
@@ -221,7 +213,6 @@ public struct FoundationTools: Sendable {
   }
 
   func run(
-    toolCallId: String,
     body: @escaping @Sendable (
       _ send: @Sendable (Action) -> Void,
     ) async throws -> FoundationToolResult.Content,
@@ -229,22 +220,10 @@ public struct FoundationTools: Sendable {
     DeferredExecution { coordinator in
       do {
         let content = try await body(coordinator.send)
-        let toolResult = FoundationToolResult(toolCallId: toolCallId, content: content, timestamp: date())
-        coordinator.send(.toolCallDidFinish(toolResult))
+        coordinator.send(.toolCallDidFinish(makeToolCallResult(content: content)))
       } catch {
-        let toolResult = FoundationToolResult(toolCallId: toolCallId, content: .error(String(describing: error)), timestamp: date())
-        coordinator.send(.toolCallDidFinish(toolResult))
+        coordinator.send(.toolCallDidFinish(makeToolCallResult(content: .error(String(describing: error)))))
       }
     }
-  }
-
-  public enum ValidationError: Error, Sendable {
-    case duplicatedMountName(String)
-    case mountNotFound(String)
-    case invalidRunnerID(String)
-  }
-
-  public enum ExecutionError: Error, Sendable {
-    case runnerNotFound(RunnerID)
   }
 }
