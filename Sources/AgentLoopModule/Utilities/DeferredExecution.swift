@@ -5,18 +5,14 @@ public struct DeferredExecutionCoordinator<Action: Sendable>: Sendable {
 
   let onAction: ActionHandler
 
-  init(onAction: @escaping ActionHandler) {
-    self.onAction = onAction
-  }
-
   public func send(_ action: Action) {
     onAction(action)
   }
 
   public func embed<LocalAction>(
-    _ embed: @escaping @Sendable (LocalAction) -> Action
+    _ embed: @escaping @Sendable (LocalAction) -> Action,
   ) -> DeferredExecutionCoordinator<LocalAction> {
-    .init { self.onAction(embed($0)) }
+    .init { onAction(embed($0)) }
   }
 }
 
@@ -28,7 +24,7 @@ public struct DeferredExecution<Action: Sendable>: Sendable {
 
   public init(
     needsPersistence: Bool = true,
-    run: @escaping @Sendable (_ coordinator: Coordinator) async throws -> Void
+    run: @escaping @Sendable (_ coordinator: Coordinator) async throws -> Void,
   ) {
     self.needsPersistence = needsPersistence
     self.run = run
@@ -36,18 +32,23 @@ public struct DeferredExecution<Action: Sendable>: Sendable {
 
   public func map<ParentAction>(
     needsPersistence: Bool? = nil,
-    _ embed: @escaping @Sendable (Action) -> ParentAction
+    _ embed: @escaping @Sendable (Action) -> ParentAction,
   ) -> DeferredExecution<ParentAction> {
-
-    return DeferredExecution<ParentAction>(
+    DeferredExecution<ParentAction>(
       needsPersistence: needsPersistence ?? self.needsPersistence,
       run: { coordinator in
-        try await self.run(coordinator.embed(embed))
-      }
+        try await run(coordinator.embed(embed))
+      },
     )
   }
 
   public static var none: Self {
     .init { _ in }
+  }
+
+  public static func send(_ action: Action) -> Self {
+    .init { coordinator in
+      coordinator.send(action)
+    }
   }
 }

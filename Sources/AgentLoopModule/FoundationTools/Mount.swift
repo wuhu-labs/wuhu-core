@@ -1,39 +1,14 @@
-import Dependencies
 import DependenciesMacros
-import WuhuAI
 
-public enum SessionToolCall: Equatable, Codable, Sendable {
-  case read(ReadToolCall)
-  case write(WriteToolCall)
-  case find(FindToolCall)
-  case bash(BashToolCall)
-  case setTitle(SetTitleToolCall)
-  case mount(Mount)
+public struct Mount: Codable, Hashable, Sendable {
+  public var name: String
+  public var runner: RunnerID
+  public var path: String
+}
 
-  public struct ReadToolCall: Equatable, Codable, Sendable {
-
-  }
-
-  public struct WriteToolCall: Equatable, Codable, Sendable {
-
-  }
-
-  public struct FindToolCall: Equatable, Codable, Sendable {
-
-
-  }
-
-  public struct BashToolCall: Equatable, Codable, Sendable {
-
-  }
-
-  public struct SetTitleToolCall: Equatable, Codable, Sendable {
-    public var title: String
-  }
-
-  public static func parse(_ toolCall: ToolCall) throws -> SessionToolCall {
-    fatalError("Not implemented")
-  }
+public struct MountResult: Codable, Sendable, Equatable {
+  public var mount: Mount
+  public var agentsMD: String?
 }
 
 public enum RunnerID: Sendable, RawRepresentable, Hashable, Codable {
@@ -76,21 +51,24 @@ public enum RunnerID: Sendable, RawRepresentable, Hashable, Codable {
   public var rawValue: String {
     switch self {
     case .local:
-      return "local"
-    case .remote(name: let name):
-      return "remote:\(name)"
+      "local"
+    case let .remote(name: name):
+      "remote:\(name)"
     }
   }
-}
-
-public struct Mount: Codable, Hashable, Sendable {
-  public var name: String
-  public var runner: RunnerID
-  public var path: String
 }
 
 @DependencyClient
 public struct Runner: Sendable {
   public var readTextFile: @Sendable (_ path: String) async throws -> String
   public var listDirectory: @Sendable (_ path: String) async throws -> [String]
+
+  public var handleRead: @Sendable (_ path: String, _ offset: Int?, _ limit: Int?) async throws -> String
+  public var handleWrite: @Sendable (_ path: String, _ content: String) async throws -> Void
+  public var handleEdit: @Sendable (_ path: String, _ content: String) async throws -> Void
+  public var handleLs: @Sendable (_ path: String) async throws -> [String]
+  public var handleRm: @Sendable (_ path: String) async throws -> Void
+  public var handleGrep: @Sendable (_ path: String, _ pattern: String) async throws -> [String]
+  public var handleFind: @Sendable (_ path: String, _ pattern: String) async throws -> [String]
+  public var handleBash: @Sendable (_ command: String) async throws -> Void
 }

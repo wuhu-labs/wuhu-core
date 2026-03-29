@@ -24,15 +24,13 @@ public struct SessionAgentState: Sendable, Equatable {
   public var steerQueue: SessionQueue<UserQueueItemValue>
   public var followUpQueue: SessionQueue<UserQueueItemValue>
 
-  public var mounts: [Mount] = []
-
   public subscript(userQueue lane: UserQueueLane) -> SessionQueue<UserQueueItemValue> {
     get {
       switch lane {
       case .steer:
-        return steerQueue
+        steerQueue
       case .followUp:
-        return followUpQueue
+        followUpQueue
       }
     }
     set {
@@ -81,13 +79,11 @@ public enum SessionAgentInterruption: Sendable {
 
 // MARK: - Tool Result
 
-public struct SessionAgentToolResult: Sendable {
-}
+public struct SessionAgentToolResult: Sendable {}
 
 // MARK: - Persistence Diff
 
-public struct SessionAgentPersistenceDiff: Sendable {
-}
+public struct SessionAgentPersistenceDiff: Sendable {}
 
 // MARK: - Behavior
 
@@ -107,7 +103,7 @@ public struct SessionAgentBehavior: AgentBehavior {
     let now = date()
 
     switch action {
-    case .user(let userAction):
+    case let .user(userAction):
       var initiation = userAction.initiation
       // We need to order the messages.
       initiation.timestamp = now
@@ -115,11 +111,10 @@ public struct SessionAgentBehavior: AgentBehavior {
       switch userAction.action {
       case .interrupt:
         switch state.activity {
-        case .inference(let inferenceState):
+        case let .inference(inferenceState):
           if let partialMessage = inferenceState.partialMessage {
             state.transcript.items.append(SessionItem(id: inferenceState.inferenceID, content: .assistant(partialMessage)))
             state.transcript.items.append(SessionItem(id: UUID(), content: .interruption(.init(initiation: initiation))))
-
           }
           state.activity = nil
 
@@ -135,11 +130,11 @@ public struct SessionAgentBehavior: AgentBehavior {
         state[userQueue: lane].remove(itemWithID: itemID)
       }
 
-    case .setMetadata(let body):
+    case let .setMetadata(body):
       body(&state.metadata)
 
-    case .inference(let inferenceID, let childAction):
-      guard case .inference(var inferenceState) = state.activity,
+    case let .inference(inferenceID, childAction):
+      guard case var .inference(inferenceState) = state.activity,
             inferenceState.inferenceID == inferenceID
       else {
         print("[TO UPDATE LOG] fucked up state")
@@ -147,7 +142,7 @@ public struct SessionAgentBehavior: AgentBehavior {
       }
 
       switch childAction {
-      case .inferenceStarted(let attempt):
+      case let .inferenceStarted(attempt):
         inferenceState.attempt = attempt
         inferenceState.attemptStartedAt = date()
         inferenceState.textDeltas = []
@@ -158,16 +153,14 @@ public struct SessionAgentBehavior: AgentBehavior {
         inferenceState.partialMessage = p
         state.activity = .inference(inferenceState)
 
-      case .inferenceCompleted(let message):
+      case let .inferenceCompleted(message):
         state.transcript.items.append(SessionItem(id: inferenceID, content: .assistant(message)))
         state.activity = nil
       }
 
-    case .mount(let message):
+    case let .mount(message):
       state.transcript.items.append(SessionItem(id: UUID(), content: .mount(message)))
     }
-
-    return
   }
 
   public func nextToolCall(state: State) -> ToolCall? {
@@ -176,15 +169,15 @@ public struct SessionAgentBehavior: AgentBehavior {
 
   public func nextContextAction(state: SessionAgentState) -> AgentContextAction? {
     if state.transcript.needsInference {
-      return .inference
-    } else if state.steerQueue.isEmpty && state.followUpQueue.isEmpty {
-      return nil
+      .inference
+    } else if state.steerQueue.isEmpty, state.followUpQueue.isEmpty {
+      nil
     } else {
-      return .drain
+      .drain
     }
   }
 
-  public func shouldCompact(state: State) -> Bool {
+  public func shouldCompact(state _: State) -> Bool {
     false
   }
 
@@ -206,7 +199,8 @@ public struct SessionAgentBehavior: AgentBehavior {
     Context(
       systemPrompt: "",
       messages: state.transcript.items.compactMap { $0.content.toWuhuAIMessage() },
-      tools: [])
+      tools: [],
+    )
   }
 
   public func infer(context: Context, state: inout State) -> DeferredExecution<Action> {
@@ -217,14 +211,10 @@ public struct SessionAgentBehavior: AgentBehavior {
     state.activity = .inference(.init(inferenceID: inferenceID))
 
     return inference.infer(
-      model: model, context: context, options: .init(), interruption: Interruption.self
+      model: model, context: context, options: .init(), interruption: Interruption.self,
     ).map { childAction in
       Action.inference(inferenceID, childAction)
     }
-  }
-
-  func resolveRunner(id: RunnerID) -> Runner? {
-    fatalError()
   }
 
   public func startToolCall(_ untypedToolCall: ToolCall, state: inout State) -> DeferredExecution<Action> {
@@ -236,7 +226,7 @@ public struct SessionAgentBehavior: AgentBehavior {
         toolName: untypedToolCall.name,
         content: [.text(error)],
         isError: true,
-        timestamp: date()
+        timestamp: date(),
       )
       state.transcript.items.append(.init(id: UUID(), content: .toolResult(toolResult)))
     }
@@ -249,48 +239,24 @@ public struct SessionAgentBehavior: AgentBehavior {
     }
 
     switch toolCall {
-    case .read(let readToolCall):
+    case let .read(readToolCall):
       fatalError()
 
-    case .write(let writeToolCall):
+    case let .write(writeToolCall):
       fatalError()
 
-    case .find(let findToolCall):
+    case let .find(findToolCall):
       fatalError()
 
-    case .bash(let bashToolCall):
+    case let .bash(bashToolCall):
       fatalError()
 
-    case .setTitle(let tc):
+    case let .setTitle(tc):
       state.metadata.title = tc.title
       return .none
 
-    case .mount(let mount):
-      let noDuplicates = state.mounts.allSatisfy {
-        $0.name != mount.name
-      }
-      guard noDuplicates else {
-        appendToolError(error: "Duplicated mount name: \(mount).")
-        return .none
-      }
-      guard let runner = resolveRunner(id: mount.runner) else {
-        appendToolError(error: "Runner not found: \(mount.runner).")
-        return .none
-      }
-
-      return .init { coordinator in
-        let files = try await runner.listDirectory(path: mount.path)
-        var agentsMD: String?
-        if files.contains("AGENTS.md") {
-          agentsMD = try await runner.readTextFile(path: mount.path + "/" + "AGENTS.md")
-        }
-
-        coordinator.send(.mount(.init(mount: mount, agentsMD: agentsMD, timestamp: date())))
-      }
+    case let .mount(mount):
     }
-
-
-
 
     /*
      * let's classify tool kinds
@@ -313,8 +279,6 @@ public struct SessionAgentBehavior: AgentBehavior {
 //      }
 //
 //    }
-
-
 
     fatalError()
 
@@ -345,15 +309,15 @@ public struct SessionAgentBehavior: AgentBehavior {
 //      }
   }
 
-  public func performCompaction(state: inout State) -> DeferredExecution<Action> {
+  public func performCompaction(state _: inout State) -> DeferredExecution<Action> {
     fatalError()
   }
 
-  public func diff(from oldState: State, to newState: State) -> PersistenceDiff? {
+  public func diff(from _: State, to _: State) -> PersistenceDiff? {
     fatalError()
   }
 
-  public func persist(_ diff: PersistenceDiff) async throws {
+  public func persist(_: PersistenceDiff) async throws {
     fatalError()
   }
 }
