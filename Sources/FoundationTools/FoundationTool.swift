@@ -1,3 +1,4 @@
+import AgentLoopModule
 import Dependencies
 import Foundation
 import WuhuAI
@@ -154,7 +155,7 @@ public struct FoundationTool: Sendable {
     arguments: T.Arguments,
     context: FoundationToolContext,
     embed: @escaping @Sendable (T.Result) -> Result,
-  ) throws -> DeferredExecution<FoundationTool.Action> {
+  ) throws -> DeferredExecution<Action> {
     let execution = try T.execute(arguments: arguments, context: context)
     return DeferredExecution { coordinator in
       do {
@@ -166,7 +167,7 @@ public struct FoundationTool: Sendable {
     }
   }
 
-  func execute(arguments: Arguments, context: FoundationToolContext) throws -> DeferredExecution<FoundationTool.Action> {
+  func execute(arguments: Arguments, context: FoundationToolContext) throws -> DeferredExecution<Action> {
     switch arguments {
     case let .read(arguments):
       try executeBranch(of: ReadTool.self, arguments: arguments, context: context, embed: Result.read)

@@ -81,9 +81,19 @@ let package = Package(
       ],
     ),
     .target(
+      name: "FoundationTools",
+      dependencies: [
+        "AgentLoopModule",
+        .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "DependenciesMacros", package: "swift-dependencies"),
+        .product(name: "WuhuAI", package: "wuhu-ai"),
+      ],
+    ),
+    .target(
       name: "SessionAgentModule",
       dependencies: [
         "AgentLoopModule",
+        "FoundationTools",
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
         .product(name: "WuhuAI", package: "wuhu-ai"),

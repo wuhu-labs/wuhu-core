@@ -1,6 +1,7 @@
 import AgentLoopModule
 import Dependencies
 import Foundation
+import FoundationTools
 import WuhuAI
 
 // MARK: - State
