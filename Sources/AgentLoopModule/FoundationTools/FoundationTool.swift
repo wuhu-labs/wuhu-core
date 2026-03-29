@@ -2,12 +2,29 @@ import Dependencies
 import Foundation
 import WuhuAI
 
-public protocol FoundationTool {
+public protocol FoundationToolProtocol {
     associatedtype Arguments: Equatable, Codable, Sendable
     associatedtype Result: Equatable, Codable, Sendable
 
     static var toolName: String { get }
     static func execute(arguments: Arguments, context: FoundationToolExecutionContext) async throws -> DeferredExecution<FoundationTools.Action>
+}
+
+public enum FoundationTool {
+    public enum Arguments: Equatable, Codable, Sendable {
+        case read(ReadTool.Arguments)
+    }
+
+    public enum Result: Equatable, Codable, Sendable {
+        case read(String)
+    }
+
+    public static func execute(arguments: Arguments, context: FoundationToolExecutionContext) async throws -> DeferredExecution<FoundationTools.Action> {
+        switch arguments {
+        case let .read(arguments):
+            try await ReadTool.execute(arguments: arguments, context: context)
+        }
+    }
 }
 
 public struct FoundationToolExecutionContext: Sendable {
@@ -56,66 +73,5 @@ public struct FoundationToolExecutionContext: Sendable {
 
     func makeToolCallResult(content: FoundationToolResult.Content) -> FoundationToolResult {
         .init(toolCallId: toolCall.id, toolName: toolCall.name, content: content, timestamp: date())
-    }
-}
-
-func resolveFoundationTool(name: String) throws -> any FoundationTool.Type {
-    switch name {
-    case ReadTool.toolName:
-        return ReadTool.self
-    default:
-        throw FoundationToolCall.ParseError.unknownToolCall(name)
-    }
-}
-
-public struct AnyFoundationToolResult: Equatable, Codable, Sendable {
-    public var toolCallId: String
-    public var toolName: String
-    public var timestamp: Date
-
-    let value: any (Equatable & Codable & Sendable)
-
-    public static func == (lhs: AnyFoundationToolResult, rhs: AnyFoundationToolResult) -> Bool {
-        guard lhs.toolCallId == rhs.toolCallId, lhs.toolName == rhs.toolName, lhs.timestamp == rhs.timestamp else {
-            return false
-        }
-        return equals(lhs: lhs.value, rhs: rhs.value)
-    }
-
-    public enum CodingKeys: String, CodingKey {
-        case toolCallId
-        case toolName
-        case timestamp
-        case value
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(toolCallId, forKey: .toolCallId)
-        try container.encode(toolName, forKey: .toolName)
-        try container.encode(timestamp, forKey: .timestamp)
-        try container.encode(value, forKey: .value)
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        toolCallId = try container.decode(String.self, forKey: .toolCallId)
-        toolName = try container.decode(String.self, forKey: .toolName)
-        timestamp = try container.decode(Date.self, forKey: .timestamp)
-
-        let Tool = try resolveFoundationTool(name: toolName)
-        let valueType = Tool.Result.self
-        let x = try container.decode(Tool.Result.self, forKey: .value)
-    }
-
-    public func toContentBlock() -> [ContentBlock] {
-        fatalError()
-    }
-
-    private static func equals<LHS: Equatable>(lhs: LHS, rhs: any Equatable) -> Bool {
-        guard let rhs = rhs as? LHS else {
-            return false
-        }
-        return lhs == rhs
     }
 }

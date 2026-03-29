@@ -1,4 +1,4 @@
-public enum ReadTool: FoundationTool {
+public enum ReadTool: FoundationToolProtocol {
     public static var toolName: String {
         "read"
     }
