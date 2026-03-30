@@ -91,7 +91,8 @@ private struct FSWalker {
       throw FileStoreError.notADirectory(currentPath)
     }
     guard let child = children[component] else {
-      throw FileStoreError.fileNotFound(currentPath + "/" + component)
+      let combinedPath = currentPath + "/" + component
+      throw FileStoreError.fileNotFound(URL(filePath: combinedPath).standardizedFileURL.path)
     }
 
     guard followSymlinks, case let .symlink(link) = child.payload else {
