@@ -1,3 +1,4 @@
+import AgentLoopModule
 import Foundation
 import Testing
 import WuhuAI

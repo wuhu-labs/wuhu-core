@@ -1,3 +1,4 @@
+import AgentLoopModule
 import Dependencies
 import Foundation
 import WuhuAI
@@ -28,8 +29,6 @@ struct WuhuSessionToolCallStatusChange: Sendable, Hashable {
 struct WuhuSessionPersistenceDiff: Sendable {
   var appendedEntries: [WuhuSessionEntry]
   var systemJournalEntries: [SystemUrgentQueueJournalEntry]
-  var steerJournalEntries: [UserQueueJournalEntry]
-  var followUpJournalEntries: [UserQueueJournalEntry]
   var toolCallStatusChanges: [WuhuSessionToolCallStatusChange]
   var sessionMetadataChanged: Bool
   var settingsChanged: Bool
@@ -44,8 +43,6 @@ struct WuhuSessionLoopState: Sendable, Equatable {
   var settings: SessionSettingsSnapshot
   var status: SessionStatusSnapshot
   var systemUrgent: SystemUrgentQueueBackfill
-  var steer: UserQueueBackfill
-  var followUp: UserQueueBackfill
 
   static var empty: WuhuSessionLoopState {
     .init(
@@ -64,8 +61,6 @@ struct WuhuSessionLoopState: Sendable, Equatable {
       settings: .init(effectiveModel: .init(provider: .openai, id: "unknown")),
       status: .init(status: .idle),
       systemUrgent: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
     )
   }
 }
@@ -98,8 +93,6 @@ struct WuhuSessionBehavior: AgentBehavior {
       settings: parts.settings,
       status: parts.status,
       systemUrgent: parts.systemUrgent,
-      steer: parts.steer,
-      followUp: parts.followUp,
     )
   }
 
@@ -168,32 +161,6 @@ struct WuhuSessionBehavior: AgentBehavior {
 
   func handle(_ action: ExternalAction, state: inout State) {
     switch action {
-    case let .enqueueUser(id, message, lane):
-      let item = UserQueuePendingItem(id: id, enqueuedAt: Date(), message: message)
-      let backfill = enqueueUser(item: item, lane: lane, into: state)
-      applyUserQueue(backfill, lane: lane, to: &state)
-      state.status = .init(status: .running)
-
-    case let .cancelUser(id, lane):
-      guard let backfill = cancelUser(id: id, lane: lane, from: state) else { return }
-      applyUserQueue(backfill, lane: lane, to: &state)
-      state.status = .init(status: statusForOperationalState(state))
-
-    case let .enqueueSystem(id, input, enqueuedAt):
-      let item = SystemUrgentPendingItem(id: id, enqueuedAt: enqueuedAt, input: input)
-      state.systemUrgent = enqueueSystem(item: item, into: state)
-      state.status = .init(status: .running)
-
-    case let .setCustomTitle(title):
-      guard state.session.customTitle != title else { return }
-      state.session.customTitle = title
-      state.session.updatedAt = Date()
-
-    case let .setArchived(isArchived):
-      guard state.session.isArchived != isArchived else { return }
-      state.session.isArchived = isArchived
-      state.session.updatedAt = Date()
-
     case let .setCwd(cwd):
       guard state.session.cwd != cwd else { return }
       state.session.cwd = cwd
@@ -217,220 +184,10 @@ struct WuhuSessionBehavior: AgentBehavior {
     }
   }
 
-  @discardableResult
-  func drainInterruptItems(state: inout State) -> Bool {
-    if state.status.status == .stopped { return false }
-
-    struct Candidate {
-      enum Kind {
-        case system(SystemUrgentPendingItem)
-        case steer(UserQueuePendingItem)
-      }
-
-      var enqueuedAt: Date
-      var stableID: String
-      var kind: Kind
-    }
-
-    var candidates: [Candidate] = state.systemUrgent.pending.map {
-      .init(enqueuedAt: $0.enqueuedAt, stableID: $0.id.rawValue, kind: .system($0))
-    }
-    candidates += state.steer.pending.map {
-      .init(enqueuedAt: $0.enqueuedAt, stableID: $0.id.rawValue, kind: .steer($0))
-    }
-    candidates.sort { a, b in
-      if a.enqueuedAt != b.enqueuedAt { return a.enqueuedAt < b.enqueuedAt }
-      return a.stableID < b.stableID
-    }
-
-    guard !candidates.isEmpty else { return false }
-
-    state.systemUrgent.pending = []
-    state.steer.pending = []
-
-    for candidate in candidates {
-      switch candidate.kind {
-      case let .system(item):
-        let entry = appendEntry(
-          createdAt: item.enqueuedAt,
-          payload: materializedPayload(for: item),
-          to: &state,
-        )
-        state.systemUrgent.journal.append(.materialized(
-          id: item.id,
-          transcriptEntryID: .init(rawValue: "\(entry.id)"),
-          at: Date(),
-        ))
-      case let .steer(item):
-        let entry = appendEntry(
-          createdAt: item.enqueuedAt,
-          payload: materializedPayload(for: item),
-          to: &state,
-        )
-        state.steer.journal.append(.materialized(
-          lane: .steer,
-          id: item.id,
-          transcriptEntryID: .init(rawValue: "\(entry.id)"),
-          at: Date(),
-        ))
-      }
-    }
-
-    state.systemUrgent.cursor = advancedCursor(
-      state.systemUrgent.cursor,
-      by: candidates.count { if case .system = $0.kind { true } else { false } },
-    )
-    state.steer.cursor = advancedCursor(
-      state.steer.cursor,
-      by: candidates.count { if case .steer = $0.kind { true } else { false } },
-    )
-    state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
-    return true
-  }
-
-  @discardableResult
-  func drainTurnItems(state: inout State) -> Bool {
-    if state.status.status == .stopped { return false }
-    guard !state.followUp.pending.isEmpty else { return false }
-
-    let items = state.followUp.pending.sorted {
-      if $0.enqueuedAt != $1.enqueuedAt { return $0.enqueuedAt < $1.enqueuedAt }
-      return $0.id.rawValue < $1.id.rawValue
-    }
-
-    state.followUp.pending = []
-
-    for item in items {
-      let entry = appendEntry(
-        createdAt: item.enqueuedAt,
-        payload: materializedPayload(for: item),
-        to: &state,
-      )
-      state.followUp.journal.append(.materialized(
-        lane: .followUp,
-        id: item.id,
-        transcriptEntryID: .init(rawValue: "\(entry.id)"),
-        at: Date(),
-      ))
-    }
-    state.followUp.cursor = advancedCursor(state.followUp.cursor, by: items.count)
-    state.status = .init(status: state.status.status == .stopped ? .stopped : .running)
-    return true
-  }
-
-  func buildContext(state: State) -> Context {
-    let header = (try? WuhuPromptPreparation.extractHeader(from: state.entries, sessionID: sessionID.rawValue))
-    let messages = WuhuPromptPreparation.extractContextMessages(from: state.entries)
-    let hydrated = hydrateImageBlobs(in: messages)
-    return Context(systemPrompt: header?.systemPrompt ?? "", messages: hydrated, tools: [])
-  }
-
-  func infer(context: Context, stream: AgentStreamSink<StreamAction>) async throws -> AssistantMessage {
-    let session = try await store.getSession(id: sessionID.rawValue)
-    let tools = await tools(for: stateForToolCatalog(session: session))
-
-    let resolved = WuhuModelCatalog.resolveAlias(session.model)
-    let provider = session.provider.piProvider
-    let apiModel = Model(id: resolved.apiModelID, provider: provider, baseURL: providerBaseURL(for: provider))
-    var requestOptions = try await makeRequestOptions(model: apiModel, settings: store.loadSettingsSnapshot(sessionID: sessionID), userModelID: session.model)
-    requestOptions.sessionId = sessionID.rawValue
-    mergeBetaFeatures(resolved.betaFeatures, into: &requestOptions)
-
-    let effectiveContext = Context(
-      systemPrompt: context.systemPrompt,
-      messages: context.messages,
-      tools: tools.map(\.tool),
-    )
-
-    let events = try await streamFn(apiModel, effectiveContext, requestOptions)
-
-    var partial: AssistantMessage?
-    var final: AssistantMessage?
-    for try await event in events {
-      switch event {
-      case let .start(p):
-        partial = p
-      case let .textDelta(delta, p):
-        stream.yield(.assistantTextDelta(delta))
-        partial = p
-      case let .done(message):
-        final = message
-      }
-    }
-    if let final { return final }
-    if let partial { return partial }
-    throw WuhuAIError.unsupported("No model output")
-  }
-
-  func persistAssistantEntry(_ message: AssistantMessage, state: inout State) {
-    _ = appendEntry(
-      createdAt: message.timestamp,
-      payload: .message(.fromPi(.assistant(message))),
-      to: &state,
-    )
-
-    let calls = message.content.compactMap { block -> ToolCall? in
-      if case let .toolCall(call) = block { return call }
-      return nil
-    }
-    for call in calls {
-      state.toolCallStatus[call.id] = .pending
-    }
-    state.status = .init(status: statusForOperationalState(state))
-  }
-
   func nextToolCall(state: State) -> ToolCall? {
-    for entry in state.entries {
-      guard case let .message(message) = entry.payload else { continue }
-      guard case let .assistant(assistant) = message else { continue }
-      for block in assistant.content {
-        guard case let .toolCall(id, name, arguments) = block else { continue }
-        let call = ToolCall(id: id, name: name, arguments: arguments)
-        guard let status = state.toolCallStatus[call.id] else { continue }
-        if status == .pending || status == .started {
-          return call
-        }
-      }
-    }
-    return nil
+    fatalError()
   }
 
-  func startToolCall(_ call: ToolCall, state: inout State) -> AgentToolExecutionHandle<ToolResult> {
-    if call.name == "bash" {
-      return startBashToolCall(call, state: &state)
-    }
-
-    if state.toolCallStatus[call.id] == .started {
-      let repairedResult = staleToolCallResult(call: call)
-      return .init { repairedResult }
-    }
-
-    state.toolCallStatus[call.id] = .started
-    state.status = .init(status: .running)
-
-    let executionState = state
-    return .init { [self] in
-      do {
-        let tools = await tools(for: executionState)
-        guard let tool = tools.first(where: { $0.tool.name == call.name }) else {
-          return makeToolErrorResult(call: call, errorDescription: "Unknown tool: \(call.name)")
-        }
-        return try await tool.execute(toolCallId: call.id, args: call.arguments)
-      } catch {
-        return makeToolErrorResult(call: call, errorDescription: "\(error)")
-      }
-    }
-  }
-
-  func blockedToolResult(for call: ToolCall) -> ToolResult {
-    makeToolErrorResult(call: call, errorDescription: "\(ToolCallRepetitionError.blocked)")
-  }
-
-  func appendText(_ text: String, to result: AgentToolResult) -> AgentToolResult {
-    var copy = result
-    copy.content.append(.text(text))
-    return copy
-  }
 
   func persistToolResult(_ result: ToolResult, for call: ToolCall, state: inout State) {
     let now = Date()
@@ -537,29 +294,6 @@ struct WuhuSessionBehavior: AgentBehavior {
     case .idle:
       false
     }
-  }
-
-  func needsInference(state: State) -> Bool {
-    for entry in state.entries.reversed() {
-      switch entry.payload {
-      case let .message(message):
-        switch message {
-        case .toolResult:
-          return true
-        case .user:
-          return true
-        case .assistant:
-          return false
-        case .customMessage:
-          continue
-        case .unknown:
-          continue
-        }
-      default:
-        continue
-      }
-    }
-    return false
   }
 
   private func makeToolErrorResult(call _: ToolCall, errorDescription: String) -> ToolResult {
@@ -1194,10 +928,6 @@ struct WuhuSessionBehavior: AgentBehavior {
           id: session.model,
         ),
       ),
-      status: .init(status: .idle),
-      systemUrgent: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      steer: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
-      followUp: .init(cursor: .init(rawValue: "0"), pending: [], journal: []),
     )
   }
 

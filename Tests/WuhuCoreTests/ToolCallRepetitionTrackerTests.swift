@@ -1,3 +1,4 @@
+import AgentLoopModule
 import Foundation
 import Testing
 @testable import WuhuCore
