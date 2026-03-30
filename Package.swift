@@ -11,15 +11,15 @@ let package = Package(
     .library(name: "AgentLoopModule", targets: ["AgentLoopModule"]),
     .library(name: "FoundationTools", targets: ["FoundationTools"]),
     .library(name: "SessionAgentModule", targets: ["SessionAgentModule"]),
-    .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
-    .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
-    .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
-    .library(name: "WuhuCore", targets: ["WuhuCore"]),
-    .library(name: "WuhuClient", targets: ["WuhuClient"]),
-    .library(name: "WuhuServer", targets: ["WuhuServer"]),
-    .library(name: "WuhuRunner", targets: ["WuhuRunner"]),
-    .executable(name: "wuhu", targets: ["wuhu"]),
-    .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
+//    .library(name: "WuhuAPI", targets: ["WuhuAPI"]),
+//    .library(name: "WuhuCLIKit", targets: ["WuhuCLIKit"]),
+//    .library(name: "WuhuCoreClient", targets: ["WuhuCoreClient"]),
+//    .library(name: "WuhuCore", targets: ["WuhuCore"]),
+//    .library(name: "WuhuClient", targets: ["WuhuClient"]),
+//    .library(name: "WuhuServer", targets: ["WuhuServer"]),
+//    .library(name: "WuhuRunner", targets: ["WuhuRunner"]),
+//    .executable(name: "wuhu", targets: ["wuhu"]),
+//    .executable(name: "wuhu-bench-find", targets: ["WuhuBenchFind"]),
   ],
   dependencies: [
     .package(url: "https://github.com/wuhu-labs/wuhu-ai.git", exact: "0.5.2"),
@@ -44,32 +44,32 @@ let package = Package(
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
   ],
   targets: [
-    .target(
-      name: "WuhuAPI",
-      dependencies: [
-        .product(name: "WuhuAI", package: "wuhu-ai"),
-        .product(name: "WorkspaceContracts", package: "wuhu-workspace-engine"),
-      ],
-    ),
-    .target(
-      name: "WuhuCLIKit",
-      dependencies: [
-        .product(name: "WuhuAI", package: "wuhu-ai"),
-        "WuhuAPI",
-        .product(name: "ArgumentParser", package: "swift-argument-parser"),
-      ],
-    ),
-    .target(
-      name: "WuhuCoreClient",
-      dependencies: [
-        "WuhuAPI",
-        .product(name: "WuhuAI", package: "wuhu-ai"),
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
-        .product(name: "AsyncHTTPClient", package: "async-http-client"),
-      ],
-    ),
+//    .target(
+//      name: "WuhuAPI",
+//      dependencies: [
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//        .product(name: "WorkspaceContracts", package: "wuhu-workspace-engine"),
+//      ],
+//    ),
+//    .target(
+//      name: "WuhuCLIKit",
+//      dependencies: [
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//        "WuhuAPI",
+//        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+//      ],
+//    ),
+//    .target(
+//      name: "WuhuCoreClient",
+//      dependencies: [
+//        "WuhuAPI",
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
+//        .product(name: "AsyncHTTPClient", package: "async-http-client"),
+//      ],
+//    ),
     .target(
       name: "AgentLoopModule",
       dependencies: [
@@ -100,77 +100,84 @@ let package = Package(
         .product(name: "WuhuAI", package: "wuhu-ai"),
       ],
     ),
-    .target(
-      name: "WuhuCore",
+//    .target(
+//      name: "WuhuCore",
+//      dependencies: [
+//        "AgentLoopModule",
+//        "WuhuCoreClient",
+//        "WuhuAPI",
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//        .product(name: "AsyncHTTPClient", package: "async-http-client"),
+//        .product(name: "GRDB", package: "GRDB.swift"),
+//        .product(name: "Crypto", package: "swift-crypto"),
+//        .product(name: "Dependencies", package: "swift-dependencies"),
+//        .product(name: "DependenciesMacros", package: "swift-dependencies"),
+//        .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
+//        .product(name: "AsyncExtensions", package: "AsyncExtensions"),
+//        .product(name: "Tracing", package: "swift-distributed-tracing"),
+//      ],
+//    ),
+//    .target(
+//      name: "WuhuClient",
+//      dependencies: [
+//        "WuhuAPI",
+//        "WuhuCoreClient",
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//      ],
+//    ),
+//    .target(
+//      name: "WuhuServer",
+//      dependencies: [
+//        "WuhuCore",
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "Hummingbird", package: "hummingbird"),
+//        .product(name: "Yams", package: "Yams"),
+//        .product(name: "Dependencies", package: "swift-dependencies"),
+//        .product(name: "OTel", package: "swift-otel"),
+//        .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
+//        .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
+//      ],
+//    ),
+//    .target(
+//      name: "WuhuRunner",
+//      dependencies: [
+//        "WuhuCore",
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "Serve", package: "wuhu-serve"),
+//        .product(name: "ServeNIO", package: "wuhu-serve"),
+//        .product(name: "ServeRouting", package: "wuhu-serve"),
+//        .product(name: "Yams", package: "Yams"),
+//      ],
+//    ),
+//    .executableTarget(
+//      name: "wuhu",
+//      dependencies: [
+//        "WuhuClient",
+//        "WuhuCLIKit",
+//        "WuhuServer",
+//        "WuhuRunner",
+//        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//        .product(name: "Yams", package: "Yams"),
+//      ],
+//    ),
+//    .executableTarget(
+//      name: "WuhuBenchFind",
+//      dependencies: [
+//        "WuhuCore",
+//        .product(name: "WuhuAI", package: "wuhu-ai"),
+//      ],
+//    ),
+    .testTarget(
+      name: "FoundationToolTests",
       dependencies: [
-        "AgentLoopModule",
-        "WuhuCoreClient",
-        "WuhuAPI",
-        .product(name: "WuhuAI", package: "wuhu-ai"),
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-        .product(name: "AsyncHTTPClient", package: "async-http-client"),
-        .product(name: "GRDB", package: "GRDB.swift"),
-        .product(name: "Crypto", package: "swift-crypto"),
-        .product(name: "Dependencies", package: "swift-dependencies"),
-        .product(name: "DependenciesMacros", package: "swift-dependencies"),
-        .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
-        .product(name: "AsyncExtensions", package: "AsyncExtensions"),
-        .product(name: "Tracing", package: "swift-distributed-tracing"),
-      ],
-    ),
-    .target(
-      name: "WuhuClient",
-      dependencies: [
-        "WuhuAPI",
-        "WuhuCoreClient",
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-      ],
-    ),
-    .target(
-      name: "WuhuServer",
-      dependencies: [
-        "WuhuCore",
-        .product(name: "WuhuAI", package: "wuhu-ai"),
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "Hummingbird", package: "hummingbird"),
-        .product(name: "Yams", package: "Yams"),
-        .product(name: "Dependencies", package: "swift-dependencies"),
-        .product(name: "OTel", package: "swift-otel"),
-        .product(name: "WorkspaceEngine", package: "wuhu-workspace-engine"),
-        .product(name: "WorkspaceScanner", package: "wuhu-workspace-engine"),
-      ],
-    ),
-    .target(
-      name: "WuhuRunner",
-      dependencies: [
-        "WuhuCore",
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "Serve", package: "wuhu-serve"),
-        .product(name: "ServeNIO", package: "wuhu-serve"),
-        .product(name: "ServeRouting", package: "wuhu-serve"),
-        .product(name: "Yams", package: "Yams"),
-      ],
-    ),
-    .executableTarget(
-      name: "wuhu",
-      dependencies: [
-        "WuhuClient",
-        "WuhuCLIKit",
-        "WuhuServer",
-        "WuhuRunner",
-        .product(name: "ArgumentParser", package: "swift-argument-parser"),
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-        .product(name: "Yams", package: "Yams"),
-      ],
-    ),
-    .executableTarget(
-      name: "WuhuBenchFind",
-      dependencies: [
-        "WuhuCore",
-        .product(name: "WuhuAI", package: "wuhu-ai"),
+        "FoundationTools",
+        .product(name: "DependenciesTestSupport", package: "swift-dependencies"),
       ],
     ),
     .testTarget(
@@ -185,50 +192,50 @@ let package = Package(
         "SessionAgentModule",
       ],
     ),
-    .testTarget(
-      name: "WuhuCoreTests",
-      dependencies: [
-        "WuhuCore",
-        "WuhuCoreClient",
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-        .product(name: "Dependencies", package: "swift-dependencies"),
-      ],
-    ),
-    .testTarget(
-      name: "WuhuClientTests",
-      dependencies: [
-        "WuhuClient",
-        .product(name: "Fetch", package: "wuhu-fetch"),
-        .product(name: "FetchSSE", package: "wuhu-fetch"),
-      ],
-    ),
-    .testTarget(
-      name: "WuhuServerTests",
-      dependencies: [
-        "WuhuServer",
-      ],
-    ),
-    .testTarget(
-      name: "WuhuRunnerTests",
-      dependencies: [
-        "WuhuRunner",
-        "WuhuCore",
-        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
-        .product(name: "ServeTesting", package: "wuhu-serve"),
-      ],
-    ),
-    .testTarget(
-      name: "WuhuCLITests",
-      dependencies: [
-        "wuhu",
-      ],
-    ),
-    .testTarget(
-      name: "WuhuAPITests",
-      dependencies: [
-        "WuhuAPI",
-      ],
-    ),
+//    .testTarget(
+//      name: "WuhuCoreTests",
+//      dependencies: [
+//        "WuhuCore",
+//        "WuhuCoreClient",
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//        .product(name: "Dependencies", package: "swift-dependencies"),
+//      ],
+//    ),
+//    .testTarget(
+//      name: "WuhuClientTests",
+//      dependencies: [
+//        "WuhuClient",
+//        .product(name: "Fetch", package: "wuhu-fetch"),
+//        .product(name: "FetchSSE", package: "wuhu-fetch"),
+//      ],
+//    ),
+//    .testTarget(
+//      name: "WuhuServerTests",
+//      dependencies: [
+//        "WuhuServer",
+//      ],
+//    ),
+//    .testTarget(
+//      name: "WuhuRunnerTests",
+//      dependencies: [
+//        "WuhuRunner",
+//        "WuhuCore",
+//        .product(name: "FetchAsyncHTTPClient", package: "wuhu-fetch"),
+//        .product(name: "ServeTesting", package: "wuhu-serve"),
+//      ],
+//    ),
+//    .testTarget(
+//      name: "WuhuCLITests",
+//      dependencies: [
+//        "wuhu",
+//      ],
+//    ),
+//    .testTarget(
+//      name: "WuhuAPITests",
+//      dependencies: [
+//        "WuhuAPI",
+//      ],
+//    ),
   ],
 )

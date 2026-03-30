@@ -262,7 +262,7 @@ public extension FileIO {
 
 // MARK: - Errors
 
-public enum FileStoreError: Error, Sendable, CustomStringConvertible {
+public enum FileStoreError: Equatable, Error, Sendable, CustomStringConvertible {
   case fileNotFound(String)
   case directoryNotFound(String)
   case notAFile(String)
