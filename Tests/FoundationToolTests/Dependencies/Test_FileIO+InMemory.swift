@@ -4,15 +4,17 @@ import Testing
 
 @testable import FoundationTools
 
-@Suite
+private let fixedDate = Date(timeIntervalSince1970: 1000)
+
+@Suite(
+  .dependencies {
+    $0.date = .constant(fixedDate)
+  }
+)
 struct InMemoryFileStoreTests {
   // MARK: - Basic file operations
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func writeAndRead() async throws {
     let store = InMemoryFileStore()
     let data = Data("hello".utf8)
@@ -23,11 +25,7 @@ struct InMemoryFileStoreTests {
     #expect(read == data)
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func readNonexistent() async throws {
     let store = InMemoryFileStore()
 
@@ -36,11 +34,7 @@ struct InMemoryFileStoreTests {
     }
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func overwriteFile() async throws {
     let store = InMemoryFileStore()
 
@@ -53,11 +47,7 @@ struct InMemoryFileStoreTests {
 
   // MARK: - Stat
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func statFile() async throws {
     let store = InMemoryFileStore()
     let data = Data("hello".utf8)
@@ -67,14 +57,10 @@ struct InMemoryFileStoreTests {
 
     #expect(stat.type == .file)
     #expect(stat.size == 5)
-    #expect(stat.modificationDate == Date(timeIntervalSince1970: 1000))
+    #expect(stat.modificationDate == fixedDate)
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func statDirectory() async throws {
     let store = InMemoryFileStore()
 
@@ -82,13 +68,10 @@ struct InMemoryFileStoreTests {
     let stat = try await store.stat(path: "/dir")
 
     #expect(stat.type == .directory)
+    #expect(stat.modificationDate == fixedDate)
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func statSymlinkReturnsSymlinkType() async throws {
     let store = InMemoryFileStore()
 
@@ -98,15 +81,12 @@ struct InMemoryFileStoreTests {
     // stat uses followSymlinks: false, so should report .symlink
     let stat = try await store.stat(path: "/link")
     #expect(stat.type == .symlink)
+    #expect(stat.modificationDate == fixedDate)
   }
 
   // MARK: - Mkdir
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func mkdirCreatesIntermediateDirectories() async throws {
     let store = InMemoryFileStore()
 
@@ -119,11 +99,7 @@ struct InMemoryFileStoreTests {
     #expect(statB.type == .directory)
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func mkdirIdempotent() async throws {
     let store = InMemoryFileStore()
 
@@ -131,11 +107,7 @@ struct InMemoryFileStoreTests {
     try await store.mkdir(path: "/dir") // should not throw
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func writeCreatesParentDirectories() async throws {
     let store = InMemoryFileStore()
 
@@ -147,11 +119,7 @@ struct InMemoryFileStoreTests {
 
   // MARK: - List
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func listDirectory() async throws {
     let store = InMemoryFileStore()
 
@@ -165,11 +133,7 @@ struct InMemoryFileStoreTests {
     #expect(names == ["a.txt", "b.txt", "sub"])
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func listNonDirectory() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/file.txt", data: Data())
@@ -181,11 +145,7 @@ struct InMemoryFileStoreTests {
 
   // MARK: - Delete
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func deleteFile() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/file.txt", data: Data("x".utf8))
@@ -197,11 +157,7 @@ struct InMemoryFileStoreTests {
     }
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func deleteDirectory() async throws {
     let store = InMemoryFileStore()
     try await store.mkdir(path: "/dir/sub")
@@ -214,11 +170,7 @@ struct InMemoryFileStoreTests {
     }
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func cannotDeleteRoot() async throws {
     let store = InMemoryFileStore()
 
@@ -229,11 +181,7 @@ struct InMemoryFileStoreTests {
 
   // MARK: - Symlinks
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func readThroughSymlink() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/real.txt", data: Data("content".utf8))
@@ -243,11 +191,7 @@ struct InMemoryFileStoreTests {
     #expect(read == Data("content".utf8))
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func symlinkRelativeResolution() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/a/target.txt", data: Data("found".utf8))
@@ -260,11 +204,7 @@ struct InMemoryFileStoreTests {
     #expect(read == Data("found".utf8))
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func listThroughSymlinkedDirectory() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/real/file.txt", data: Data("x".utf8))
@@ -276,11 +216,7 @@ struct InMemoryFileStoreTests {
     #expect(entries.map(\.name) == ["file.txt"])
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func deleteSymlinkDoesNotDeleteTarget() async throws {
     let store = InMemoryFileStore()
     try await store.write(path: "/target.txt", data: Data("keep".utf8))
@@ -300,11 +236,7 @@ struct InMemoryFileStoreTests {
 
   // MARK: - Error cases
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func writeOverDirectoryFails() async throws {
     let store = InMemoryFileStore()
     try await store.mkdir(path: "/dir")
@@ -314,11 +246,7 @@ struct InMemoryFileStoreTests {
     }
   }
 
-  @Test(
-    .dependencies {
-      $0.date = .constant(Date(timeIntervalSince1970: 1000))
-    }
-  )
+  @Test
   func readDirectoryFails() async throws {
     let store = InMemoryFileStore()
     try await store.mkdir(path: "/dir")
