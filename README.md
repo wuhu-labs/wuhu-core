@@ -1,3 +1,5 @@
+> **Archived.** This is an earlier architecture of Wuhu, no longer developed. The current space server and CLI are at [wuhu-labs/wuhu](https://github.com/wuhu-labs/wuhu).
+
 # wuhu-core
 
 Wuhu core: agent runtime, session model, server, runner, and CLI.
